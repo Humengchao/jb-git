@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { discoverRepositories, GitRepository } from "./git/repository";
+import { discoverRepositories, discoverRepository, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
 import { GitBlameEntry, GitBranch, GitCommitOptions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
@@ -68,14 +68,13 @@ export class RepositoryManager implements vscode.Disposable {
     return this.snapshots.get(rootPath);
   }
 
-  public async initializeRepository(rootPath: string): Promise<void> {
-    const repository = this.repository(rootPath);
-    if (repository) {
-      await repository.init();
-    } else {
-      await this.runner.run(["init"], { cwd: rootPath });
-    }
+  public async initializeRepository(rootPath: string): Promise<boolean> {
+    // Ask Git directly so symlinked/canonical path aliases cannot bypass this guard.
+    const containing = await discoverRepository(rootPath, this.runner);
+    if (containing) return false;
+    await this.runner.run(["init"], { cwd: rootPath });
     await this.discoverAndRefresh();
+    return true;
   }
 
   public async stage(rootPath: string, paths: readonly string[]): Promise<void> {

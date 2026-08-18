@@ -1,0 +1,41 @@
+const assert = require("node:assert/strict");
+const { readFile } = require("node:fs/promises");
+const { access, mkdir, mkdtemp } = require("node:fs/promises");
+const { execFileSync } = require("node:child_process");
+const { tmpdir } = require("node:os");
+const path = require("node:path");
+const vscode = require("vscode");
+
+async function run() {
+  const extension = vscode.extensions.getExtension("local.jb-git");
+  assert.ok(extension, "the development extension should be discoverable");
+  await extension.activate();
+  assert.equal(extension.isActive, true, "the extension should activate without throwing");
+
+  const manifest = JSON.parse(await readFile(path.join(extension.extensionPath, "package.json"), "utf8"));
+  const declared = manifest.contributes.commands.map((item) => item.command);
+  const registered = new Set(await vscode.commands.getCommands(true));
+  const missing = declared.filter((command) => !registered.has(command));
+  assert.deepEqual(missing, [], `all contributed commands must be registered: ${missing.join(", ")}`);
+
+  const branchMenus = manifest.contributes.menus["view/item/context"]
+    .filter((item) => ["jbGit.renameBranch", "jbGit.deleteBranch"].includes(item.command));
+  assert.ok(branchMenus.every((item) => item.when.includes("jbGit.branch.local")), "branch mutations must only target local branches");
+
+  const parent = await mkdtemp(path.join(tmpdir(), "jb-git-nested-init-"));
+  execFileSync("git", ["init", "-q"], { cwd: parent });
+  const child = path.join(parent, "workspace-child");
+  await mkdir(child);
+  const { RepositoryManager } = require(path.join(extension.extensionPath, "dist", "repositoryManager.js"));
+  const { GitRunner } = require(path.join(extension.extensionPath, "dist", "git", "runner.js"));
+  const manager = new RepositoryManager(new GitRunner(), () => [child]);
+  try {
+    await manager.discoverAndRefresh();
+    assert.equal(await manager.initializeRepository(child), false, "initialization inside a parent repository should be a no-op");
+    await assert.rejects(access(path.join(child, ".git")), "a nested .git directory must not be created");
+  } finally {
+    manager.dispose();
+  }
+}
+
+module.exports = { run };

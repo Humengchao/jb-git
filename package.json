@@ -27,12 +27,16 @@
   "scripts": {
     "compile": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
-    "test": "npm run compile && node --test test/*.test.mjs",
-    "package": "npm run compile && npx @vscode/vsce package"
+    "test": "npm run test:unit && npm run test:extension",
+    "test:unit": "npm run compile && node --test test/*.test.mjs",
+    "test:extension": "npm run compile && node test/run-extension-tests.mjs",
+    "package": "npm run compile && vsce package --allow-missing-repository"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.95.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.8.0"
   },
   "contributes": {

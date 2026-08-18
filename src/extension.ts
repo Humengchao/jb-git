@@ -47,6 +47,19 @@ async function runWithNotification<T>(title: string, task: () => Promise<T>): Pr
   }
 }
 
+async function runWithNotificationResult(title: string, task: () => Promise<void>): Promise<boolean> {
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title, cancellable: false },
+      task,
+    );
+    return true;
+  } catch (error) {
+    await vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const runner = new GitRunner(configurationGitPath());
   const manager = new RepositoryManager(runner, workspacePaths);
@@ -73,6 +86,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const stashesView = vscode.window.createTreeView("jbGit.stashes", { treeDataProvider: stashes, showCollapseAll: true });
   const submodulesView = vscode.window.createTreeView("jbGit.submodules", { treeDataProvider: submodules, showCollapseAll: true });
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
+  const outputChannel = vscode.window.createOutputChannel("JB Git");
+  const showOutput = (title: string, content: string): void => {
+    outputChannel.clear();
+    outputChannel.appendLine(`# ${title}`);
+    outputChannel.appendLine("");
+    outputChannel.append(content);
+    outputChannel.show(true);
+  };
   branchStatus.command = "jbGit.openChanges";
   branchStatus.tooltip = "Open JB Git Local Changes";
 
@@ -154,6 +175,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     { dispose: () => { if (refreshTimer) clearTimeout(refreshTimer); } },
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
+    outputChannel,
     manager.onDidChange(updateStatusBar),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh()),
     vscode.workspace.onDidSaveTextDocument((document) => scheduleRefreshForPath(document.uri.fsPath)),
@@ -179,9 +201,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
       const commits = await runWithNotification(`Loading history for ${relativePath}`, () => snapshot.repository.log(100, relativePath));
       if (!commits) return;
-      const channel = vscode.window.createOutputChannel(`JB Git · File History · ${path.basename(filePath)}`);
-      channel.append(commits.map((commit) => `${commit.hash.slice(0, 12)}  ${commit.authoredAt.slice(0, 10)}  ${commit.author}  ${commit.subject}`).join("\n"));
-      channel.show(true);
+      showOutput(`File History · ${relativePath}`, commits.map((commit) => `${commit.hash.slice(0, 12)}  ${commit.authoredAt.slice(0, 10)}  ${commit.author}  ${commit.subject}`).join("\n"));
     }),
     vscode.commands.registerCommand("jbGit.showCommit", async (node?: CommitNode) => {
       if (!node) return;
@@ -189,9 +209,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!snapshot) return;
       const output = await runWithNotification(`Loading commit ${node.commit.hash.slice(0, 12)}`, () => snapshot.repository.showCommit(node.commit.hash));
       if (output === undefined) return;
-      const channel = vscode.window.createOutputChannel(`JB Git · ${node.commit.hash.slice(0, 12)}`);
-      channel.append(output);
-      channel.show(true);
+      showOutput(`Commit ${node.commit.hash.slice(0, 12)}`, output);
     }),
     vscode.commands.registerCommand("jbGit.blame", async () => {
       if (!(await requireTrustedWorkspace())) return;
@@ -209,9 +227,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
       const entries = await runWithNotification(`Blaming ${relativePath}`, () => manager.blame(snapshot.repository.info.rootPath, relativePath));
       if (!entries) return;
-      const channel = vscode.window.createOutputChannel(`JB Git · Blame · ${path.basename(filePath)}`);
-      channel.append(entries.map((entry) => `${String(entry.finalLine).padStart(5)} ${entry.hash.slice(0, 12)} ${entry.author} ${entry.authorTime.slice(0, 10)}  ${entry.content}`).join("\n"));
-      channel.show(true);
+      showOutput(`Blame · ${relativePath}`, entries.map((entry) => `${String(entry.finalLine).padStart(5)} ${entry.hash.slice(0, 12)} ${entry.author} ${entry.authorTime.slice(0, 10)}  ${entry.content}`).join("\n"));
     }),
     vscode.commands.registerCommand("jbGit.initializeRepository", async () => {
       if (!(await requireTrustedWorkspace())) return;
@@ -220,7 +236,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.window.showInformationMessage("Open a folder before initializing a Git repository.");
         return;
       }
-      await runWithNotification("Initializing Git repository", () => manager.initializeRepository(root));
+      const initialized = await runWithNotification("Initializing Git repository", () => manager.initializeRepository(root));
+      if (initialized === false) await vscode.window.showInformationMessage("This folder is already inside a Git repository; no nested repository was created.");
     }),
     vscode.commands.registerCommand("jbGit.cloneRepository", async () => {
       if (!(await requireTrustedWorkspace())) return;
@@ -234,8 +251,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       if (!mode) return;
       const cloneRoot = workspacePaths()[0] ?? ".";
-      await runWithNotification(`Cloning ${source.trim()}`, () => manager.clone(source.trim(), destination.trim(), mode.bare));
-      if (!mode.bare) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(path.resolve(cloneRoot, destination.trim())), { forceNewWindow: false });
+      const cloned = await runWithNotificationResult(`Cloning ${source.trim()}`, () => manager.clone(source.trim(), destination.trim(), mode.bare));
+      if (cloned && !mode.bare) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(path.resolve(cloneRoot, destination.trim())), { forceNewWindow: false });
     }),
     vscode.commands.registerCommand("jbGit.fetch", async () => {
       if (!(await requireTrustedWorkspace())) return;
@@ -515,7 +532,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await changelistStore.assign(node.repositoryRoot, node.change.path, target.list.id);
     }),
     vscode.commands.registerCommand("jbGit.commitChangelist", async (node?: ChangelistNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      node ??= changelistsView.selection.find((item): item is ChangelistNode => item instanceof ChangelistNode);
+      if (!node) {
+        const choice = await vscode.window.showQuickPick(
+          manager.all.flatMap((snapshot) => changelistStore.lists(snapshot.repository.info.rootPath).map((changelist) => ({
+            label: changelist.name,
+            description: snapshot.repository.info.rootPath,
+            repositoryRoot: snapshot.repository.info.rootPath,
+            changelist,
+          }))),
+          { placeHolder: "Select a Changelist to commit" },
+        );
+        if (!choice) return;
+        node = new ChangelistNode(choice.repositoryRoot, choice.changelist, choice.changelist.id === changelistStore.activeId(choice.repositoryRoot));
+      }
       const snapshot = manager.snapshot(node.repositoryRoot);
       if (!snapshot?.status) return;
       const selected = new Set(snapshot.status.changes
