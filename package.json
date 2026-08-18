@@ -242,6 +242,22 @@
         "title": "JB Git: Fetch All Remotes"
       },
       {
+        "command": "jbGit.applyPatch",
+        "title": "JB Git: Apply Patch"
+      },
+      {
+        "command": "jbGit.sparseCheckoutSet",
+        "title": "JB Git: Configure Sparse Checkout"
+      },
+      {
+        "command": "jbGit.sparseCheckoutDisable",
+        "title": "JB Git: Disable Sparse Checkout"
+      },
+      {
+        "command": "jbGit.lfsPull",
+        "title": "JB Git: Pull LFS Objects"
+      },
+      {
         "command": "jbGit.checkoutBranch",
         "title": "JB Git: Checkout Branch"
       },
@@ -375,6 +391,26 @@
           "command": "jbGit.pull",
           "when": "view == jbGit.repositories",
           "group": "navigation@4"
+        },
+        {
+          "command": "jbGit.sparseCheckoutSet",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@5"
+        },
+        {
+          "command": "jbGit.sparseCheckoutDisable",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@6"
+        },
+        {
+          "command": "jbGit.lfsPull",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@7"
+        },
+        {
+          "command": "jbGit.applyPatch",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@8"
         },
         {
           "command": "jbGit.showHistory",

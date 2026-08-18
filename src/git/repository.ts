@@ -190,6 +190,22 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["apply", "--3way", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath }));
   }
 
+  public async cleanUntracked(paths: readonly string[]): Promise<void> {
+    await this.serial(() => this.runner.run(["clean", "-f", "--", ...paths], { cwd: this.info.rootPath }));
+  }
+
+  public async sparseCheckoutSet(paths: readonly string[], cone = true): Promise<void> {
+    await this.serial(() => this.runner.run(["sparse-checkout", "set", ...(cone ? ["--cone"] : []), "--", ...paths], { cwd: this.info.rootPath }));
+  }
+
+  public async sparseCheckoutDisable(): Promise<void> {
+    await this.serial(() => this.runner.run(["sparse-checkout", "disable"], { cwd: this.info.rootPath }));
+  }
+
+  public async lfsPull(): Promise<void> {
+    await this.serial(() => this.runner.run(["lfs", "pull"], { cwd: this.info.rootPath }));
+  }
+
   public async branches(signal?: AbortSignal): Promise<GitBranch[]> {
     const output = await this.runner.text(
       [

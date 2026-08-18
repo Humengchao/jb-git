@@ -110,6 +110,31 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
+  public async cleanUntracked(rootPath: string, paths: readonly string[]): Promise<void> {
+    await this.requireRepository(rootPath).cleanUntracked(paths);
+    await this.refresh(rootPath);
+  }
+
+  public async applyPatch(rootPath: string, patchFile: string): Promise<void> {
+    await this.requireRepository(rootPath).applyPatchFile(patchFile);
+    await this.refresh(rootPath);
+  }
+
+  public async sparseCheckoutSet(rootPath: string, paths: readonly string[], cone = true): Promise<void> {
+    await this.requireRepository(rootPath).sparseCheckoutSet(paths, cone);
+    await this.refresh(rootPath);
+  }
+
+  public async sparseCheckoutDisable(rootPath: string): Promise<void> {
+    await this.requireRepository(rootPath).sparseCheckoutDisable();
+    await this.refresh(rootPath);
+  }
+
+  public async lfsPull(rootPath: string): Promise<void> {
+    await this.requireRepository(rootPath).lfsPull();
+    await this.refresh(rootPath);
+  }
+
   public async resolveConflict(rootPath: string, pathSpec: string, side: "ours" | "theirs"): Promise<void> {
     await this.requireRepository(rootPath).resolveConflict(pathSpec, side);
     await this.refresh(rootPath);

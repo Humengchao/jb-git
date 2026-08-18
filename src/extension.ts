@@ -210,6 +210,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       await runWithNotification("Fetching Git remotes", () => manager.fetch());
     }),
+    vscode.commands.registerCommand("jbGit.applyPatch", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const files = await vscode.window.showOpenDialog({ canSelectMany: false, canSelectFiles: true, canSelectFolders: false, openLabel: "Apply Patch" });
+      const patchFile = files?.[0];
+      if (!patchFile) return;
+      await runWithNotification(`Applying ${path.basename(patchFile.fsPath)}`, () => manager.applyPatch(first.repository.info.rootPath, patchFile.fsPath));
+    }),
+    vscode.commands.registerCommand("jbGit.sparseCheckoutSet", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const input = await vscode.window.showInputBox({ prompt: "Sparse-checkout paths (comma-separated)", placeHolder: "src,docs" });
+      if (!input?.trim()) return;
+      const paths = input.split(",").map((item) => item.trim()).filter(Boolean);
+      await runWithNotification("Configuring sparse checkout", () => manager.sparseCheckoutSet(first.repository.info.rootPath, paths));
+    }),
+    vscode.commands.registerCommand("jbGit.sparseCheckoutDisable", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const answer = await vscode.window.showWarningMessage("Disable sparse checkout and restore all files?", { modal: true }, "Disable");
+      if (answer !== "Disable") return;
+      await runWithNotification("Disabling sparse checkout", () => manager.sparseCheckoutDisable(first.repository.info.rootPath));
+    }),
+    vscode.commands.registerCommand("jbGit.lfsPull", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      await runWithNotification("Pulling Git LFS objects", () => manager.lfsPull(first.repository.info.rootPath));
+    }),
     vscode.commands.registerCommand("jbGit.commit", async () => {
       if (!(await requireTrustedWorkspace())) return;
       const first = manager.all[0];
@@ -672,7 +704,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.discardChange", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;
       if (node.change.kind === "untracked") {
-        await vscode.window.showInformationMessage("Discarding untracked files is not enabled in this milestone.");
+        const answer = await vscode.window.showWarningMessage(`Delete untracked file ${node.change.path}?`, { modal: true }, "Delete");
+        if (answer !== "Delete") return;
+        await runWithNotification(`Deleting ${node.change.path}`, () => manager.cleanUntracked(node.repositoryRoot, [node.change.path]));
         return;
       }
       const confirmDiscard = vscode.workspace.getConfiguration("jbGit").get<boolean>("confirmDiscard", true);
