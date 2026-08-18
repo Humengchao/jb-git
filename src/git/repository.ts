@@ -141,7 +141,8 @@ export class GitRepository {
   }
 
   public async patch(paths: readonly string[]): Promise<string> {
-    return this.runner.text(["diff", "--binary", "--no-ext-diff", "HEAD", "--", ...paths], { cwd: this.info.rootPath });
+    const base = (await this.currentRevision()) ?? await this.emptyTree();
+    return this.runner.text(["diff", "--binary", "--no-ext-diff", base, "--", ...paths], { cwd: this.info.rootPath });
   }
 
   public async diffHunks(pathSpec: string, staged = false): Promise<GitDiffHunk[]> {
@@ -196,10 +197,13 @@ export class GitRepository {
 
   /** Removes tracked paths from both index and worktree after their patch has been persisted. */
   public async shelveTrackedPaths(paths: readonly string[]): Promise<void> {
-    await this.serial(() => this.runner.run(
-      ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...paths],
-      { cwd: this.info.rootPath },
-    ));
+    await this.serial(async () => {
+      const source = (await this.currentRevision()) ?? await this.emptyTree();
+      await this.runner.run(
+        ["restore", `--source=${source}`, "--staged", "--worktree", "--", ...paths],
+        { cwd: this.info.rootPath },
+      );
+    });
   }
 
   public async cleanUntracked(paths: readonly string[]): Promise<void> {
@@ -419,7 +423,10 @@ export class GitRepository {
   }
 
   public async reset(ref: string, mode: "soft" | "mixed" | "hard"): Promise<void> {
-    await this.serial(() => this.runner.run(["reset", `--${mode}`, ref], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      const revision = await this.resolveCommit(ref);
+      await this.runner.run(["reset", `--${mode}`, revision], { cwd: this.info.rootPath });
+    });
   }
 
   public async continueOperation(kind: Exclude<import("./types").GitOperationKind, "none" | "bisect" | "sequencer">): Promise<void> {
@@ -479,6 +486,10 @@ export class GitRepository {
       if (status.changes.some((change) => change.staged && !selected.has(change.path))) {
         throw new Error("Cannot commit selected paths while unrelated staged changes exist.");
       }
+      const pathSpecs = [...new Set(status.changes
+        .filter((change) => selected.has(change.path))
+        .flatMap((change) => [change.path, ...(change.originalPath ? [change.originalPath] : [])]))];
+      if (pathSpecs.length === 0) throw new Error("The selected paths no longer have local changes.");
       const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "jb-git-index-"));
       const temporaryIndex = path.join(temporaryDirectory, "index");
       const environment = { GIT_INDEX_FILE: temporaryIndex };
@@ -488,7 +499,7 @@ export class GitRepository {
           cwd: this.info.rootPath,
           env: environment,
         });
-        await this.runner.run(["add", "--", ...paths], { cwd: this.info.rootPath, env: environment });
+        await this.runner.run(["add", "-A", "--", ...pathSpecs], { cwd: this.info.rootPath, env: environment });
         const args = ["commit", "--file=-"];
         if (options.amend) args.push("--amend");
         if (options.signoff) args.push("--signoff");
@@ -613,6 +624,17 @@ export class GitRepository {
       if (error instanceof GitCommandError) return false;
       throw error;
     }
+  }
+
+  private async resolveCommit(ref: string): Promise<string> {
+    return trimOutput(await this.runner.text(
+      ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`],
+      { cwd: this.info.rootPath },
+    ));
+  }
+
+  private async emptyTree(): Promise<string> {
+    return trimOutput(await this.runner.text(["mktree"], { cwd: this.info.rootPath, input: "" }));
   }
 
   private async gitPath(relativePath: string): Promise<string> {

@@ -15,4 +15,5 @@ test("redacts credentials in Git arguments and output", () => {
   assert.equal(error.args.join(" ").includes(secret), false);
   assert.deepEqual(redactGitArgs(["--token=abc", "--password", "def"]), ["--token=***", "--password", "***"]);
   assert.equal(redactGitText("https://u:p@example.com/x"), "https://u:***@example.com/x");
+  assert.equal(redactGitText("https://pat-secret@example.com/x"), "https://***@example.com/x");
 });

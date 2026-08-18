@@ -19,6 +19,7 @@ const SENSITIVE_OPTION = /^(?:--?(?:password|passwd|token|access-token|auth|auth
 export function redactGitText(value: string): string {
   return value
     .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+@/gi, "$1***@")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+@/gi, "$1***@")
     .replace(/([?&](?:access_?token|auth|authorization|oauth_?token|password)=)[^&#\s]+/gi, "$1***")
     .replace(/((?:authorization|password|access[_-]?token|oauth[_-]?token)\s*[:=]\s*)(?!\*\*\*)[^\s,;]+/gi, "$1***");
 }

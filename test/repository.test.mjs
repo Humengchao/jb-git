@@ -179,6 +179,71 @@ test("commits selected paths with an isolated index", async () => {
   assert.equal(status.changes.some((change) => change.staged), false);
 });
 
+test("commits both sides of a selected rename", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-rename-commit-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "old.txt"), "content\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "initial");
+  git(root, "mv", "old.txt", "new.txt");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  await repository.commitPaths(["new.txt"], "rename file");
+  assert.deepEqual(git(root, "ls-tree", "--name-only", "HEAD").split("\n"), ["new.txt"]);
+  assert.equal((await repository.status()).changes.length, 0);
+});
+
+test("shelves renames and unborn tracked additions completely", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-shelf-edges-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "old.txt"), "content\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "initial");
+  git(root, "mv", "old.txt", "new.txt");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const renamePatch = join(mkdtempSync(join(tmpdir(), "jb-git-rename-patch-")), "rename.patch");
+  writeFileSync(renamePatch, await repository.patch(["old.txt", "new.txt"]));
+  await repository.shelveTrackedPaths(["old.txt", "new.txt"]);
+  assert.equal((await repository.status()).changes.length, 0);
+  await repository.applyPatchFile(renamePatch);
+  assert.equal(readFileSync(join(root, "new.txt"), "utf8"), "content\n");
+
+  const unborn = mkdtempSync(join(tmpdir(), "jb-git-unborn-shelf-"));
+  git(unborn, "init", "-q");
+  writeFileSync(join(unborn, "first.txt"), "first\n");
+  git(unborn, "add", "first.txt");
+  const unbornRepository = await discoverRepository(unborn, new GitRunner());
+  assert.ok(unbornRepository);
+  const unbornPatch = join(mkdtempSync(join(tmpdir(), "jb-git-unborn-patch-")), "unborn.patch");
+  writeFileSync(unbornPatch, await unbornRepository.patch(["first.txt"]));
+  await unbornRepository.shelveTrackedPaths(["first.txt"]);
+  assert.equal((await unbornRepository.status()).changes.length, 0);
+  await unbornRepository.applyPatchFile(unbornPatch);
+  assert.equal(readFileSync(join(unborn, "first.txt"), "utf8"), "first\n");
+});
+
+test("does not allow an option-like reset ref to override the selected mode", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-safe-reset-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), "base\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "file.txt"), "valuable work\n");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  await assert.rejects(repository.reset("--hard", "soft"));
+  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "valuable work\n");
+});
+
 test("detects an in-progress merge operation", async () => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-merge-state-"));
   git(root, "init", "-q");

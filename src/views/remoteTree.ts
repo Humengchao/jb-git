@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { GitRemote } from "../git/types";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
+import { redactGitText } from "../git/runner";
 
 export class RemoteRootNode extends vscode.TreeItem {
   public constructor(public readonly snapshot: RepositorySnapshot) {
@@ -14,8 +15,10 @@ export class RemoteRootNode extends vscode.TreeItem {
 export class RemoteNode extends vscode.TreeItem {
   public constructor(public readonly repositoryRoot: string, public readonly remote: GitRemote) {
     super(remote.name, vscode.TreeItemCollapsibleState.None);
-    this.description = remote.fetchUrl === remote.pushUrl ? remote.fetchUrl : `fetch ${remote.fetchUrl} · push ${remote.pushUrl}`;
-    this.tooltip = `Fetch: ${remote.fetchUrl}\nPush: ${remote.pushUrl}`;
+    const fetchUrl = redactGitText(remote.fetchUrl);
+    const pushUrl = redactGitText(remote.pushUrl);
+    this.description = fetchUrl === pushUrl ? fetchUrl : `fetch ${fetchUrl} · push ${pushUrl}`;
+    this.tooltip = `Fetch: ${fetchUrl}\nPush: ${pushUrl}`;
     this.contextValue = "jbGit.remote";
     this.iconPath = new vscode.ThemeIcon("cloud-upload");
     this.command = {

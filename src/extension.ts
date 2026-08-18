@@ -573,7 +573,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository();
       if (!first?.status) return;
-      const paths = first.status.changes.filter((change) => change.kind !== "untracked" && change.kind !== "ignored").map((change) => change.path);
+      const paths = [...new Set(first.status.changes
+        .filter((change) => change.kind !== "untracked" && change.kind !== "ignored")
+        .flatMap((change) => [change.path, ...(change.originalPath ? [change.originalPath] : [])]))];
       if (paths.length === 0) return void vscode.window.showInformationMessage("There are no tracked changes to shelf.");
       const name = await vscode.window.showInputBox({ prompt: "Shelf name", value: "Shelf" });
       if (!name?.trim()) return;
@@ -682,7 +684,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       if (!kind) return;
       const current = kind.push ? remote.pushUrl : remote.fetchUrl;
-      const url = await vscode.window.showInputBox({ prompt: `New ${kind.label.toLowerCase()} for ${remote.name}`, value: current });
+      const url = await vscode.window.showInputBox({
+        prompt: `New ${kind.label.toLowerCase()} for ${remote.name}`,
+        value: current,
+        password: /^[a-z][a-z0-9+.-]*:\/\/[^\s/]+@/i.test(current),
+      });
       if (!url?.trim()) return;
       await runWithNotification(`Updating remote ${remote.name}`, () => manager.setRemoteUrl(node?.repositoryRoot ?? first.repository.info.rootPath, remote.name, url.trim(), kind.push));
     }),
