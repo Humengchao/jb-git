@@ -110,6 +110,16 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
+  public async resolveConflict(rootPath: string, pathSpec: string, side: "ours" | "theirs"): Promise<void> {
+    await this.requireRepository(rootPath).resolveConflict(pathSpec, side);
+    await this.refresh(rootPath);
+  }
+
+  public async markResolved(rootPath: string, paths: readonly string[]): Promise<void> {
+    await this.requireRepository(rootPath).markResolved(paths);
+    await this.refresh(rootPath);
+  }
+
   public async fetch(rootPath?: string): Promise<void> {
     const targets = rootPath ? [this.requireRepository(rootPath)] : this.repositories;
     for (const repository of targets) await repository.fetch();

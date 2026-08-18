@@ -128,6 +128,9 @@ test("detects an in-progress merge operation", async () => {
   assert.equal(operation.kind, "merge");
   assert.equal(operation.canContinue, true);
   assert.equal(operation.canAbort, true);
+  await repository.resolveConflict("conflict.txt", "ours");
+  await repository.markResolved(["conflict.txt"]);
+  assert.equal((await repository.status()).changes.find((change) => change.path === "conflict.txt")?.conflicted ?? false, false);
   git(root, "merge", "--abort");
 });
 

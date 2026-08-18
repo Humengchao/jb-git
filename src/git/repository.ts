@@ -340,6 +340,14 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["restore", "--worktree", "--", ...paths], { cwd: this.info.rootPath }));
   }
 
+  public async resolveConflict(pathSpec: string, side: "ours" | "theirs"): Promise<void> {
+    await this.serial(() => this.runner.run(["checkout", `--${side}`, "--", pathSpec], { cwd: this.info.rootPath }));
+  }
+
+  public async markResolved(paths: readonly string[]): Promise<void> {
+    await this.stage(paths);
+  }
+
   public async fetch(): Promise<void> {
     await this.serial(() => this.runner.run(["fetch", "--all", "--prune"], { cwd: this.info.rootPath }));
   }

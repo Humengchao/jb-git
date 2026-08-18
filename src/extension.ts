@@ -633,6 +633,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       await runWithNotification(`Discarding ${node.change.path}`, () => manager.discard(node.repositoryRoot, [node.change.path]));
     }),
+    vscode.commands.registerCommand("jbGit.resolveConflict", async (node?: ChangeNode) => {
+      if (!(await requireTrustedWorkspace()) || !node || !node.change.conflicted) return;
+      const side = await vscode.window.showQuickPick(
+        [
+          { label: "Accept ours", value: "ours" as const, description: "Use the current branch version" },
+          { label: "Accept theirs", value: "theirs" as const, description: "Use the incoming branch version" },
+        ],
+        { placeHolder: `Resolve ${node.change.path}` },
+      );
+      if (!side) return;
+      const answer = await vscode.window.showWarningMessage(`Replace ${node.change.path} with ${side.label.toLowerCase()}?`, { modal: true }, "Resolve");
+      if (answer !== "Resolve") return;
+      await runWithNotification(`Resolving ${node.change.path}`, () => manager.resolveConflict(node.repositoryRoot, node.change.path, side.value));
+    }),
+    vscode.commands.registerCommand("jbGit.markResolved", async (node?: ChangeNode) => {
+      if (!(await requireTrustedWorkspace()) || !node || !node.change.conflicted) return;
+      await runWithNotification(`Marking ${node.change.path} resolved`, () => manager.markResolved(node.repositoryRoot, [node.change.path]));
+    }),
   );
 
   await refresh();

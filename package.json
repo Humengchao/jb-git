@@ -240,6 +240,14 @@
       {
         "command": "jbGit.discardChange",
         "title": "JB Git: Discard Change"
+      },
+      {
+        "command": "jbGit.resolveConflict",
+        "title": "JB Git: Resolve Conflict"
+      },
+      {
+        "command": "jbGit.markResolved",
+        "title": "JB Git: Mark Resolved"
       }
     ],
     "viewsContainers": {
@@ -429,6 +437,16 @@
         {
           "command": "jbGit.discardChange",
           "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
+          "group": "inline@2"
+        },
+        {
+          "command": "jbGit.resolveConflict",
+          "when": "view == jbGit.changes && viewItem == jbGit.change.conflicted",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.markResolved",
+          "when": "view == jbGit.changes && viewItem == jbGit.change.conflicted",
           "group": "inline@2"
         },
         {
