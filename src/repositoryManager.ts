@@ -361,9 +361,9 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
-  public async clone(source: string, destination: string, bare = false): Promise<void> {
-    const cwd = this.workspacePaths()[0] ?? ".";
-    await this.runner.run(["clone", ...(bare ? ["--bare"] : []), source, destination], { cwd });
+  public async clone(source: string, destination: string, bare = false, cwd?: string): Promise<void> {
+    const cloneRoot = cwd ?? this.workspacePaths()[0] ?? ".";
+    await this.runner.run(["clone", ...(bare ? ["--bare"] : []), "--", source, destination], { cwd: cloneRoot });
     await this.discoverAndRefresh();
   }
 
@@ -393,6 +393,15 @@ export class RepositoryManager implements vscode.Disposable {
 
   private async readSnapshot(repository: GitRepository): Promise<RepositorySnapshot> {
     try {
+      if (repository.info.isBare) {
+        return {
+          repository,
+          status: null,
+          branches: await repository.branches(),
+          operation: { kind: "none", canContinue: false, canAbort: false },
+          error: "Bare repository: working-tree operations are unavailable.",
+        };
+      }
       const [status, branches, operation] = await Promise.all([repository.status(), repository.branches(), repository.operationState()]);
       return { repository, status, branches, operation };
     } catch (error) {

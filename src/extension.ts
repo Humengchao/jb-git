@@ -118,22 +118,63 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const pendingRefreshRoots = new Set<string>();
+  let pendingDiscovery = false;
   let refreshTimer: NodeJS.Timeout | undefined;
-  const scheduleRefreshForPath = (filePath: string): void => {
-    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
-    const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
-    if (!snapshot) return;
-    pendingRefreshRoots.add(snapshot.repository.info.rootPath);
+  const scheduleRefresh = (): void => {
     if (refreshTimer) clearTimeout(refreshTimer);
     const delay = vscode.workspace.getConfiguration("jbGit").get<number>("refreshDebounceMs", 250);
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined;
       const roots = [...pendingRefreshRoots];
+      const discover = pendingDiscovery;
       pendingRefreshRoots.clear();
-      void Promise.all(roots.map((root) => manager.refresh(root))).then(updateStatusBar);
+      pendingDiscovery = false;
+      const operation = discover
+        ? manager.discoverAndRefresh()
+        : Promise.all(roots.map((root) => manager.refresh(root))).then(() => undefined);
+      void operation.then(updateStatusBar, (error) => vscode.window.showErrorMessage(formatGitError(error)));
     }, delay);
   };
+  const scheduleRefreshRoot = (rootPath: string): void => {
+    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
+    pendingRefreshRoots.add(rootPath);
+    scheduleRefresh();
+  };
+  const scheduleRefreshForPath = (filePath: string): void => {
+    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
+    const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
+    if (!snapshot) return;
+    scheduleRefreshRoot(snapshot.repository.info.rootPath);
+  };
+  const scheduleDiscovery = (): void => {
+    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
+    pendingDiscovery = true;
+    scheduleRefresh();
+  };
   const gitMetadataWatcher = vscode.workspace.createFileSystemWatcher("**/.git/**");
+  const repositoryMetadataWatchers = new Map<string, vscode.FileSystemWatcher>();
+  const rebuildRepositoryMetadataWatchers = (): void => {
+    const desired = new Map<string, { root: string; directory: string }>();
+    for (const snapshot of manager.all) {
+      for (const directory of new Set([snapshot.repository.info.gitDir, snapshot.repository.info.commonGitDir])) {
+        desired.set(`${snapshot.repository.info.rootPath}\0${directory}`, { root: snapshot.repository.info.rootPath, directory });
+      }
+    }
+    for (const [key, watcher] of repositoryMetadataWatchers) {
+      if (!desired.has(key)) {
+        watcher.dispose();
+        repositoryMetadataWatchers.delete(key);
+      }
+    }
+    for (const [key, target] of desired) {
+      if (repositoryMetadataWatchers.has(key)) continue;
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(target.directory, "**"));
+      watcher.onDidChange(() => scheduleRefreshRoot(target.root));
+      watcher.onDidCreate(() => scheduleRefreshRoot(target.root));
+      watcher.onDidDelete(() => scheduleRefreshRoot(target.root));
+      repositoryMetadataWatchers.set(key, watcher);
+    }
+  };
 
   const pickRepository = async (rootPath?: string) => {
     if (rootPath) return manager.snapshot(rootPath);
@@ -146,6 +187,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       })),
       { placeHolder: "Select a Git repository" },
     ))?.snapshot;
+  };
+  const pickWorkspaceRoot = async (): Promise<string | undefined> => {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length <= 1) return folders[0]?.uri.fsPath;
+    return (await vscode.window.showQuickPick(
+      folders.map((folder) => ({ label: folder.name, description: folder.uri.fsPath, rootPath: folder.uri.fsPath })),
+      { placeHolder: "Select a workspace folder" },
+    ))?.rootPath;
   };
 
   context.subscriptions.push(
@@ -172,19 +221,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     submodulesView,
     diffProvider,
     gitMetadataWatcher,
-    { dispose: () => { if (refreshTimer) clearTimeout(refreshTimer); } },
+    { dispose: () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      for (const watcher of repositoryMetadataWatchers.values()) watcher.dispose();
+      repositoryMetadataWatchers.clear();
+    } },
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
     outputChannel,
-    manager.onDidChange(updateStatusBar),
+    manager.onDidChange(() => { updateStatusBar(); rebuildRepositoryMetadataWatchers(); }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh()),
     vscode.workspace.onDidSaveTextDocument((document) => scheduleRefreshForPath(document.uri.fsPath)),
     vscode.workspace.onDidCreateFiles((event) => event.files.forEach((uri) => scheduleRefreshForPath(uri.fsPath))),
     vscode.workspace.onDidDeleteFiles((event) => event.files.forEach((uri) => scheduleRefreshForPath(uri.fsPath))),
     vscode.workspace.onDidRenameFiles((event) => event.files.forEach((file) => { scheduleRefreshForPath(file.oldUri.fsPath); scheduleRefreshForPath(file.newUri.fsPath); })),
     gitMetadataWatcher.onDidChange((uri) => scheduleRefreshForPath(uri.fsPath)),
-    gitMetadataWatcher.onDidCreate((uri) => scheduleRefreshForPath(uri.fsPath)),
-    gitMetadataWatcher.onDidDelete((uri) => scheduleRefreshForPath(uri.fsPath)),
+    gitMetadataWatcher.onDidCreate(() => scheduleDiscovery()),
+    gitMetadataWatcher.onDidDelete(() => scheduleDiscovery()),
     vscode.commands.registerCommand("jbGit.refresh", refresh),
     vscode.commands.registerCommand("jbGit.openChanges", () => vscode.commands.executeCommand("workbench.view.extension.jbGit")),
     vscode.commands.registerCommand("jbGit.openDiff", async (node?: ChangeNode) => {
@@ -231,7 +284,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.initializeRepository", async () => {
       if (!(await requireTrustedWorkspace())) return;
-      const root = workspacePaths()[0];
+      const root = await pickWorkspaceRoot();
       if (!root) {
         await vscode.window.showInformationMessage("Open a folder before initializing a Git repository.");
         return;
@@ -250,8 +303,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { placeHolder: "Clone type" },
       );
       if (!mode) return;
-      const cloneRoot = workspacePaths()[0] ?? ".";
-      const cloned = await runWithNotificationResult(`Cloning ${source.trim()}`, () => manager.clone(source.trim(), destination.trim(), mode.bare));
+      const cloneRoot = await pickWorkspaceRoot() ?? process.cwd();
+      const cloned = await runWithNotificationResult(
+        `Cloning ${source.trim()}`,
+        () => manager.clone(source.trim(), destination.trim(), mode.bare, cloneRoot),
+      );
       if (cloned && !mode.bare) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(path.resolve(cloneRoot, destination.trim())), { forceNewWindow: false });
     }),
     vscode.commands.registerCommand("jbGit.fetch", async () => {

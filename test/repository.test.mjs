@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { discoverRepository } from "../dist/git/repository.js";
+import { discoverRepositories, discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
 
 function git(cwd, ...args) {
@@ -32,6 +32,24 @@ test("discovers a repository and reads its status", async () => {
   assert.equal(status.changes.find((change) => change.path === "untracked.txt")?.kind, "untracked");
   const branches = await repository.branches();
   assert.equal(branches.find((branch) => branch.name === "master")?.kind, "local");
+});
+
+test("discovers nested and bare repositories", async () => {
+  const container = mkdtempSync(join(tmpdir(), "jb-git-discovery-container-"));
+  const nestedA = join(container, "projects", "a");
+  const nestedB = join(container, "projects", "b");
+  const bare = join(container, "remotes", "archive.git");
+  mkdirSync(nestedA, { recursive: true });
+  mkdirSync(nestedB, { recursive: true });
+  mkdirSync(bare, { recursive: true });
+  git(nestedA, "init", "-q");
+  git(nestedB, "init", "-q");
+  git(bare, "init", "--bare", "-q");
+
+  const repositories = await discoverRepositories([container], new GitRunner());
+  assert.equal(repositories.length, 3);
+  assert.equal(repositories.filter((repository) => repository.info.isBare).length, 1);
+  assert.ok(await discoverRepository(bare, new GitRunner()));
 });
 
 test("runs commit, branch, and stash operations through Git Core", async () => {

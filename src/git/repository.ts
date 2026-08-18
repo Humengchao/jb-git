@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, opendir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
@@ -658,10 +658,14 @@ export async function discoverRepository(
   signal?: AbortSignal,
 ): Promise<GitRepository | null> {
   try {
-    const rootPath = trimOutput(await runner.text(["rev-parse", "--show-toplevel"], { cwd: workspacePath, signal }));
+    const isBare = trimOutput(await runner.text(["rev-parse", "--is-bare-repository"], { cwd: workspacePath, signal })) === "true";
+    const rawRootPath = trimOutput(await runner.text(
+      ["rev-parse", isBare ? "--absolute-git-dir" : "--show-toplevel"],
+      { cwd: workspacePath, signal },
+    ));
+    const rootPath = await canonicalPath(rawRootPath);
     const gitDirRaw = trimOutput(await runner.text(["rev-parse", "--git-dir"], { cwd: workspacePath, signal }));
     const commonGitDirRaw = trimOutput(await runner.text(["rev-parse", "--git-common-dir"], { cwd: workspacePath, signal }));
-    const isBare = trimOutput(await runner.text(["rev-parse", "--is-bare-repository"], { cwd: workspacePath, signal })) === "true";
     return new GitRepository(
       {
         rootPath: path.normalize(rootPath),
@@ -677,6 +681,42 @@ export async function discoverRepository(
   }
 }
 
+const DISCOVERY_EXCLUDES = new Set([".git", ".vscode-test", "node_modules", "dist", "out", "build", "target", ".cache"]);
+
+async function canonicalPath(candidate: string): Promise<string> {
+  try {
+    return path.normalize(await realpath(candidate));
+  } catch {
+    return path.normalize(path.resolve(candidate));
+  }
+}
+
+async function repositoryCandidates(workspacePath: string): Promise<string[]> {
+  const candidates = new Set<string>([workspacePath]);
+  const queue = [workspacePath];
+  let visited = 0;
+  while (queue.length > 0 && visited < 20_000) {
+    const directory = queue.shift()!;
+    visited += 1;
+    try {
+      const entries = await opendir(directory);
+      for await (const entry of entries) {
+        if (entry.name === ".git") {
+          candidates.add(directory);
+          continue;
+        }
+        if (!entry.isDirectory() || entry.isSymbolicLink() || DISCOVERY_EXCLUDES.has(entry.name)) continue;
+        const child = path.join(directory, entry.name);
+        if (entry.name.endsWith(".git")) candidates.add(child);
+        queue.push(child);
+      }
+    } catch {
+      // Unreadable folders are unrelated to repository roots we can operate on.
+    }
+  }
+  return [...candidates];
+}
+
 export async function discoverRepositories(
   workspacePaths: readonly string[],
   runner: GitRunner,
@@ -684,8 +724,10 @@ export async function discoverRepositories(
 ): Promise<GitRepository[]> {
   const found = new Map<string, GitRepository>();
   for (const workspacePath of workspacePaths) {
-    const repository = await discoverRepository(workspacePath, runner, signal);
-    if (repository) found.set(repository.info.rootPath, repository);
+    for (const candidate of await repositoryCandidates(workspacePath)) {
+      const repository = await discoverRepository(candidate, runner, signal);
+      if (repository) found.set(repository.info.rootPath, repository);
+    }
   }
   return [...found.values()];
 }
