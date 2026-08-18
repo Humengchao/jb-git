@@ -1,19 +1,21 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GitCommandError, GitRunner } from "./git/runner";
-import { BranchNode, RepositoryNode, RepositoryTreeProvider } from "./views/repositoryTree";
-import { ChangeNode, ChangesTreeProvider, HunkNode } from "./views/changesTree";
+import { BranchNode, RepositoryNode } from "./views/repositoryTree";
+import { ChangeNode, HunkNode } from "./views/changesTree";
 import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
-import { CommitNode, HistoryTreeProvider } from "./views/historyTree";
-import { ChangelistChangeNode, ChangelistNode, ChangelistTreeProvider } from "./views/changelistTree";
+import { CommitNode } from "./views/historyTree";
+import { ChangelistChangeNode, ChangelistNode } from "./views/changelistTree";
 import { ChangelistStore } from "./changelists/store";
 import { ShelfStore } from "./shelves/store";
-import { ShelfNode, ShelfTreeProvider } from "./views/shelfTree";
-import { WorktreeNode, WorktreeTreeProvider } from "./views/worktreeTree";
-import { RemoteNode, RemoteTreeProvider } from "./views/remoteTree";
-import { StashNode, StashTreeProvider } from "./views/stashTree";
-import { SubmoduleNode, SubmoduleTreeProvider } from "./views/submoduleTree";
+import { ShelfNode } from "./views/shelfTree";
+import { WorktreeNode } from "./views/worktreeTree";
+import { RemoteNode } from "./views/remoteTree";
+import { StashNode } from "./views/stashTree";
+import { SubmoduleNode } from "./views/submoduleTree";
 import { RepositoryManager } from "./repositoryManager";
+import { IntelliJCommitViewProvider } from "./webviews/commitView";
+import { IntelliJGitLogPanel } from "./webviews/logPanel";
 
 function workspacePaths(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
@@ -66,25 +68,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const changelistStore = new ChangelistStore(context.workspaceState);
   await changelistStore.load();
   const shelfStore = new ShelfStore(context.globalStorageUri.fsPath);
-  const repositories = new RepositoryTreeProvider(manager);
-  const changes = new ChangesTreeProvider(manager);
   const diffProvider = new DiffContentProvider();
-  const history = new HistoryTreeProvider(manager);
-  const changelists = new ChangelistTreeProvider(manager, changelistStore);
-  const shelves = new ShelfTreeProvider(manager, shelfStore);
-  const worktrees = new WorktreeTreeProvider(manager);
-  const remotes = new RemoteTreeProvider(manager);
-  const stashes = new StashTreeProvider(manager);
-  const submodules = new SubmoduleTreeProvider(manager);
-  const repositoryView = vscode.window.createTreeView("jbGit.repositories", { treeDataProvider: repositories, showCollapseAll: true });
-  const changesView = vscode.window.createTreeView("jbGit.changes", { treeDataProvider: changes, showCollapseAll: true });
-  const historyView = vscode.window.createTreeView("jbGit.history", { treeDataProvider: history, showCollapseAll: true });
-  const changelistsView = vscode.window.createTreeView("jbGit.changelists", { treeDataProvider: changelists, showCollapseAll: true });
-  const shelvesView = vscode.window.createTreeView("jbGit.shelves", { treeDataProvider: shelves, showCollapseAll: true });
-  const worktreesView = vscode.window.createTreeView("jbGit.worktrees", { treeDataProvider: worktrees, showCollapseAll: true });
-  const remotesView = vscode.window.createTreeView("jbGit.remotes", { treeDataProvider: remotes, showCollapseAll: true });
-  const stashesView = vscode.window.createTreeView("jbGit.stashes", { treeDataProvider: stashes, showCollapseAll: true });
-  const submodulesView = vscode.window.createTreeView("jbGit.submodules", { treeDataProvider: submodules, showCollapseAll: true });
+  const commitView = new IntelliJCommitViewProvider(manager, changelistStore, shelfStore);
+  const logPanel = new IntelliJGitLogPanel(manager);
+  const traceRegistration = runner.onDidRun((event) => logPanel.appendTrace(event));
+  const commitViewRegistration = vscode.window.registerWebviewViewProvider(
+    IntelliJCommitViewProvider.viewType,
+    commitView,
+    { webviewOptions: { retainContextWhenHidden: true } },
+  );
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   const outputChannel = vscode.window.createOutputChannel("JB Git");
   const showOutput = (title: string, content: string): void => {
@@ -94,8 +86,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel.append(content);
     outputChannel.show(true);
   };
-  branchStatus.command = "jbGit.openChanges";
-  branchStatus.tooltip = "Open JB Git Local Changes";
+  branchStatus.command = "jbGit.branchesPopup";
+  branchStatus.tooltip = "Git Branches and Operations";
 
   const updateStatusBar = (): void => {
     const first = manager.all[0];
@@ -201,24 +193,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     manager,
     changelistStore,
     shelfStore,
-    repositories,
-    changes,
-    history,
-    changelists,
-    shelves,
-    worktrees,
-    remotes,
-    stashes,
-    submodules,
-    repositoryView,
-    changesView,
-    historyView,
-    changelistsView,
-    shelvesView,
-    worktreesView,
-    remotesView,
-    stashesView,
-    submodulesView,
+    commitView,
+    logPanel,
+    traceRegistration,
+    commitViewRegistration,
     diffProvider,
     gitMetadataWatcher,
     { dispose: () => {
@@ -248,12 +226,92 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     gitMetadataWatcher.onDidCreate(() => scheduleDiscovery()),
     gitMetadataWatcher.onDidDelete(() => scheduleDiscovery()),
     vscode.commands.registerCommand("jbGit.refresh", refresh),
-    vscode.commands.registerCommand("jbGit.openChanges", () => vscode.commands.executeCommand("workbench.view.extension.jbGit")),
+    vscode.commands.registerCommand("jbGit.openChanges", (rootPath?: string) => commitView.reveal(rootPath)),
     vscode.commands.registerCommand("jbGit.openDiff", async (node?: ChangeNode) => {
       if (!node) return;
       await runWithNotification(`Loading diff for ${node.change.path}`, () => openChangeDiff(manager, diffProvider, node));
     }),
-    vscode.commands.registerCommand("jbGit.showHistory", () => vscode.commands.executeCommand("workbench.view.extension.jbGit")),
+    vscode.commands.registerCommand("jbGit.showHistory", () => logPanel.open()),
+    vscode.commands.registerCommand("jbGit.openGitToolWindow", (rootPath?: string) => logPanel.open(rootPath)),
+    vscode.commands.registerCommand("jbGit.branchesPopup", async (rootPath?: string) => {
+      const snapshot = await pickRepository(rootPath);
+      if (!snapshot) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
+      type BranchAction = vscode.QuickPickItem & { action?: "new" | "fetch" | "pull" | "push" | "log"; branch?: typeof snapshot.branches[number] };
+      const current = snapshot.status?.branch.head;
+      const items: BranchAction[] = [
+        { label: "$(add) New Branch", description: `from ${current ?? "HEAD"}`, action: "new" },
+        { label: "$(git-pull-request-go-to-changes) Fetch", action: "fetch" },
+        { label: "$(cloud-download) Pull…", action: "pull" },
+        { label: "$(cloud-upload) Push…", action: "push" },
+        { label: "$(git-commit) Show Git Log", action: "log" },
+        { label: "Local Branches", kind: vscode.QuickPickItemKind.Separator },
+        ...snapshot.branches.filter((branch) => branch.kind === "local").map((branch) => ({
+          label: `${branch.name === current ? "$(check)" : "$(git-branch)"} ${branch.name}`,
+          description: branch.upstream ? `${branch.upstream}${branch.tracking ? ` · ${branch.tracking}` : ""}` : undefined,
+          branch,
+        })),
+        { label: "Remote Branches", kind: vscode.QuickPickItemKind.Separator },
+        ...snapshot.branches.filter((branch) => branch.kind === "remote").map((branch) => ({ label: `$(cloud) ${branch.name}`, branch })),
+        { label: "Tags", kind: vscode.QuickPickItemKind.Separator },
+        ...snapshot.branches.filter((branch) => branch.kind === "tag").map((branch) => ({ label: `$(tag) ${branch.name}`, branch })),
+      ];
+      const selected = await vscode.window.showQuickPick(items, {
+        title: `${path.basename(snapshot.repository.info.rootPath)} · ${current ?? "detached HEAD"}`,
+        placeHolder: "Git branches and common operations",
+        matchOnDescription: true,
+      });
+      if (!selected) return;
+      const root = snapshot.repository.info.rootPath;
+      if (selected.branch) {
+        if (selected.branch.kind === "local" && selected.branch.name === current) return;
+        await runWithNotification(`Checking out ${selected.branch.name}`, () => manager.checkout(root, selected.branch!.name, selected.branch!.kind));
+      } else if (selected.action === "new") {
+        const name = await vscode.window.showInputBox({ title: "New Branch", prompt: `Create from ${current ?? "HEAD"}` });
+        if (name?.trim()) await runWithNotification(`Creating branch ${name.trim()}`, () => manager.createBranch(root, name.trim()));
+      } else if (selected.action === "fetch") await runWithNotification("Fetching remotes", () => manager.fetch(root));
+      else if (selected.action === "pull") await vscode.commands.executeCommand("jbGit.pull", root);
+      else if (selected.action === "push") await vscode.commands.executeCommand("jbGit.push", root);
+      else if (selected.action === "log") await logPanel.open(root);
+    }),
+    vscode.commands.registerCommand("jbGit.operationsPopup", async (rootPath?: string) => {
+      const snapshot = await pickRepository(rootPath);
+      if (!snapshot) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
+      const root = snapshot.repository.info.rootPath;
+      type OperationItem = vscode.QuickPickItem & { command?: string };
+      const items: OperationItem[] = [
+        { label: "Common", kind: vscode.QuickPickItemKind.Separator },
+        { label: "$(check) Commit…", command: "jbGit.openChanges" },
+        { label: "$(cloud-upload) Push…", command: "jbGit.push" },
+        { label: "$(cloud-download) Pull…", command: "jbGit.pull" },
+        { label: "$(sync) Fetch", command: "jbGit.fetch" },
+        { label: "$(git-branch) Branches…", command: "jbGit.branchesPopup" },
+        { label: "$(git-commit) Git Log", command: "jbGit.openGitToolWindow" },
+        { label: "History rewriting", kind: vscode.QuickPickItemKind.Separator },
+        { label: "$(git-merge) Merge…", command: "jbGit.merge" },
+        { label: "$(git-compare) Rebase…", command: "jbGit.rebase" },
+        { label: "$(git-commit) Cherry-pick…", command: "jbGit.cherryPick" },
+        { label: "$(discard) Revert…", command: "jbGit.revert" },
+        { label: "$(debug-restart) Reset HEAD…", command: "jbGit.reset" },
+        { label: "Save work", kind: vscode.QuickPickItemKind.Separator },
+        { label: "$(archive) Stash Changes…", command: "jbGit.stash" },
+        { label: "$(package) Shelve Changes…", command: "jbGit.createShelf" },
+        { label: "$(file-code) Apply Patch…", command: "jbGit.applyPatch" },
+        { label: "Repository", kind: vscode.QuickPickItemKind.Separator },
+        { label: "$(remote) Manage Remotes…", command: "jbGit.addRemote" },
+        { label: "$(repo-forked) Add Worktree…", command: "jbGit.createWorktree" },
+        { label: "$(file-submodule) Update Submodules", command: "jbGit.updateSubmodules" },
+        { label: "$(tag) Create Tag…", command: "jbGit.createTag" },
+        { label: "$(list-tree) Configure Sparse Checkout…", command: "jbGit.sparseCheckoutSet" },
+        { label: "$(cloud-download) Pull LFS Objects", command: "jbGit.lfsPull" },
+        { label: "Diagnostics", kind: vscode.QuickPickItemKind.Separator },
+        { label: "$(debug-alt) Bisect Start…", command: "jbGit.bisectStart" },
+      ];
+      const selected = await vscode.window.showQuickPick(items, {
+        title: `Git · ${snapshot.status?.branch.head ?? "detached HEAD"}`,
+        placeHolder: "Select a Git operation",
+      });
+      if (selected?.command) await vscode.commands.executeCommand(selected.command, root);
+    }),
     vscode.commands.registerCommand("jbGit.fileHistory", async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.uri.scheme !== "file") return void vscode.window.showInformationMessage("Open a file before showing its Git history.");
@@ -261,9 +319,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
       if (!snapshot) return void vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
-      const commits = await runWithNotification(`Loading history for ${relativePath}`, () => snapshot.repository.log(100, relativePath));
-      if (!commits) return;
-      showOutput(`File History · ${relativePath}`, commits.map((commit) => `${commit.hash.slice(0, 12)}  ${commit.authoredAt.slice(0, 10)}  ${commit.author}  ${commit.subject}`).join("\n"));
+      await logPanel.open(snapshot.repository.info.rootPath, relativePath);
     }),
     vscode.commands.registerCommand("jbGit.showCommit", async (node?: CommitNode) => {
       if (!node) return;
@@ -319,39 +375,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       if (cloned && !mode.bare) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(path.resolve(cloneRoot, destination.trim())), { forceNewWindow: false });
     }),
-    vscode.commands.registerCommand("jbGit.fetch", async () => {
+    vscode.commands.registerCommand("jbGit.fetch", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      await runWithNotification("Fetching Git remotes", () => manager.fetch());
+      await runWithNotification("Fetching Git remotes", () => manager.fetch(rootPath));
     }),
-    vscode.commands.registerCommand("jbGit.applyPatch", async () => {
+    vscode.commands.registerCommand("jbGit.applyPatch", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const files = await vscode.window.showOpenDialog({ canSelectMany: false, canSelectFiles: true, canSelectFolders: false, openLabel: "Apply Patch" });
       const patchFile = files?.[0];
       if (!patchFile) return;
       await runWithNotification(`Applying ${path.basename(patchFile.fsPath)}`, () => manager.applyPatch(first.repository.info.rootPath, patchFile.fsPath));
     }),
-    vscode.commands.registerCommand("jbGit.sparseCheckoutSet", async () => {
+    vscode.commands.registerCommand("jbGit.sparseCheckoutSet", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const input = await vscode.window.showInputBox({ prompt: "Sparse-checkout paths (comma-separated)", placeHolder: "src,docs" });
       if (!input?.trim()) return;
       const paths = input.split(",").map((item) => item.trim()).filter(Boolean);
       await runWithNotification("Configuring sparse checkout", () => manager.sparseCheckoutSet(first.repository.info.rootPath, paths));
     }),
-    vscode.commands.registerCommand("jbGit.sparseCheckoutDisable", async () => {
+    vscode.commands.registerCommand("jbGit.sparseCheckoutDisable", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const answer = await vscode.window.showWarningMessage("Disable sparse checkout and restore all files?", { modal: true }, "Disable");
       if (answer !== "Disable") return;
       await runWithNotification("Disabling sparse checkout", () => manager.sparseCheckoutDisable(first.repository.info.rootPath));
     }),
-    vscode.commands.registerCommand("jbGit.lfsPull", async () => {
+    vscode.commands.registerCommand("jbGit.lfsPull", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       await runWithNotification("Pulling Git LFS objects", () => manager.lfsPull(first.repository.info.rootPath));
     }),
@@ -378,9 +434,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const revision = await runWithNotification("Creating Git commit", () => manager.commit(first.repository.info.rootPath, message, { amend, signoff, noVerify }));
       if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
     }),
-    vscode.commands.registerCommand("jbGit.pull", async () => {
+    vscode.commands.registerCommand("jbGit.pull", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const strategy = await vscode.window.showQuickPick(
         [
@@ -393,9 +449,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!strategy) return;
       await runWithNotification(`Pulling with ${strategy.label}`, () => manager.pull(first.repository.info.rootPath, strategy.value));
     }),
-    vscode.commands.registerCommand("jbGit.push", async () => {
+    vscode.commands.registerCommand("jbGit.push", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const mode = await vscode.window.showQuickPick(
         [
@@ -411,9 +467,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       await runWithNotification("Pushing Git commits", () => manager.push(first.repository.info.rootPath, mode.force));
     }),
-    vscode.commands.registerCommand("jbGit.merge", async () => {
+    vscode.commands.registerCommand("jbGit.merge", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const current = first.status?.branch.head;
       const ref = await vscode.window.showQuickPick(
@@ -423,9 +479,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!ref) return;
       await runWithNotification(`Merging ${ref}`, () => manager.merge(first.repository.info.rootPath, ref));
     }),
-    vscode.commands.registerCommand("jbGit.rebase", async () => {
+    vscode.commands.registerCommand("jbGit.rebase", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const current = first.status?.branch.head;
       const ref = await vscode.window.showQuickPick(
@@ -435,17 +491,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!ref) return;
       await runWithNotification(`Rebasing onto ${ref}`, () => manager.rebase(first.repository.info.rootPath, ref));
     }),
-    vscode.commands.registerCommand("jbGit.cherryPick", async () => {
+    vscode.commands.registerCommand("jbGit.cherryPick", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const hash = await vscode.window.showInputBox({ prompt: "Commit hash or ref to cherry-pick" });
       if (!hash?.trim()) return;
       await runWithNotification(`Cherry-picking ${hash.trim()}`, () => manager.cherryPick(first.repository.info.rootPath, hash.trim()));
     }),
-    vscode.commands.registerCommand("jbGit.revert", async () => {
+    vscode.commands.registerCommand("jbGit.revert", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const hash = await vscode.window.showInputBox({ prompt: "Commit hash or ref to revert" });
       if (!hash?.trim()) return;
@@ -453,9 +509,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (answer !== "Revert") return;
       await runWithNotification(`Reverting ${hash.trim()}`, () => manager.revert(first.repository.info.rootPath, hash.trim()));
     }),
-    vscode.commands.registerCommand("jbGit.reset", async () => {
+    vscode.commands.registerCommand("jbGit.reset", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const ref = await vscode.window.showInputBox({ prompt: "Revision to reset to", value: "HEAD" });
       if (!ref?.trim()) return;
@@ -472,16 +528,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (answer !== "Reset") return;
       await runWithNotification(`Resetting to ${ref.trim()}`, () => manager.reset(first.repository.info.rootPath, ref.trim(), mode.value));
     }),
-    vscode.commands.registerCommand("jbGit.continueOperation", async () => {
+    vscode.commands.registerCommand("jbGit.continueOperation", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       const kind = first?.operation.kind;
       if (!first || !kind || kind === "none" || kind === "bisect" || kind === "sequencer") return;
       await runWithNotification(`Continuing ${kind}`, () => manager.continueOperation(first.repository.info.rootPath, kind));
     }),
-    vscode.commands.registerCommand("jbGit.abortOperation", async () => {
+    vscode.commands.registerCommand("jbGit.abortOperation", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       const kind = first?.operation.kind;
       if (!first || !kind || kind === "none" || kind === "bisect" || kind === "sequencer") return;
       const answer = await vscode.window.showWarningMessage(`Abort ${kind}?`, { modal: true }, "Abort");
@@ -495,9 +551,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!first || (kind !== "rebase" && kind !== "cherry-pick")) return;
       await runWithNotification(`Skipping ${kind}`, () => manager.skipOperation(first.repository.info.rootPath, kind));
     }),
-    vscode.commands.registerCommand("jbGit.bisectStart", async () => {
+    vscode.commands.registerCommand("jbGit.bisectStart", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const bad = await vscode.window.showInputBox({ prompt: "Known bad revision", value: "HEAD" });
       if (!bad?.trim()) return;
@@ -564,9 +620,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (answer !== "Delete") return;
       await runWithNotification(`Deleting branch ${selected}`, () => manager.deleteBranch(snapshot.repository.info.rootPath, selected));
     }),
-    vscode.commands.registerCommand("jbGit.stash", async () => {
+    vscode.commands.registerCommand("jbGit.stash", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const message = await vscode.window.showInputBox({ prompt: "Optional stash message", placeHolder: "Work in progress" });
       const options = await vscode.window.showQuickPick(
@@ -598,7 +654,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.commitChangelist", async (node?: ChangelistNode) => {
       if (!(await requireTrustedWorkspace())) return;
-      node ??= changelistsView.selection.find((item): item is ChangelistNode => item instanceof ChangelistNode);
       if (!node) {
         const choice = await vscode.window.showQuickPick(
           manager.all.flatMap((snapshot) => changelistStore.lists(snapshot.repository.info.rootPath).map((changelist) => ({
@@ -634,9 +689,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
     }),
-    vscode.commands.registerCommand("jbGit.createShelf", async () => {
+    vscode.commands.registerCommand("jbGit.createShelf", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first?.status) return;
       const paths = [...new Set(first.status.changes
         .filter((change) => change.kind !== "untracked" && change.kind !== "ignored")
@@ -661,9 +716,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (answer !== "Delete") return;
       await shelfStore.remove(node.repositoryRoot, node.entry);
     }),
-    vscode.commands.registerCommand("jbGit.createWorktree", async () => {
+    vscode.commands.registerCommand("jbGit.createWorktree", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const worktreePath = await vscode.window.showInputBox({ prompt: "Worktree path", placeHolder: "../feature-worktree" });
       if (!worktreePath?.trim()) return;
@@ -683,9 +738,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!first) return;
       await runWithNotification("Pruning Git worktrees", () => manager.pruneWorktrees(first.repository.info.rootPath));
     }),
-    vscode.commands.registerCommand("jbGit.updateSubmodules", async () => {
+    vscode.commands.registerCommand("jbGit.updateSubmodules", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       await runWithNotification("Updating Git submodules", () => manager.updateSubmodules(first.repository.info.rootPath));
     }),
@@ -693,9 +748,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace()) || !node) return;
       await runWithNotification(`Updating submodule ${node.submodule.path}`, () => manager.updateSubmodules(node.repositoryRoot, [node.submodule.path]));
     }),
-    vscode.commands.registerCommand("jbGit.createTag", async () => {
+    vscode.commands.registerCommand("jbGit.createTag", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const name = await vscode.window.showInputBox({ prompt: "Tag name" });
       if (!name?.trim()) return;
@@ -714,9 +769,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (answer !== "Delete") return;
       await runWithNotification(`Deleting tag ${tag}`, () => manager.deleteTag(first.repository.info.rootPath, tag));
     }),
-    vscode.commands.registerCommand("jbGit.addRemote", async () => {
+    vscode.commands.registerCommand("jbGit.addRemote", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const name = await vscode.window.showInputBox({ prompt: "Remote name", value: "origin" });
       if (!name?.trim()) return;

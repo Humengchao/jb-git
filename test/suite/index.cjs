@@ -18,9 +18,11 @@ async function run() {
   const missing = declared.filter((command) => !registered.has(command));
   assert.deepEqual(missing, [], `all contributed commands must be registered: ${missing.join(", ")}`);
 
-  const branchMenus = manifest.contributes.menus["view/item/context"]
-    .filter((item) => ["jbGit.renameBranch", "jbGit.deleteBranch"].includes(item.command));
-  assert.ok(branchMenus.every((item) => item.when.includes("jbGit.branch.local")), "branch mutations must only target local branches");
+  assert.deepEqual(
+    manifest.contributes.views.jbGit.map((view) => ({ id: view.id, type: view.type })),
+    [{ id: "jbGit.commitTool", type: "webview" }],
+    "the activity bar should expose one cohesive Commit tool window instead of fragmented legacy trees",
+  );
 
   const parent = await mkdtemp(path.join(tmpdir(), "jb-git-nested-init-"));
   execFileSync("git", ["init", "-q"], { cwd: parent });

@@ -44,7 +44,8 @@
     "commands": [
       {
         "command": "jbGit.refresh",
-        "title": "JB Git: Refresh"
+        "title": "JB Git: Refresh",
+        "icon": "$(refresh)"
       },
       {
         "command": "jbGit.openChanges",
@@ -57,6 +58,20 @@
       {
         "command": "jbGit.showHistory",
         "title": "JB Git: Show History"
+      },
+      {
+        "command": "jbGit.openGitToolWindow",
+        "title": "JB Git: Open Git Tool Window",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "jbGit.branchesPopup",
+        "title": "JB Git: Branches and Operations",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "jbGit.operationsPopup",
+        "title": "JB Git: Git Operations Popup"
       },
       {
         "command": "jbGit.fileHistory",
@@ -307,48 +322,9 @@
     "views": {
       "jbGit": [
         {
-          "id": "jbGit.repositories",
-          "name": "Repositories",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.changes",
-          "name": "Local Changes",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.history",
-          "name": "History",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.changelists",
-          "name": "Changelists",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.shelves",
-          "name": "Shelf",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.worktrees",
-          "name": "Worktrees",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.remotes",
-          "name": "Remotes",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.stashes",
-          "name": "Stashes",
-          "when": "jbGit.hasWorkspace"
-        },
-        {
-          "id": "jbGit.submodules",
-          "name": "Submodules",
+          "id": "jbGit.commitTool",
+          "name": "Commit",
+          "type": "webview",
           "when": "jbGit.hasWorkspace"
         }
       ]
@@ -369,225 +345,18 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves || view == jbGit.worktrees || view == jbGit.remotes || view == jbGit.stashes || view == jbGit.submodules",
+          "when": "view == jbGit.commitTool",
           "group": "navigation@1"
         },
         {
-          "command": "jbGit.fetch",
-          "when": "view == jbGit.repositories",
+          "command": "jbGit.branchesPopup",
+          "when": "view == jbGit.commitTool",
           "group": "navigation@2"
         },
         {
-          "command": "jbGit.cloneRepository",
-          "when": "view == jbGit.repositories",
-          "group": "navigation@1"
-        },
-        {
-          "command": "jbGit.commit",
-          "when": "view == jbGit.changes",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.push",
-          "when": "view == jbGit.repositories",
+          "command": "jbGit.openGitToolWindow",
+          "when": "view == jbGit.commitTool",
           "group": "navigation@3"
-        },
-        {
-          "command": "jbGit.pull",
-          "when": "view == jbGit.repositories",
-          "group": "navigation@4"
-        },
-        {
-          "command": "jbGit.sparseCheckoutSet",
-          "when": "view == jbGit.repositories",
-          "group": "navigation@5"
-        },
-        {
-          "command": "jbGit.sparseCheckoutDisable",
-          "when": "view == jbGit.repositories",
-          "group": "navigation@6"
-        },
-        {
-          "command": "jbGit.lfsPull",
-          "when": "view == jbGit.repositories",
-          "group": "navigation@7"
-        },
-        {
-          "command": "jbGit.applyPatch",
-          "when": "view == jbGit.repositories",
-          "group": "navigation@8"
-        },
-        {
-          "command": "jbGit.showHistory",
-          "when": "view == jbGit.history",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.createChangelist",
-          "when": "view == jbGit.changelists",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.commitChangelist",
-          "when": "view == jbGit.changelists",
-          "group": "navigation@3"
-        },
-        {
-          "command": "jbGit.createShelf",
-          "when": "view == jbGit.shelves",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.createWorktree",
-          "when": "view == jbGit.worktrees",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.pruneWorktrees",
-          "when": "view == jbGit.worktrees",
-          "group": "navigation@3"
-        },
-        {
-          "command": "jbGit.addRemote",
-          "when": "view == jbGit.remotes",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.stash",
-          "when": "view == jbGit.stashes",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.updateSubmodules",
-          "when": "view == jbGit.submodules",
-          "group": "navigation@2"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "jbGit.createBranch",
-          "when": "view == jbGit.repositories && (viewItem == jbGit.repository || viewItem == jbGit.branch.local || viewItem == jbGit.branch.remote || viewItem == jbGit.branch.tag)",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.renameBranch",
-          "when": "view == jbGit.repositories && viewItem == jbGit.branch.local",
-          "group": "inline@2"
-        },
-        {
-          "command": "jbGit.deleteBranch",
-          "when": "view == jbGit.repositories && viewItem == jbGit.branch.local",
-          "group": "inline@3"
-        },
-        {
-          "command": "jbGit.openDiff",
-          "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
-          "group": "inline@0"
-        },
-        {
-          "command": "jbGit.stageChange",
-          "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.unstageChange",
-          "when": "view == jbGit.changes && viewItem == jbGit.change.staged",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.stageHunk",
-          "when": "view == jbGit.changes && viewItem == jbGit.hunk.stage",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.unstageHunk",
-          "when": "view == jbGit.changes && viewItem == jbGit.hunk.unstage",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.discardChange",
-          "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
-          "group": "inline@2"
-        },
-        {
-          "command": "jbGit.resolveConflict",
-          "when": "view == jbGit.changes && viewItem == jbGit.change.conflicted",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.markResolved",
-          "when": "view == jbGit.changes && viewItem == jbGit.change.conflicted",
-          "group": "inline@2"
-        },
-        {
-          "command": "jbGit.moveToChangelist",
-          "when": "view == jbGit.changelists && viewItem == jbGit.changelist.change",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.openDiff",
-          "when": "view == jbGit.changelists && viewItem == jbGit.changelist.change",
-          "group": "inline@0"
-        },
-        {
-          "command": "jbGit.commitChangelist",
-          "when": "view == jbGit.changelists && (viewItem == jbGit.changelist || viewItem == jbGit.changelist.active)",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.applyShelf",
-          "when": "view == jbGit.shelves && viewItem == jbGit.shelf",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.deleteShelf",
-          "when": "view == jbGit.shelves && viewItem == jbGit.shelf",
-          "group": "inline@2"
-        },
-        {
-          "command": "jbGit.removeWorktree",
-          "when": "view == jbGit.worktrees && (viewItem == jbGit.worktree || viewItem == jbGit.worktree.prunable)",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.fetchRemote",
-          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
-          "group": "inline@0"
-        },
-        {
-          "command": "jbGit.pushRemote",
-          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.setRemoteUrl",
-          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
-          "group": "inline@2"
-        },
-        {
-          "command": "jbGit.removeRemote",
-          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
-          "group": "inline@3"
-        },
-        {
-          "command": "jbGit.applyStash",
-          "when": "view == jbGit.stashes && viewItem == jbGit.stash",
-          "group": "inline@0"
-        },
-        {
-          "command": "jbGit.popStash",
-          "when": "view == jbGit.stashes && viewItem == jbGit.stash",
-          "group": "inline@1"
-        },
-        {
-          "command": "jbGit.dropStash",
-          "when": "view == jbGit.stashes && viewItem == jbGit.stash",
-          "group": "inline@2"
-        },
-        {
-          "command": "jbGit.updateSubmodule",
-          "when": "view == jbGit.submodules && viewItem == jbGit.submodule",
-          "group": "inline@1"
         }
       ]
     },
