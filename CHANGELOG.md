@@ -7,6 +7,8 @@
 - Add Changelist-grouped file selection, inline change actions, commit options, Commit and Push, and Shelf workflows.
 - Add a three-pane Log with branch filters, a colored commit graph, commit search, changed files, details, and commit actions.
 - Add a credential-redacted Git Console, VCS-style branch popup, Git operations popup, and one-key Extension Host launch configuration.
+- Make Log commits and Changed Files selectable by mouse or keyboard, and open file-specific commit diffs on double-click.
+- Strip record-separator newlines from parsed commit hashes so every Log row, not only the first one, can be selected.
 
 ## 0.1.0-alpha.3
 

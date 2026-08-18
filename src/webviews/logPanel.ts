@@ -6,6 +6,7 @@ import { GitTraceEvent } from "../git/runner";
 import { RepositoryManager } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
 import { ChangeNode } from "../views/changesTree";
+import { DiffContentProvider } from "../views/diffProvider";
 import { webviewDocument } from "./html";
 
 type LogMessage =
@@ -19,6 +20,7 @@ type LogMessage =
   | { type: "revert"; hash: string }
   | { type: "reset"; hash: string }
   | { type: "showPatch"; hash: string }
+  | { type: "openCommitFile"; hash: string; path: string }
   | { type: "refresh" }
   | { type: "clearConsole" }
   | { type: "togglePath"; path: string; checked: boolean }
@@ -75,6 +77,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     private readonly manager: RepositoryManager,
     private readonly changelists: ChangelistStore,
     private readonly shelves: ShelfStore,
+    private readonly diffProvider: DiffContentProvider,
   ) {
     this.disposables.push(
       manager.onDidChange(() => void this.update()),
@@ -290,6 +293,28 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
         return;
       }
+      if (message.type === "openCommitFile") {
+        if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
+        const commit = this.currentCommits.find((item) => item.hash === message.hash);
+        if (!commit) return;
+        const files = await this.manager.commitFiles(root, commit.hash);
+        const file = files.find((item) => item.path === message.path);
+        if (!file) return;
+        const oldPath = file.originalPath ?? file.path;
+        const [left, right] = await Promise.all([
+          commit.parents[0]
+            ? snapshot.repository.fileContent(oldPath, commit.parents[0])
+            : Promise.resolve(Buffer.alloc(0)),
+          file.status.startsWith("D")
+            ? Promise.resolve(Buffer.alloc(0))
+            : snapshot.repository.fileContent(file.path, commit.hash),
+        ]);
+        const label = `${file.path} (${commit.hash.slice(0, 8)})`;
+        const leftUri = this.diffProvider.register(root, `${label}:parent`, left.toString("utf8"));
+        const rightUri = this.diffProvider.register(root, `${label}:commit`, right.toString("utf8"));
+        await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
+        return;
+      }
       if (message.type === "runCommand") {
         if (ALLOWED_COMMANDS.has(message.command)) await vscode.commands.executeCommand(message.command, root);
         return;
@@ -477,9 +502,10 @@ const logStyles = String.raw`
   .table-head { border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); color: var(--vscode-descriptionForeground); font-size: 11px; }
   .table-head > span { padding: 0 7px; border-right: 1px solid var(--vscode-panel-border); }
   .commit-list { overflow: auto; min-height: 0; }
-  .commit-row { min-height: 27px; cursor: default; }
+  .commit-row { min-height: 27px; cursor: pointer; }
   .commit-row:hover { background: var(--vscode-list-hoverBackground); }
   .commit-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .commit-row:focus-visible, .file-row:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .commit-row > div { min-width: 0; padding: 0 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .subject-cell { height: 27px; display: flex; align-items: center; gap: 5px; padding-left: 0 !important; }
   canvas { flex: none; width: 72px; height: 27px; }
@@ -496,8 +522,9 @@ const logStyles = String.raw`
   .detail-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
   .action { height: 25px; padding: 0 7px; border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .files { min-height: 0; overflow: auto; }
-  .file-row { min-height: 25px; display: grid; grid-template-columns: 23px minmax(0, 1fr); align-items: center; padding: 0 7px; }
+  .file-row { min-height: 25px; display: grid; grid-template-columns: 23px minmax(0, 1fr); align-items: center; padding: 0 7px; cursor: pointer; }
   .file-row:hover { background: var(--vscode-list-hoverBackground); }
+  .file-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .file-status { font-weight: 700; }
   .file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { padding: 28px 14px; text-align: center; color: var(--vscode-descriptionForeground); }
@@ -575,12 +602,18 @@ const logScript = String.raw`
   let search = '';
   let uiState = vscode.getState() || {};
   let activeToolTab = uiState.activeToolTab || 'log';
+  let pendingCommitHash;
+  let selectedFilePath;
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
   const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
   const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; };
   const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = title; b.addEventListener('click', handler); return b; };
   const saveUiState = extra => { uiState = { ...uiState, ...extra }; vscode.setState(uiState); };
   const selectToolTab = tab => { activeToolTab = tab; saveUiState({ activeToolTab: tab }); render(); };
+  const keyboardActivate = (element, handler) => element.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault(); handler();
+  });
 
   function render() {
     app.replaceChildren(); const root = node('div', 'root');
@@ -790,11 +823,21 @@ const logScript = String.raw`
     const commits = filteredCommits(); const graph = graphLayout(commits);
     if (!commits.length) { list.append(node('div', 'empty', 'No matching commits')); return; }
     commits.forEach((commit, index) => {
-      const row = node('div', 'commit-row' + (state.selection?.commit.hash === commit.hash ? ' selected' : '')); row.dataset.hash = commit.hash;
+      const selected = (pendingCommitHash || state.selection?.commit.hash) === commit.hash;
+      const row = node('div', 'commit-row' + (selected ? ' selected' : '')); row.dataset.hash = commit.hash;
+      row.tabIndex = 0; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
       const subject = node('div', 'subject-cell'); const canvas = node('canvas'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(graph[index]); subject.append(canvas);
       const refs = node('div', 'refs'); for (const ref of (commit.refs || []).slice(0, 2)) refs.append(node('span', 'ref', shortRef(ref))); subject.append(refs, node('span', 'subject', commit.subject || '(no subject)'));
       row.append(subject, node('div', '', commit.author), node('div', 'muted', formatDate(commit.authoredAt)), node('div', 'muted', commit.hash.slice(0, 8)));
-      row.addEventListener('click', () => post('selectCommit', { hash: commit.hash }));
+      const select = () => {
+        pendingCommitHash = commit.hash;
+        document.querySelectorAll('.commit-row').forEach(item => {
+          const active = item.dataset.hash === pendingCommitHash;
+          item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
+        });
+        post('selectCommit', { hash: commit.hash });
+      };
+      row.addEventListener('click', select); keyboardActivate(row, select);
       row.addEventListener('dblclick', () => post('showPatch', { hash: commit.hash }));
       list.append(row);
     });
@@ -817,8 +860,24 @@ const logScript = String.raw`
     const actions = node('div', 'detail-actions');
     actions.append(button('Show Diff', 'Open full patch', () => post('showPatch', { hash: commit.hash }), 'action'), button('Cherry-pick', 'Cherry-pick commit', () => post('cherryPick', { hash: commit.hash }), 'action'), button('Revert', 'Revert commit', () => post('revert', { hash: commit.hash }), 'action'), button('New Branch', 'Create branch here', () => post('newBranch', { hash: commit.hash }), 'action'), button('Reset…', 'Reset current branch here', () => post('reset', { hash: commit.hash }), 'action'));
     details.append(actions);
-    const files = node('div', 'files'); files.append(node('div', 'pane-title', 'Changed Files (' + selection.files.length + ')'));
-    for (const file of selection.files) { const row = node('div', 'file-row'); row.title = file.originalPath ? file.originalPath + ' → ' + file.path : file.path; row.append(node('span', 'file-status', file.status[0]), node('span', 'file-path', file.path)); row.addEventListener('dblclick', () => post('showPatch', { hash: commit.hash })); files.append(row); }
+    const files = node('div', 'files'); files.setAttribute('role', 'listbox'); files.append(node('div', 'pane-title', 'Changed Files (' + selection.files.length + ')'));
+    for (const file of selection.files) {
+      const selected = selectedFilePath === file.path;
+      const row = node('div', 'file-row' + (selected ? ' selected' : '')); row.dataset.filePath = file.path;
+      row.tabIndex = 0; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
+      row.title = file.originalPath ? file.originalPath + ' → ' + file.path : file.path;
+      row.append(node('span', 'file-status', file.status[0]), node('span', 'file-path', file.path));
+      const selectFile = () => {
+        selectedFilePath = file.path;
+        document.querySelectorAll('.file-row').forEach(item => {
+          const active = item.dataset.filePath === selectedFilePath;
+          item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
+        });
+      };
+      row.addEventListener('click', selectFile); keyboardActivate(row, selectFile);
+      row.addEventListener('dblclick', () => post('openCommitFile', { hash: commit.hash, path: file.path }));
+      files.append(row);
+    }
     pane.append(details, files); return pane;
   }
 
@@ -845,8 +904,16 @@ const logScript = String.raw`
   const shortRef = ref => ref.replace(/^HEAD -> /, '').replace(/^tag: /, '');
   const formatDate = value => { const date = new Date(value); const now = new Date(); return date.toDateString() === now.toDateString() ? date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : date.toLocaleDateString(); };
   window.addEventListener('message', event => {
-    if (event.data.type === 'state') { state = event.data.state; render(); }
-    if (event.data.type === 'selection') { state.selection = event.data.selection; render(); }
+    if (event.data.type === 'state') {
+      state = event.data.state; pendingCommitHash = undefined;
+      if (state.selection && !(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
+      render();
+    }
+    if (event.data.type === 'selection') {
+      state.selection = event.data.selection; pendingCommitHash = undefined;
+      if (!(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
+      render();
+    }
     if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-400); if (activeToolTab === 'console') render(); }
     if (event.data.type === 'activateTab') { selectToolTab(event.data.tab); }
     if (event.data.type === 'committed') { saveUiState({ commitMessage: '' }); render(); }

@@ -90,7 +90,7 @@ export class GitRepository {
       ...(filePath ? ["--", filePath] : []),
     ], { cwd: this.info.rootPath });
     return output.split("\x01").filter((record) => record.trim()).map((record) => {
-      const fields = record.split("\x00");
+      const fields = record.replace(/^[\r\n]+/, "").split("\x00");
       const [hash, parents, author, email, authoredAt, committedAt, refs, subject, ...body] = fields;
       return {
         hash,

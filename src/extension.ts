@@ -68,7 +68,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await changelistStore.load();
   const shelfStore = new ShelfStore(context.globalStorageUri.fsPath);
   const diffProvider = new DiffContentProvider();
-  const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore);
+  const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore, diffProvider);
   const traceRegistration = runner.onDidRun((event) => gitToolWindow.appendTrace(event));
   const toolWindowRegistration = vscode.window.registerWebviewViewProvider(
     IntelliJGitToolWindowProvider.viewType,

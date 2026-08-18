@@ -61,6 +61,7 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   writeFileSync(join(root, "file.txt"), "one\n");
   git(root, "add", "file.txt");
   git(root, "commit", "-qm", "initial");
+  const initialRevision = git(root, "rev-parse", "HEAD");
   const repository = await discoverRepository(root, new GitRunner());
   assert.ok(repository);
   const defaultBranch = git(root, "branch", "--show-current");
@@ -72,6 +73,8 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   const history = await repository.log(10);
   assert.equal(history[0].hash, revision);
   assert.equal(history[0].subject, "update");
+  assert.equal(history[1].hash, initialRevision);
+  assert.match(history[1].hash, /^[0-9a-f]{40}$/);
   assert.deepEqual(await repository.commitFiles(revision), [{ status: "M", path: "file.txt" }]);
   assert.equal((await repository.logRef(revision, 10))[0].hash, revision);
   assert.equal((await repository.operationState()).kind, "none");
