@@ -8,7 +8,9 @@ import { discoverRepositories, discoverRepository } from "../dist/git/repository
 import { GitRunner } from "../dist/git/runner.js";
 
 function git(cwd, ...args) {
-  return execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
+  const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
+  if (args[0] === "init") execFileSync("git", ["-C", cwd, "config", "core.autocrlf", "false"]);
+  return output;
 }
 
 function readText(filePath) {
