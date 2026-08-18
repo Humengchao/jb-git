@@ -36,7 +36,10 @@ type LogMessage =
   | { type: "createShelf" }
   | { type: "applyShelf"; id: string }
   | { type: "deleteShelf"; id: string }
-  | { type: "runCommand"; command: string };
+  | { type: "runCommand"; command: string }
+  | { type: "contextAction"; action: "copyRevision" | "createPatch" | "checkoutRevision" | "compareWithLocal" | "createTag"; hash: string }
+  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch"; ref: string; kind: GitBranch["kind"] }
+  | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string };
 
 interface LogSelection {
   commit: GitCommit;
@@ -248,6 +251,125 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       const root = snapshot.repository.info.rootPath;
       const changes = snapshot.status?.changes ?? [];
       const selected = this.syncSelection(root, changes);
+      if (message.type === "contextAction") {
+        if ("ref" in message) {
+          const branch = snapshot.branches.find((item) => item.name === message.ref && item.kind === message.kind);
+          if (!branch) return;
+          if (message.action === "copyBranch") {
+            await vscode.env.clipboard.writeText(branch.name);
+            return;
+          }
+          if (message.action === "showRefDiff") {
+            const diff = await snapshot.repository.diffAgainstWorkingTree(branch.name);
+            await showDiffText(`${branch.name} ↔ Working Tree`, diff);
+            return;
+          }
+          if (!(await requireTrusted())) return;
+          if (message.action === "newBranchFromRef") {
+            const name = await vscode.window.showInputBox({ title: `New Branch from '${branch.name}'`, prompt: "Branch name" });
+            if (name?.trim()) await this.manager.createBranch(root, name.trim(), branch.name);
+            return;
+          }
+          if (message.action === "createWorktreeFromRef") {
+            const worktreePath = await vscode.window.showInputBox({ title: `New Worktree from '${branch.name}'`, prompt: "Worktree path", placeHolder: "../feature-worktree" });
+            if (!worktreePath?.trim()) return;
+            const newBranch = await vscode.window.showInputBox({ title: "Optional New Branch", prompt: "Leave empty to use the selected ref" });
+            await this.manager.addWorktree(root, worktreePath.trim(), branch.name, newBranch?.trim() || undefined);
+            return;
+          }
+          if (message.action === "renameBranch") {
+            if (branch.kind !== "local") return;
+            const name = await vscode.window.showInputBox({ title: `Rename '${branch.name}'`, value: branch.name });
+            if (name?.trim() && name.trim() !== branch.name) await this.manager.renameBranch(root, branch.name, name.trim());
+            return;
+          }
+          if (message.action === "deleteBranch") {
+            if (branch.kind !== "local" || branch.name === snapshot.status?.branch.head) return;
+            const confirmed = await vscode.window.showWarningMessage(`Delete branch '${branch.name}'?`, { modal: true }, "Delete");
+            if (confirmed === "Delete") await this.manager.deleteBranch(root, branch.name);
+            return;
+          }
+          return;
+        }
+        if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
+        const commit = this.currentCommits.find((item) => item.hash === message.hash);
+        if (!commit) return;
+        if ("path" in message) {
+          const files = await this.manager.commitFiles(root, commit.hash);
+          const file = files.find((item) => item.path === message.path);
+          if (!file) return;
+          if (message.action === "copyPath") {
+            await vscode.env.clipboard.writeText(file.path);
+            return;
+          }
+          if (message.action === "showFileDiff") {
+            await this.openCommitFile(snapshot.repository, commit, file);
+            return;
+          }
+          if (message.action === "compareFileWithLocal") {
+            const [left, right] = await Promise.all([
+              snapshot.repository.fileContent(file.path, commit.hash),
+              snapshot.repository.fileContent(file.path),
+            ]);
+            const label = `${file.path} (${commit.hash.slice(0, 8)} ↔ Local)`;
+            const leftUri = this.diffProvider.register(root, `${label}:commit`, left.toString("utf8"));
+            const rightUri = this.diffProvider.register(root, `${label}:local`, right.toString("utf8"));
+            await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
+            return;
+          }
+          if (message.action === "openRepositoryFile") {
+            const content = await snapshot.repository.fileContent(file.path, commit.hash);
+            const uri = this.diffProvider.register(root, `${file.path}@${commit.hash.slice(0, 8)}`, content.toString("utf8"));
+            const document = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+            return;
+          }
+          if (message.action === "createFilePatch") {
+            const patch = await snapshot.repository.formatPatch(commit.hash, file.path);
+            await savePatch(root, `${path.basename(file.path)}-${commit.hash.slice(0, 8)}.patch`, patch);
+            return;
+          }
+          if (message.action === "fileHistory") {
+            this.filePath = file.path;
+            this.selectedRef = commit.hash;
+            this.selectedHash = undefined;
+            return void this.update();
+          }
+          if (message.action === "restoreFile") {
+            if (!(await requireTrusted())) return;
+            const confirmed = await vscode.window.showWarningMessage(
+              `Replace the working-tree version of '${file.path}' with ${commit.hash.slice(0, 8)}?`,
+              { modal: true }, "Restore",
+            );
+            if (confirmed === "Restore") await this.manager.restoreFileFromRevision(root, commit.hash, file.path);
+            return;
+          }
+          return;
+        }
+        if (message.action === "copyRevision") {
+          await vscode.env.clipboard.writeText(commit.hash);
+          return;
+        }
+        if (message.action === "createPatch") {
+          await savePatch(root, `${commit.hash.slice(0, 8)}.patch`, await snapshot.repository.formatPatch(commit.hash));
+          return;
+        }
+        if (message.action === "compareWithLocal") {
+          await showDiffText(`${commit.hash.slice(0, 8)} ↔ Working Tree`, await snapshot.repository.diffAgainstWorkingTree(commit.hash));
+          return;
+        }
+        if (!(await requireTrusted())) return;
+        if (message.action === "checkoutRevision") {
+          const confirmed = await vscode.window.showWarningMessage(`Checkout ${commit.hash.slice(0, 8)} in detached HEAD mode?`, { modal: true }, "Checkout");
+          if (confirmed === "Checkout") await this.manager.checkoutRevision(root, commit.hash);
+          return;
+        }
+        if (message.action === "createTag") {
+          const name = await vscode.window.showInputBox({ title: `New Tag at ${commit.hash.slice(0, 8)}`, prompt: "Tag name" });
+          if (name?.trim()) await this.manager.createTag(root, name.trim(), commit.hash);
+          return;
+        }
+      }
       if (message.type === "togglePath") {
         const change = changes.find((item) => item.path === message.path);
         if (!change) return;
@@ -300,19 +422,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const files = await this.manager.commitFiles(root, commit.hash);
         const file = files.find((item) => item.path === message.path);
         if (!file) return;
-        const oldPath = file.originalPath ?? file.path;
-        const [left, right] = await Promise.all([
-          commit.parents[0]
-            ? snapshot.repository.fileContent(oldPath, commit.parents[0])
-            : Promise.resolve(Buffer.alloc(0)),
-          file.status.startsWith("D")
-            ? Promise.resolve(Buffer.alloc(0))
-            : snapshot.repository.fileContent(file.path, commit.hash),
-        ]);
-        const label = `${file.path} (${commit.hash.slice(0, 8)})`;
-        const leftUri = this.diffProvider.register(root, `${label}:parent`, left.toString("utf8"));
-        const rightUri = this.diffProvider.register(root, `${label}:commit`, right.toString("utf8"));
-        await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
+        await this.openCommitFile(snapshot.repository, commit, file);
         return;
       }
       if (message.type === "runCommand") {
@@ -445,6 +555,19 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   public dispose(): void {
     for (const disposable of this.disposables.splice(0)) disposable.dispose();
   }
+
+  private async openCommitFile(repository: NonNullable<ReturnType<RepositoryManager["snapshot"]>>["repository"], commit: GitCommit, file: GitCommitFile): Promise<void> {
+    const root = repository.info.rootPath;
+    const oldPath = file.originalPath ?? file.path;
+    const [left, right] = await Promise.all([
+      commit.parents[0] ? repository.fileContent(oldPath, commit.parents[0]) : Promise.resolve(Buffer.alloc(0)),
+      file.status.startsWith("D") ? Promise.resolve(Buffer.alloc(0)) : repository.fileContent(file.path, commit.hash),
+    ]);
+    const label = `${file.path} (${commit.hash.slice(0, 8)})`;
+    const leftUri = this.diffProvider.register(root, `${label}:parent`, left.toString("utf8"));
+    const rightUri = this.diffProvider.register(root, `${label}:commit`, right.toString("utf8"));
+    await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
+  }
 }
 
 function statusLabel(change: GitChange): string {
@@ -464,6 +587,16 @@ async function requireTrusted(): Promise<boolean> {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function showDiffText(title: string, content: string): Promise<void> {
+  const document = await vscode.workspace.openTextDocument({ content, language: "diff" });
+  await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+}
+
+async function savePatch(root: string, name: string, content: string): Promise<void> {
+  const target = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.join(root, name)), filters: { "Patch files": ["patch"] } });
+  if (target) await vscode.workspace.fs.writeFile(target, Buffer.from(content, "utf8"));
 }
 
 const logStyles = String.raw`
@@ -489,6 +622,7 @@ const logStyles = String.raw`
   .workspace { min-height: 0; display: grid; grid-template-columns: 185px minmax(360px, 1fr) 300px; }
   .pane { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--vscode-panel-border); }
   .pane:last-child { border-right: 0; }
+  .branches { overscroll-behavior: contain; scrollbar-gutter: stable; }
   .pane-title { position: sticky; top: 0; z-index: 2; height: 28px; display: flex; align-items: center; padding: 0 9px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
   .branch-section { padding: 5px 0 2px; }
   .section-title { height: 23px; display: flex; align-items: center; padding: 0 9px; color: var(--vscode-descriptionForeground); font-weight: 600; }
@@ -497,11 +631,12 @@ const logStyles = String.raw`
   .branch-row.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .branch-row.current::before { content: '✓'; width: 11px; margin-left: -11px; color: var(--vscode-charts-green); }
   .branch-name { overflow: hidden; text-overflow: ellipsis; }
-  .commit-pane { overflow: hidden; display: grid; grid-template-rows: 27px minmax(0, 1fr); }
+  .commit-pane { overflow: hidden; display: block; }
+  .commit-scroll { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .table-head, .commit-row { display: grid; grid-template-columns: minmax(300px, 1fr) 145px 135px 82px; align-items: center; }
-  .table-head { border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .table-head { position: sticky; top: 0; z-index: 3; height: 27px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); color: var(--vscode-descriptionForeground); font-size: 11px; }
   .table-head > span { padding: 0 7px; border-right: 1px solid var(--vscode-panel-border); }
-  .commit-list { overflow: auto; min-height: 0; }
+  .commit-list { min-height: 0; overflow: visible; }
   .commit-row { min-height: 27px; cursor: pointer; }
   .commit-row:hover { background: var(--vscode-list-hoverBackground); }
   .commit-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
@@ -513,20 +648,35 @@ const logStyles = String.raw`
   .ref { padding: 1px 5px; border-radius: 8px; background: color-mix(in srgb, var(--vscode-charts-blue) 24%, transparent); color: var(--vscode-foreground); font-size: 10px; }
   .subject { overflow: hidden; text-overflow: ellipsis; }
   .muted { color: var(--vscode-descriptionForeground); }
-  .details { display: grid; grid-template-rows: auto minmax(90px, 1fr) minmax(100px, 1fr); overflow: hidden; }
-  .commit-details { padding: 10px; border-bottom: 1px solid var(--vscode-panel-border); overflow: auto; }
+  .details { --message-height: 160px; display: grid; grid-template-rows: minmax(70px, 1fr) 9px var(--message-height); overflow: hidden; }
+  .commit-details { min-height: 0; padding: 10px; overflow: auto; overscroll-behavior: contain; }
   .detail-subject { font-size: 14px; font-weight: 600; margin-bottom: 7px; white-space: pre-wrap; }
   .detail-meta { display: grid; grid-template-columns: 54px 1fr; gap: 4px 6px; color: var(--vscode-descriptionForeground); }
   .detail-meta strong { color: var(--vscode-foreground); font-weight: 400; overflow-wrap: anywhere; }
   .detail-body { margin-top: 9px; white-space: pre-wrap; line-height: 1.45; }
   .detail-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
   .action { height: 25px; padding: 0 7px; border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
-  .files { min-height: 0; overflow: auto; }
+  .files { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .detail-splitter { position: relative; min-height: 9px; cursor: row-resize; background: transparent; outline: none; }
+  .detail-splitter::before { content: ''; position: absolute; left: 0; right: 0; top: 4px; height: 1px; background: var(--vscode-panel-border); }
+  .detail-splitter:hover::before, .detail-splitter.dragging::before, .detail-splitter:focus-visible::before { height: 2px; background: var(--vscode-focusBorder); }
+  .file-tree-root { min-width: max-content; padding-bottom: 8px; }
+  .tree-row { height: 25px; display: flex; align-items: center; gap: 5px; padding-right: 7px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .tree-row:hover { background: var(--vscode-list-hoverBackground); }
+  .tree-twisty { width: 12px; text-align: center; }
+  .tree-folder { color: var(--vscode-foreground); }
+  .tree-count { margin-left: 2px; font-size: 11px; }
   .file-row { min-height: 25px; display: grid; grid-template-columns: 23px minmax(0, 1fr); align-items: center; padding: 0 7px; cursor: pointer; }
   .file-row:hover { background: var(--vscode-list-hoverBackground); }
   .file-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .file-status { font-weight: 700; }
   .file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .context-menu { position: fixed; z-index: 1000; min-width: 230px; max-width: min(360px, calc(100vw - 12px)); padding: 5px; border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 6px; background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 8px 24px rgba(0,0,0,.38); }
+  .context-menu-item { width: 100%; min-height: 28px; display: flex; align-items: center; gap: 8px; padding: 4px 9px; border-radius: 4px; text-align: left; white-space: nowrap; }
+  .context-menu-item:hover, .context-menu-item:focus-visible { outline: 0; background: var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground)); }
+  .context-menu-item:disabled { opacity: .45; pointer-events: none; }
+  .context-menu-icon { width: 17px; text-align: center; color: var(--vscode-descriptionForeground); }
+  .context-menu-separator { height: 1px; margin: 5px 3px; background: var(--vscode-menu-separatorBackground, var(--vscode-panel-border)); }
   .empty { padding: 28px 14px; text-align: center; color: var(--vscode-descriptionForeground); }
   .error { margin: 10px; padding: 8px; color: var(--vscode-errorForeground); border: 1px solid var(--vscode-inputValidation-errorBorder); background: var(--vscode-inputValidation-errorBackground); }
   .console-toolbar { display: flex; align-items: center; gap: 5px; padding: 5px 8px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
@@ -604,6 +754,7 @@ const logScript = String.raw`
   let activeToolTab = uiState.activeToolTab || 'log';
   let pendingCommitHash;
   let selectedFilePath;
+  let openMenu;
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
   const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
   const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; };
@@ -615,7 +766,66 @@ const logScript = String.raw`
     event.preventDefault(); handler();
   });
 
+  function captureScroll() {
+    const result = {};
+    for (const id of ['branch-pane', 'commit-scroll', 'changed-files', 'commit-details']) {
+      const element = document.getElementById(id);
+      if (element) result[id] = { top: element.scrollTop, left: element.scrollLeft };
+    }
+    return result;
+  }
+
+  function restoreScroll(saved) {
+    requestAnimationFrame(() => {
+      for (const [id, position] of Object.entries(saved || {})) {
+        const element = document.getElementById(id);
+        if (element) { element.scrollTop = position.top; element.scrollLeft = position.left; }
+      }
+    });
+  }
+
+  function finishRender(root, saved, graphs = false) {
+    app.append(root); restoreScroll(saved);
+    if (graphs) requestAnimationFrame(drawGraphs);
+  }
+
+  function closeContextMenu() {
+    openMenu?.remove(); openMenu = undefined;
+  }
+
+  function showContextMenu(event, items) {
+    event.preventDefault(); event.stopPropagation(); showContextMenuAt(event.clientX, event.clientY, items);
+  }
+
+  function showContextMenuAt(clientX, clientY, items) {
+    closeContextMenu();
+    const menu = node('div', 'context-menu'); menu.setAttribute('role', 'menu');
+    for (const item of items) {
+      if (item.separator) { menu.append(node('div', 'context-menu-separator')); continue; }
+      const entry = button('', item.label, () => { closeContextMenu(); item.run(); }, 'context-menu-item');
+      entry.disabled = Boolean(item.disabled); entry.setAttribute('role', 'menuitem');
+      entry.append(node('span', 'context-menu-icon', item.icon || ''), node('span', '', item.label)); menu.append(entry);
+    }
+    document.body.append(menu); openMenu = menu;
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = Math.max(6, Math.min(clientX, window.innerWidth - bounds.width - 6)) + 'px';
+    menu.style.top = Math.max(6, Math.min(clientY, window.innerHeight - bounds.height - 6)) + 'px';
+    menu.querySelector('.context-menu-item:not(:disabled)')?.focus();
+  }
+
+  function attachContextMenu(element, items) {
+    const entries = () => typeof items === 'function' ? items() : items;
+    element.addEventListener('contextmenu', event => showContextMenu(event, entries()));
+    element.addEventListener('keydown', event => {
+      if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+      event.preventDefault(); event.stopPropagation();
+      const bounds = element.getBoundingClientRect();
+      showContextMenuAt(bounds.left + Math.min(28, bounds.width / 2), bounds.top + Math.min(22, bounds.height), entries());
+    });
+  }
+
   function render() {
+    const saved = captureScroll(); closeContextMenu();
     app.replaceChildren(); const root = node('div', 'root');
     const tabs = node('div', 'tool-tabs');
     const logTab = button('Log', 'Git Log', () => selectToolTab('log'), 'tool-tab' + (activeToolTab === 'log' ? ' active' : ''));
@@ -629,19 +839,19 @@ const logScript = String.raw`
     if (activeToolTab === 'console') {
       const consoleBar = node('div', 'console-toolbar');
       consoleBar.append(node('span', '', 'Git Console'), node('span', 'spacer'), button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
-      root.append(consoleBar, consolePanel()); app.append(root); return;
+      root.append(consoleBar, consolePanel()); finishRender(root, saved); return;
     }
     if (activeToolTab === 'changes') {
-      root.append(changesToolbar(), changesWorkspace()); app.append(root); return;
+      root.append(changesToolbar(), changesWorkspace()); finishRender(root, saved); return;
     }
     if (activeToolTab === 'shelf') {
-      root.append(changesToolbar(), shelfPanel()); app.append(root); return;
+      root.append(changesToolbar(), shelfPanel()); finishRender(root, saved); return;
     }
     root.append(toolbar());
     const workspace = node('div', 'workspace');
     if (state.empty) workspace.append(node('div', 'empty', 'Open a folder containing a Git repository.'));
     else workspace.append(branchPane(), commitPane(), detailsPane());
-    root.append(workspace); app.append(root); requestAnimationFrame(drawGraphs);
+    root.append(workspace); finishRender(root, saved, true);
   }
 
   function repositorySelect() {
@@ -796,7 +1006,7 @@ const logScript = String.raw`
   }
 
   function branchPane() {
-    const pane = node('aside', 'pane branches'); pane.append(node('div', 'pane-title', 'Branches'));
+    const pane = node('aside', 'pane branches'); pane.id = 'branch-pane'; pane.append(node('div', 'pane-title', 'Branches'));
     const all = button('All', 'Show all branches', () => post('selectRef', {}), 'branch-row' + (!state.selectedRef ? ' active' : ''));
     pane.append(all);
     for (const [kind, title] of [['local','Local'], ['remote','Remote'], ['tag','Tags']]) {
@@ -804,6 +1014,17 @@ const logScript = String.raw`
       for (const branch of (state.branches || []).filter(item => item.kind === kind)) {
         const row = button(branch.name, 'Filter by ' + branch.name, () => post('selectRef', { ref: branch.name }), 'branch-row' + (state.selectedRef === branch.name ? ' active' : '') + (kind === 'local' && branch.name === state.branch ? ' current' : ''));
         row.addEventListener('dblclick', () => post('checkout', { name: branch.name, kind: branch.kind }));
+        attachContextMenu(row, () => [
+          { icon: '+', label: "New Branch from '" + branch.name + "'…", run: () => post('contextAction', { action: 'newBranchFromRef', ref: branch.name, kind: branch.kind }) },
+          { icon: '↔', label: 'Show Diff with Working Tree', run: () => post('contextAction', { action: 'showRefDiff', ref: branch.name, kind: branch.kind }) },
+          { icon: '▣', label: "New Worktree from '" + branch.name + "'…", run: () => post('contextAction', { action: 'createWorktreeFromRef', ref: branch.name, kind: branch.kind }) },
+          { separator: true },
+          { icon: '✓', label: 'Checkout', disabled: kind === 'local' && branch.name === state.branch, run: () => post('checkout', { name: branch.name, kind: branch.kind }) },
+          { icon: '⧉', label: 'Copy Branch Name', run: () => post('contextAction', { action: 'copyBranch', ref: branch.name, kind: branch.kind }) },
+          { separator: true },
+          { icon: '✎', label: 'Rename…', disabled: kind !== 'local', run: () => post('contextAction', { action: 'renameBranch', ref: branch.name, kind: branch.kind }) },
+          { icon: '×', label: 'Delete…', disabled: kind !== 'local' || branch.name === state.branch, run: () => post('contextAction', { action: 'deleteBranch', ref: branch.name, kind: branch.kind }) },
+        ]);
         section.append(row);
       }
       pane.append(section);
@@ -814,7 +1035,8 @@ const logScript = String.raw`
   function commitPane() {
     const pane = node('main', 'pane commit-pane');
     const head = node('div', 'table-head'); head.append(node('span', '', 'Commit'), node('span', '', 'Author'), node('span', '', 'Date'), node('span', '', 'Hash'));
-    const list = node('div', 'commit-list'); list.id = 'commit-list'; pane.append(head, list); renderCommitRows(list); return pane;
+    const scroll = node('div', 'commit-scroll'); scroll.id = 'commit-scroll';
+    const list = node('div', 'commit-list'); list.id = 'commit-list'; scroll.append(head, list); pane.append(scroll); renderCommitRows(list); return pane;
   }
 
   function renderCommitRows(existing) {
@@ -839,9 +1061,35 @@ const logScript = String.raw`
       };
       row.addEventListener('click', select); keyboardActivate(row, select);
       row.addEventListener('dblclick', () => post('showPatch', { hash: commit.hash }));
+      attachContextMenu(row, () => {
+        const parent = commit.parents?.[0];
+        const child = (state.commits || []).find(item => (item.parents || []).includes(commit.hash));
+        select();
+        return [
+          { icon: '⧉', label: 'Copy Revision Number', run: () => post('contextAction', { action: 'copyRevision', hash: commit.hash }) },
+          { icon: '+', label: 'Create Patch…', run: () => post('contextAction', { action: 'createPatch', hash: commit.hash }) },
+          { icon: '⌘', label: 'Cherry-Pick', run: () => post('cherryPick', { hash: commit.hash }) },
+          { separator: true },
+          { icon: '⑂', label: 'Checkout Revision…', run: () => post('contextAction', { action: 'checkoutRevision', hash: commit.hash }) },
+          { icon: '↔', label: 'Compare with Local', run: () => post('contextAction', { action: 'compareWithLocal', hash: commit.hash }) },
+          { separator: true },
+          { icon: '↶', label: 'Reset Current Branch to Here…', run: () => post('reset', { hash: commit.hash }) },
+          { icon: '↩', label: 'Revert Commit', run: () => post('revert', { hash: commit.hash }) },
+          { icon: '+', label: 'New Branch…', run: () => post('newBranch', { hash: commit.hash }) },
+          { icon: '◆', label: 'New Tag…', run: () => post('contextAction', { action: 'createTag', hash: commit.hash }) },
+          { separator: true },
+          { icon: '↑', label: 'Go to Child Commit', disabled: !child, run: () => child && selectCommitByHash(child.hash) },
+          { icon: '↓', label: 'Go to Parent Commit', disabled: !parent, run: () => parent && selectCommitByHash(parent) },
+        ];
+      });
       list.append(row);
     });
     requestAnimationFrame(drawGraphs);
+  }
+
+  function selectCommitByHash(hash) {
+    const row = document.querySelector('.commit-row[data-hash="' + CSS.escape(hash) + '"]');
+    if (row) { row.click(); row.scrollIntoView({ block: 'nearest' }); }
   }
 
   function filteredCommits() {
@@ -850,9 +1098,10 @@ const logScript = String.raw`
   }
 
   function detailsPane() {
-    const pane = node('aside', 'pane details'); const selection = state.selection;
+    const pane = node('aside', 'pane details'); pane.id = 'details-pane'; const selection = state.selection;
     if (!selection) { pane.append(node('div', 'empty', 'Select a commit to view details')); return pane; }
     const commit = selection.commit; const details = node('div', 'commit-details');
+    details.id = 'commit-details';
     details.append(node('div', 'detail-subject', commit.subject || '(no subject)'));
     const meta = node('div', 'detail-meta');
     for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', new Date(commit.authoredAt).toLocaleString()], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
@@ -860,25 +1109,128 @@ const logScript = String.raw`
     const actions = node('div', 'detail-actions');
     actions.append(button('Show Diff', 'Open full patch', () => post('showPatch', { hash: commit.hash }), 'action'), button('Cherry-pick', 'Cherry-pick commit', () => post('cherryPick', { hash: commit.hash }), 'action'), button('Revert', 'Revert commit', () => post('revert', { hash: commit.hash }), 'action'), button('New Branch', 'Create branch here', () => post('newBranch', { hash: commit.hash }), 'action'), button('Reset…', 'Reset current branch here', () => post('reset', { hash: commit.hash }), 'action'));
     details.append(actions);
-    const files = node('div', 'files'); files.setAttribute('role', 'listbox'); files.append(node('div', 'pane-title', 'Changed Files (' + selection.files.length + ')'));
-    for (const file of selection.files) {
-      const selected = selectedFilePath === file.path;
-      const row = node('div', 'file-row' + (selected ? ' selected' : '')); row.dataset.filePath = file.path;
-      row.tabIndex = 0; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
-      row.title = file.originalPath ? file.originalPath + ' → ' + file.path : file.path;
-      row.append(node('span', 'file-status', file.status[0]), node('span', 'file-path', file.path));
-      const selectFile = () => {
-        selectedFilePath = file.path;
-        document.querySelectorAll('.file-row').forEach(item => {
-          const active = item.dataset.filePath === selectedFilePath;
-          item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
-        });
-      };
-      row.addEventListener('click', selectFile); keyboardActivate(row, selectFile);
-      row.addEventListener('dblclick', () => post('openCommitFile', { hash: commit.hash, path: file.path }));
-      files.append(row);
+    const files = node('div', 'files'); files.id = 'changed-files'; files.setAttribute('role', 'tree');
+    files.append(node('div', 'pane-title', 'Changed Files (' + selection.files.length + ')'));
+    const tree = node('div', 'file-tree-root'); tree.append(fileTree(selection.files, commit)); files.append(tree);
+    const splitter = node('div', 'detail-splitter'); splitter.tabIndex = 0; splitter.setAttribute('role', 'separator'); splitter.setAttribute('aria-orientation', 'horizontal'); splitter.title = 'Drag to resize commit message';
+    setupDetailSplitter(pane, splitter);
+    pane.append(files, splitter, details);
+    requestAnimationFrame(() => setMessagePaneHeight(pane, Number(uiState.messagePaneHeight) || 160, false));
+    return pane;
+  }
+
+  function fileTree(files, commit) {
+    const root = { path: '', directories: new Map(), files: [] };
+    for (const file of files) {
+      const parts = file.path.split('/'); let current = root; let currentPath = '';
+      for (const part of parts.slice(0, -1)) {
+        currentPath = currentPath ? currentPath + '/' + part : part;
+        if (!current.directories.has(part)) current.directories.set(part, { name: part, path: currentPath, directories: new Map(), files: [] });
+        current = current.directories.get(part);
+      }
+      current.files.push(file);
     }
-    pane.append(details, files); return pane;
+    const container = node('div');
+    for (const directory of root.directories.values()) container.append(renderDirectory(directory, 0, commit));
+    for (const file of root.files) container.append(commitFileRow(file, 0, commit));
+    return container;
+  }
+
+  function renderDirectory(directory, depth, commit) {
+    const section = node('section');
+    const collapsed = new Set(uiState.collapsedFileFolders || []).has(directory.path);
+    const row = node('div', 'tree-row'); row.style.paddingLeft = (8 + depth * 16) + 'px'; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-expanded', String(!collapsed));
+    const count = countTreeFiles(directory);
+    const twisty = node('span', 'tree-twisty', collapsed ? '›' : '⌄');
+    row.append(twisty, node('span', 'tree-folder', '▱ ' + directory.name), node('span', 'tree-count', count + (count === 1 ? ' file' : ' files')));
+    const children = node('div'); children.hidden = collapsed;
+    for (const child of directory.directories.values()) children.append(renderDirectory(child, depth + 1, commit));
+    for (const file of directory.files) children.append(commitFileRow(file, depth + 1, commit));
+    const toggle = () => {
+      children.hidden = !children.hidden; twisty.textContent = children.hidden ? '›' : '⌄'; row.setAttribute('aria-expanded', String(!children.hidden));
+      const collapsedFolders = new Set(uiState.collapsedFileFolders || []);
+      if (children.hidden) collapsedFolders.add(directory.path); else collapsedFolders.delete(directory.path);
+      saveUiState({ collapsedFileFolders: [...collapsedFolders] });
+    };
+    row.addEventListener('click', toggle); keyboardActivate(row, toggle); section.append(row, children); return section;
+  }
+
+  function countTreeFiles(directory) {
+    let count = directory.files.length;
+    for (const child of directory.directories.values()) count += countTreeFiles(child);
+    return count;
+  }
+
+  function commitFileRow(file, depth, commit) {
+    const selected = selectedFilePath === file.path;
+    const row = node('div', 'file-row' + (selected ? ' selected' : '')); row.dataset.filePath = file.path; row.style.paddingLeft = (10 + depth * 16) + 'px';
+    row.tabIndex = 0; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-selected', String(selected));
+    row.title = file.originalPath ? file.originalPath + ' → ' + file.path : file.path;
+    row.append(node('span', 'file-status', file.status[0]), node('span', 'file-path', file.path.split('/').pop()));
+    const selectFile = () => {
+      selectedFilePath = file.path;
+      document.querySelectorAll('.file-row').forEach(item => {
+        const active = item.dataset.filePath === selectedFilePath;
+        item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
+      });
+    };
+    row.addEventListener('click', selectFile); keyboardActivate(row, selectFile);
+    row.addEventListener('dblclick', () => post('openCommitFile', { hash: commit.hash, path: file.path }));
+    attachContextMenu(row, () => {
+      selectFile();
+      return [
+        { icon: '↔', label: 'Show Diff', run: () => post('contextAction', { action: 'showFileDiff', hash: commit.hash, path: file.path }) },
+        { icon: '⇄', label: 'Compare with Local', run: () => post('contextAction', { action: 'compareFileWithLocal', hash: commit.hash, path: file.path }) },
+        { icon: '□', label: 'Open Repository Version', run: () => post('contextAction', { action: 'openRepositoryFile', hash: commit.hash, path: file.path }) },
+        { separator: true },
+        { icon: '+', label: 'Create Patch…', run: () => post('contextAction', { action: 'createFilePatch', hash: commit.hash, path: file.path }) },
+        { icon: '↓', label: 'Get from Revision…', disabled: file.status.startsWith('D'), run: () => post('contextAction', { action: 'restoreFile', hash: commit.hash, path: file.path }) },
+        { icon: '◷', label: 'History Up to Here', run: () => post('contextAction', { action: 'fileHistory', hash: commit.hash, path: file.path }) },
+        { separator: true },
+        { icon: '⧉', label: 'Copy Path', run: () => post('contextAction', { action: 'copyPath', hash: commit.hash, path: file.path }) },
+      ];
+    });
+    return row;
+  }
+
+  function setupDetailSplitter(pane, splitter) {
+    const resize = event => {
+      const bounds = pane.getBoundingClientRect();
+      setMessagePaneHeight(pane, bounds.bottom - event.clientY, false);
+    };
+    splitter.addEventListener('mousedown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault(); splitter.focus(); splitter.classList.add('dragging'); resize(event);
+      const move = moveEvent => resize(moveEvent);
+      const finish = () => {
+        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', finish);
+        splitter.classList.remove('dragging');
+        saveUiState({ messagePaneHeight: parseFloat(getComputedStyle(pane).getPropertyValue('--message-height')) });
+      };
+      window.addEventListener('mousemove', move); window.addEventListener('mouseup', finish);
+    });
+    splitter.addEventListener('dblclick', () => setMessagePaneHeight(pane, 160, true));
+    splitter.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault(); const current = parseFloat(getComputedStyle(pane).getPropertyValue('--message-height')) || 160;
+      setMessagePaneHeight(pane, current + (event.key === 'ArrowUp' ? 16 : -16), true);
+    });
+    if ('ResizeObserver' in window) {
+      const observer = new ResizeObserver(() => {
+        if (!pane.isConnected) { observer.disconnect(); return; }
+        const current = parseFloat(getComputedStyle(pane).getPropertyValue('--message-height')) || 160;
+        setMessagePaneHeight(pane, current, false);
+      });
+      observer.observe(pane);
+    }
+  }
+
+  function setMessagePaneHeight(pane, requested, persist) {
+    const maximum = Math.max(80, pane.clientHeight - 80);
+    const height = Math.max(80, Math.min(requested, maximum)); pane.style.setProperty('--message-height', height + 'px');
+    const splitter = pane.querySelector('.detail-splitter');
+    if (splitter) { splitter.setAttribute('aria-valuemin', '80'); splitter.setAttribute('aria-valuemax', String(maximum)); splitter.setAttribute('aria-valuenow', String(Math.round(height))); }
+    if (persist) saveUiState({ messagePaneHeight: height });
   }
 
   function graphLayout(commits) {
@@ -903,6 +1255,16 @@ const logScript = String.raw`
 
   const shortRef = ref => ref.replace(/^HEAD -> /, '').replace(/^tag: /, '');
   const formatDate = value => { const date = new Date(value); const now = new Date(); return date.toDateString() === now.toDateString() ? date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : date.toLocaleDateString(); };
+  function updateSelectionWithoutRerender() {
+    const selectedHash = state.selection?.commit.hash;
+    document.querySelectorAll('.commit-row').forEach(item => {
+      const active = item.dataset.hash === selectedHash;
+      item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
+    });
+    const current = document.getElementById('details-pane');
+    if (current) current.replaceWith(detailsPane());
+  }
+
   window.addEventListener('message', event => {
     if (event.data.type === 'state') {
       state = event.data.state; pendingCommitHash = undefined;
@@ -912,12 +1274,15 @@ const logScript = String.raw`
     if (event.data.type === 'selection') {
       state.selection = event.data.selection; pendingCommitHash = undefined;
       if (!(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
-      render();
+      updateSelectionWithoutRerender();
     }
     if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-400); if (activeToolTab === 'console') render(); }
     if (event.data.type === 'activateTab') { selectToolTab(event.data.tab); }
     if (event.data.type === 'committed') { saveUiState({ commitMessage: '' }); render(); }
     if (event.data.type === 'error') { const error = node('div', 'error', event.data.message); app.prepend(error); }
   });
+  document.addEventListener('pointerdown', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); });
+  document.addEventListener('scroll', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, true);
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(); });
   post('ready'); render();
 `;

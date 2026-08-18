@@ -9,6 +9,9 @@
 - Add a credential-redacted Git Console, VCS-style branch popup, Git operations popup, and one-key Extension Host launch configuration.
 - Make Log commits and Changed Files selectable by mouse or keyboard, and open file-specific commit diffs on double-click.
 - Strip record-separator newlines from parsed commit hashes so every Log row, not only the first one, can be selected.
+- Keep the Log table header and rows in one stable scroll area without jumping when commit details load.
+- Add IntelliJ-style context menus for branches, commits, and changed files, backed by validated Git operations.
+- Group changed files by folder and add a persistent draggable splitter for resizing the commit details pane.
 
 ## 0.1.0-alpha.3
 
