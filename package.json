@@ -30,6 +30,7 @@
     "test": "npm run test:unit && npm run test:extension",
     "test:unit": "npm run compile && node --test test/*.test.mjs",
     "test:extension": "npm run compile && node test/run-extension-tests.mjs",
+    "test:extension:min": "npm run compile && node test/run-extension-tests.mjs 1.95.0",
     "package": "npm run compile && vsce package --allow-missing-repository"
   },
   "devDependencies": {

@@ -8,6 +8,7 @@ The implementation is intentionally layered:
 - Repository state is parsed from machine-readable Git output and refreshed incrementally.
 - The extension host owns Git operations; the UI is built with VS Code Tree Views and output/diff surfaces.
 - Changelists, Shelf, hunk staging, history, conflict actions, Worktrees, Remotes, Stashes, and Submodules are implemented as independent layers.
+- CI validates core behavior on Windows, macOS, and Linux, plus Extension Host activation on VS Code 1.95 and stable.
 
 ## Current status
 

@@ -695,8 +695,8 @@ async function repositoryCandidates(workspacePath: string): Promise<string[]> {
   const candidates = new Set<string>([workspacePath]);
   const queue = [workspacePath];
   let visited = 0;
-  while (queue.length > 0 && visited < 20_000) {
-    const directory = queue.shift()!;
+  for (let cursor = 0; cursor < queue.length && visited < 20_000; cursor += 1) {
+    const directory = queue[cursor];
     visited += 1;
     try {
       const entries = await opendir(directory);
@@ -707,7 +707,10 @@ async function repositoryCandidates(workspacePath: string): Promise<string[]> {
         }
         if (!entry.isDirectory() || entry.isSymbolicLink() || DISCOVERY_EXCLUDES.has(entry.name)) continue;
         const child = path.join(directory, entry.name);
-        if (entry.name.endsWith(".git")) candidates.add(child);
+        if (entry.name.endsWith(".git")) {
+          candidates.add(child);
+          continue;
+        }
         queue.push(child);
       }
     } catch {

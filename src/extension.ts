@@ -726,7 +726,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.removeRemote", async (node?: RemoteNode) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(node?.repositoryRoot);
       if (!first) return;
       const name = node?.remote.name ?? (await vscode.window.showQuickPick(
         (await manager.remotes(first.repository.info.rootPath)).map((remote) => remote.name),
@@ -739,7 +739,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.setRemoteUrl", async (node?: RemoteNode) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(node?.repositoryRoot);
       if (!first) return;
       const remote = node?.remote ?? (await manager.remotes(first.repository.info.rootPath))[0];
       if (!remote) return;
@@ -759,7 +759,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.fetchRemote", async (node?: RemoteNode) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(node?.repositoryRoot);
       if (!first) return;
       const name = node?.remote.name ?? (await vscode.window.showQuickPick(
         (await manager.remotes(first.repository.info.rootPath)).map((remote) => remote.name),
@@ -770,7 +770,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.pushRemote", async (node?: RemoteNode) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(node?.repositoryRoot);
       if (!first) return;
       const root = node?.repositoryRoot ?? first.repository.info.rootPath;
       const name = node?.remote.name ?? (await vscode.window.showQuickPick(

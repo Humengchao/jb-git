@@ -38,6 +38,6 @@ The staged local implementation currently reaches the following checkpoint:
 | P3 | Core complete, UI intentionally compact | Changelists, hunk partial commit, Shelf, Patch import, History, File History, Blame, Stash |
 | P4 | Core workflows complete | Merge/Rebase/Cherry-pick/Revert/Reset, continue/abort/skip, conflict ours/theirs/mark-resolved, Bisect |
 | P5 | Partial | Worktree, Submodule, Sparse Checkout, LFS pull; large-repository tuning and full multi-root transaction semantics remain |
-| P6 | Pending | Git-version fallback matrix, accessibility, remote extension host testing, CI/release/signing |
+| P6 | Partial | Windows/macOS/Linux core CI and VS Code 1.95/stable Extension Host matrix; Git-version fallbacks, accessibility, remote-host testing, release/signing remain |
 
 The current code deliberately stops short of claiming complete IntelliJ parity. The remaining work should be implemented as separate commits: a Webview-backed commit graph and three-way merge editor, interactive rebase sequencing, full multi-root rollback, capability-based command fallbacks, and cross-platform/package verification.

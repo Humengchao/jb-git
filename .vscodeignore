@@ -1,4 +1,5 @@
 .vscode
+.github
 .gitignore
 node_modules
 src
