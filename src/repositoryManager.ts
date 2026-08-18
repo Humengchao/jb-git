@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { discoverRepositories, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
-import { GitBranch, GitCommitOptions, GitOperationKind, GitOperationState, GitPullStrategy, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
+import { GitBranch, GitCommitOptions, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -200,6 +200,35 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async deleteTag(rootPath: string, name: string): Promise<void> {
     await this.requireRepository(rootPath).deleteTag(name);
+    await this.refresh(rootPath);
+  }
+
+  public async remotes(rootPath: string): Promise<GitRemote[]> {
+    return this.requireRepository(rootPath).remotes();
+  }
+
+  public async addRemote(rootPath: string, name: string, url: string): Promise<void> {
+    await this.requireRepository(rootPath).addRemote(name, url);
+    await this.refresh(rootPath);
+  }
+
+  public async removeRemote(rootPath: string, name: string): Promise<void> {
+    await this.requireRepository(rootPath).removeRemote(name);
+    await this.refresh(rootPath);
+  }
+
+  public async setRemoteUrl(rootPath: string, name: string, url: string, push = false): Promise<void> {
+    await this.requireRepository(rootPath).setRemoteUrl(name, url, push);
+    await this.refresh(rootPath);
+  }
+
+  public async fetchRemote(rootPath: string, name: string): Promise<void> {
+    await this.requireRepository(rootPath).fetchRemote(name);
+    await this.refresh(rootPath);
+  }
+
+  public async pushRemote(rootPath: string, name: string, branch?: string, forceWithLease = false): Promise<void> {
+    await this.requireRepository(rootPath).pushRemote(name, branch, forceWithLease);
     await this.refresh(rootPath);
   }
 

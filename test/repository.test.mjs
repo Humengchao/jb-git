@@ -66,6 +66,14 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.ok((await repository.branches()).some((branch) => branch.kind === "tag" && branch.name === "v0.1.0-test"));
   await repository.deleteTag("v0.1.0-test");
 
+  const remotePath = mkdtempSync(join(tmpdir(), "jb-git-remote-"));
+  git(remotePath, "init", "--bare", "-q");
+  await repository.addRemote("origin", remotePath);
+  assert.deepEqual(await repository.remotes(), [{ name: "origin", fetchUrl: remotePath, pushUrl: remotePath }]);
+  await repository.setRemoteUrl("origin", remotePath, true);
+  await repository.removeRemote("origin");
+  assert.deepEqual(await repository.remotes(), []);
+
   const worktreePath = `${root}-worktree`;
   await repository.addWorktree(worktreePath, defaultBranch, "feature/worktree");
   const worktrees = await repository.worktrees();

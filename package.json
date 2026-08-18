@@ -166,6 +166,38 @@
         "title": "JB Git: Delete Tag"
       },
       {
+        "command": "jbGit.addRemote",
+        "title": "JB Git: Add Remote"
+      },
+      {
+        "command": "jbGit.removeRemote",
+        "title": "JB Git: Remove Remote"
+      },
+      {
+        "command": "jbGit.setRemoteUrl",
+        "title": "JB Git: Set Remote URL"
+      },
+      {
+        "command": "jbGit.fetchRemote",
+        "title": "JB Git: Fetch Remote"
+      },
+      {
+        "command": "jbGit.pushRemote",
+        "title": "JB Git: Push Remote"
+      },
+      {
+        "command": "jbGit.applyStash",
+        "title": "JB Git: Apply Stash"
+      },
+      {
+        "command": "jbGit.popStash",
+        "title": "JB Git: Pop Stash"
+      },
+      {
+        "command": "jbGit.dropStash",
+        "title": "JB Git: Drop Stash"
+      },
+      {
         "command": "jbGit.initializeRepository",
         "title": "JB Git: Initialize Repository"
       },
@@ -230,6 +262,16 @@
           "id": "jbGit.worktrees",
           "name": "Worktrees",
           "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.remotes",
+          "name": "Remotes",
+          "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.stashes",
+          "name": "Stashes",
+          "when": "jbGit.hasWorkspace"
         }
       ]
     },
@@ -237,7 +279,7 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves || view == jbGit.worktrees",
+          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves || view == jbGit.worktrees || view == jbGit.remotes || view == jbGit.stashes",
           "group": "navigation@1"
         },
         {
@@ -289,6 +331,16 @@
           "command": "jbGit.pruneWorktrees",
           "when": "view == jbGit.worktrees",
           "group": "navigation@3"
+        },
+        {
+          "command": "jbGit.addRemote",
+          "when": "view == jbGit.remotes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.stash",
+          "when": "view == jbGit.stashes",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -356,6 +408,41 @@
           "command": "jbGit.removeWorktree",
           "when": "view == jbGit.worktrees && (viewItem == jbGit.worktree || viewItem == jbGit.worktree.prunable)",
           "group": "inline@1"
+        },
+        {
+          "command": "jbGit.fetchRemote",
+          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
+          "group": "inline@0"
+        },
+        {
+          "command": "jbGit.pushRemote",
+          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.setRemoteUrl",
+          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
+          "group": "inline@2"
+        },
+        {
+          "command": "jbGit.removeRemote",
+          "when": "view == jbGit.remotes && viewItem == jbGit.remote",
+          "group": "inline@3"
+        },
+        {
+          "command": "jbGit.applyStash",
+          "when": "view == jbGit.stashes && viewItem == jbGit.stash",
+          "group": "inline@0"
+        },
+        {
+          "command": "jbGit.popStash",
+          "when": "view == jbGit.stashes && viewItem == jbGit.stash",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.dropStash",
+          "when": "view == jbGit.stashes && viewItem == jbGit.stash",
+          "group": "inline@2"
         }
       ]
     },

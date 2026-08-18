@@ -161,6 +161,18 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["remote", "remove", name], { cwd: this.info.rootPath }));
   }
 
+  public async setRemoteUrl(name: string, url: string, push = false): Promise<void> {
+    await this.serial(() => this.runner.run(["remote", "set-url", ...(push ? ["--push"] : []), name, url], { cwd: this.info.rootPath }));
+  }
+
+  public async fetchRemote(name: string, prune = true): Promise<void> {
+    await this.serial(() => this.runner.run(["fetch", ...(prune ? ["--prune"] : []), name], { cwd: this.info.rootPath }));
+  }
+
+  public async pushRemote(name: string, branch?: string, forceWithLease = false): Promise<void> {
+    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : []), name, ...(branch ? [branch] : [])], { cwd: this.info.rootPath }));
+  }
+
   public async createTag(name: string, ref = "HEAD"): Promise<void> {
     await this.serial(() => this.runner.run(["tag", name, ref], { cwd: this.info.rootPath }));
   }

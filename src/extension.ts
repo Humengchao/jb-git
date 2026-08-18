@@ -10,6 +10,8 @@ import { ChangelistStore } from "./changelists/store";
 import { ShelfStore } from "./shelves/store";
 import { ShelfNode, ShelfTreeProvider } from "./views/shelfTree";
 import { WorktreeNode, WorktreeTreeProvider } from "./views/worktreeTree";
+import { RemoteNode, RemoteTreeProvider } from "./views/remoteTree";
+import { StashNode, StashTreeProvider } from "./views/stashTree";
 import { RepositoryManager } from "./repositoryManager";
 
 function workspacePaths(): string[] {
@@ -57,12 +59,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const changelists = new ChangelistTreeProvider(manager, changelistStore);
   const shelves = new ShelfTreeProvider(manager, shelfStore);
   const worktrees = new WorktreeTreeProvider(manager);
+  const remotes = new RemoteTreeProvider(manager);
+  const stashes = new StashTreeProvider(manager);
   const repositoryView = vscode.window.createTreeView("jbGit.repositories", { treeDataProvider: repositories, showCollapseAll: true });
   const changesView = vscode.window.createTreeView("jbGit.changes", { treeDataProvider: changes, showCollapseAll: true });
   const historyView = vscode.window.createTreeView("jbGit.history", { treeDataProvider: history, showCollapseAll: true });
   const changelistsView = vscode.window.createTreeView("jbGit.changelists", { treeDataProvider: changelists, showCollapseAll: true });
   const shelvesView = vscode.window.createTreeView("jbGit.shelves", { treeDataProvider: shelves, showCollapseAll: true });
   const worktreesView = vscode.window.createTreeView("jbGit.worktrees", { treeDataProvider: worktrees, showCollapseAll: true });
+  const remotesView = vscode.window.createTreeView("jbGit.remotes", { treeDataProvider: remotes, showCollapseAll: true });
+  const stashesView = vscode.window.createTreeView("jbGit.stashes", { treeDataProvider: stashes, showCollapseAll: true });
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   branchStatus.command = "jbGit.openChanges";
   branchStatus.tooltip = "Open JB Git Local Changes";
@@ -103,12 +109,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     changelists,
     shelves,
     worktrees,
+    remotes,
+    stashes,
     repositoryView,
     changesView,
     historyView,
     changelistsView,
     shelvesView,
     worktreesView,
+    remotesView,
+    stashesView,
     diffProvider,
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
@@ -451,6 +461,90 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const answer = await vscode.window.showWarningMessage(`Delete tag ${tag}?`, { modal: true }, "Delete");
       if (answer !== "Delete") return;
       await runWithNotification(`Deleting tag ${tag}`, () => manager.deleteTag(first.repository.info.rootPath, tag));
+    }),
+    vscode.commands.registerCommand("jbGit.addRemote", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const name = await vscode.window.showInputBox({ prompt: "Remote name", value: "origin" });
+      if (!name?.trim()) return;
+      const url = await vscode.window.showInputBox({ prompt: `URL for remote ${name.trim()}`, placeHolder: "https://example.com/repository.git" });
+      if (!url?.trim()) return;
+      await runWithNotification(`Adding remote ${name.trim()}`, () => manager.addRemote(first.repository.info.rootPath, name.trim(), url.trim()));
+    }),
+    vscode.commands.registerCommand("jbGit.removeRemote", async (node?: RemoteNode) => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const name = node?.remote.name ?? (await vscode.window.showQuickPick(
+        (await manager.remotes(first.repository.info.rootPath)).map((remote) => remote.name),
+        { placeHolder: "Select a remote to remove" },
+      ));
+      if (!name) return;
+      const answer = await vscode.window.showWarningMessage(`Remove remote ${name}?`, { modal: true }, "Remove");
+      if (answer !== "Remove") return;
+      await runWithNotification(`Removing remote ${name}`, () => manager.removeRemote(node?.repositoryRoot ?? first.repository.info.rootPath, name));
+    }),
+    vscode.commands.registerCommand("jbGit.setRemoteUrl", async (node?: RemoteNode) => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const remote = node?.remote ?? (await manager.remotes(first.repository.info.rootPath))[0];
+      if (!remote) return;
+      const kind = await vscode.window.showQuickPick(
+        [{ label: "Fetch URL", push: false }, { label: "Push URL", push: true }],
+        { placeHolder: "Which remote URL should be changed?" },
+      );
+      if (!kind) return;
+      const current = kind.push ? remote.pushUrl : remote.fetchUrl;
+      const url = await vscode.window.showInputBox({ prompt: `New ${kind.label.toLowerCase()} for ${remote.name}`, value: current });
+      if (!url?.trim()) return;
+      await runWithNotification(`Updating remote ${remote.name}`, () => manager.setRemoteUrl(node?.repositoryRoot ?? first.repository.info.rootPath, remote.name, url.trim(), kind.push));
+    }),
+    vscode.commands.registerCommand("jbGit.fetchRemote", async (node?: RemoteNode) => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const name = node?.remote.name ?? (await vscode.window.showQuickPick(
+        (await manager.remotes(first.repository.info.rootPath)).map((remote) => remote.name),
+        { placeHolder: "Select a remote to fetch" },
+      ));
+      if (!name) return;
+      await runWithNotification(`Fetching ${name}`, () => manager.fetchRemote(node?.repositoryRoot ?? first.repository.info.rootPath, name));
+    }),
+    vscode.commands.registerCommand("jbGit.pushRemote", async (node?: RemoteNode) => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const root = node?.repositoryRoot ?? first.repository.info.rootPath;
+      const name = node?.remote.name ?? (await vscode.window.showQuickPick(
+        (await manager.remotes(root)).map((remote) => remote.name),
+        { placeHolder: "Select a remote to push" },
+      ));
+      if (!name) return;
+      const branch = first.status?.branch.head;
+      if (!branch) return void vscode.window.showInformationMessage("Push requires a checked-out local branch.");
+      const mode = await vscode.window.showQuickPick(
+        [{ label: "Push", force: false }, { label: "Force with lease", force: true }],
+        { placeHolder: `Push ${branch} to ${name}` },
+      );
+      if (!mode) return;
+      if (mode.force && (await vscode.window.showWarningMessage("Force with lease can rewrite remote history. Continue?", { modal: true }, "Push")) !== "Push") return;
+      await runWithNotification(`Pushing ${branch} to ${name}`, () => manager.pushRemote(root, name, branch, mode.force));
+    }),
+    vscode.commands.registerCommand("jbGit.applyStash", async (node?: StashNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      await runWithNotification(`Applying ${node.entry.ref}`, () => manager.applyStash(node.repositoryRoot, node.entry.ref));
+    }),
+    vscode.commands.registerCommand("jbGit.popStash", async (node?: StashNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      await runWithNotification(`Popping ${node.entry.ref}`, () => manager.applyStash(node.repositoryRoot, node.entry.ref, true));
+    }),
+    vscode.commands.registerCommand("jbGit.dropStash", async (node?: StashNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      const answer = await vscode.window.showWarningMessage(`Drop ${node.entry.ref}?`, { modal: true }, "Drop");
+      if (answer !== "Drop") return;
+      await runWithNotification(`Dropping ${node.entry.ref}`, () => manager.dropStash(node.repositoryRoot, node.entry.ref));
     }),
     vscode.commands.registerCommand("jbGit.checkoutBranch", async (node?: BranchNode) => {
       if (!(await requireTrustedWorkspace())) return;
