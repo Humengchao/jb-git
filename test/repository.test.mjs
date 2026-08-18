@@ -55,6 +55,10 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.equal(history[0].subject, "update");
   assert.equal((await repository.operationState()).kind, "none");
   assert.match(await repository.showCommit(revision), /update/);
+  const blame = await repository.blame("file.txt");
+  assert.equal(blame.length, 1);
+  assert.equal(blame[0].author, "JB Git Test");
+  assert.equal(blame[0].content, "two");
 
   await repository.createBranch("feature/test");
   assert.equal(git(root, "branch", "--show-current"), "feature/test");

@@ -145,6 +145,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       channel.append(output);
       channel.show(true);
     }),
+    vscode.commands.registerCommand("jbGit.blame", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== "file") {
+        await vscode.window.showInformationMessage("Open a file in the editor before running JB Git Blame.");
+        return;
+      }
+      const filePath = editor.document.uri.fsPath;
+      const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
+      if (!snapshot) {
+        await vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
+        return;
+      }
+      const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
+      const entries = await runWithNotification(`Blaming ${relativePath}`, () => manager.blame(snapshot.repository.info.rootPath, relativePath));
+      if (!entries) return;
+      const channel = vscode.window.createOutputChannel(`JB Git · Blame · ${path.basename(filePath)}`);
+      channel.append(entries.map((entry) => `${String(entry.finalLine).padStart(5)} ${entry.hash.slice(0, 12)} ${entry.author} ${entry.authorTime.slice(0, 10)}  ${entry.content}`).join("\n"));
+      channel.show(true);
+    }),
     vscode.commands.registerCommand("jbGit.initializeRepository", async () => {
       if (!(await requireTrustedWorkspace())) return;
       const root = workspacePaths()[0];

@@ -13,8 +13,8 @@ export class HistoryRootNode extends vscode.TreeItem {
 }
 
 export class CommitNode extends vscode.TreeItem {
-  public constructor(public readonly repositoryRoot: string, public readonly commit: GitCommit) {
-    super(commit.subject || "(no subject)", vscode.TreeItemCollapsibleState.None);
+  public constructor(public readonly repositoryRoot: string, public readonly commit: GitCommit, graphPrefix = "") {
+    super(`${graphPrefix}${commit.subject || "(no subject)"}`, vscode.TreeItemCollapsibleState.None);
     this.description = `${commit.hash.slice(0, 10)} · ${commit.author} · ${new Date(commit.authoredAt).toLocaleString()}`;
     this.tooltip = `${commit.hash}\n${commit.body || commit.subject}`;
     this.contextValue = "jbGit.commit";
@@ -44,7 +44,14 @@ export class HistoryTreeProvider implements vscode.TreeDataProvider<HistoryRootN
     if (element instanceof HistoryRootNode) {
       try {
         const commits = await element.snapshot.repository.log(100);
-        return commits.map((commit) => new CommitNode(element.snapshot.repository.info.rootPath, commit));
+        const lanes: string[] = [];
+        return commits.map((commit) => {
+          let lane = lanes.indexOf(commit.hash);
+          if (lane < 0) lane = 0;
+          const prefix = `${"│ ".repeat(lane)}${commit.parents.length > 1 ? "┼ " : "● "}`;
+          lanes.splice(lane, 1, ...commit.parents);
+          return new CommitNode(element.snapshot.repository.info.rootPath, commit, prefix);
+        });
       } catch {
         return [];
       }
@@ -56,4 +63,3 @@ export class HistoryTreeProvider implements vscode.TreeDataProvider<HistoryRootN
     this.changedEmitter.dispose();
   }
 }
-

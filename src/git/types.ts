@@ -115,3 +115,13 @@ export interface GitDiffHunk {
   newLines: number;
   lines: string[];
 }
+
+export interface GitBlameEntry {
+  hash: string;
+  originalLine: number;
+  finalLine: number;
+  author: string;
+  authorTime: string;
+  summary: string;
+  content: string;
+}

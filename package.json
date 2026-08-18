@@ -58,6 +58,10 @@
         "title": "JB Git: Show Commit"
       },
       {
+        "command": "jbGit.blame",
+        "title": "JB Git: Blame Active File"
+      },
+      {
         "command": "jbGit.commit",
         "title": "JB Git: Commit Staged Changes"
       },
@@ -284,6 +288,13 @@
       ]
     },
     "menus": {
+      "editor/title": [
+        {
+          "command": "jbGit.blame",
+          "when": "resourceScheme == file",
+          "group": "navigation@80"
+        }
+      ],
       "view/title": [
         {
           "command": "jbGit.refresh",

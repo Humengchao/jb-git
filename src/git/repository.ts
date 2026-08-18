@@ -7,6 +7,7 @@ import {
   GitBranch,
   GitCommitOptions,
   GitCommit,
+  GitBlameEntry,
   GitDiffHunk,
   GitPullStrategy,
   GitOperationState,
@@ -99,6 +100,43 @@ export class GitRepository {
 
   public async showCommit(hash: string): Promise<string> {
     return this.runner.text(["show", "--format=fuller", "--stat", "--patch", "--decorate=short", hash], { cwd: this.info.rootPath });
+  }
+
+  public async blame(pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
+    const output = await this.runner.text([
+      "blame",
+      "--line-porcelain",
+      ...(revision ? [revision] : []),
+      "--",
+      pathSpec,
+    ], { cwd: this.info.rootPath });
+    const entries: GitBlameEntry[] = [];
+    let current: GitBlameEntry | undefined;
+    for (const line of output.replace(/\r\n/g, "\n").split("\n")) {
+      const header = /^([0-9a-f]{7,40}) (\d+) (\d+)(?: \d+)?$/.exec(line);
+      if (header) {
+        current = {
+          hash: header[1],
+          originalLine: Number(header[2]),
+          finalLine: Number(header[3]),
+          author: "",
+          authorTime: "",
+          summary: "",
+          content: "",
+        };
+        continue;
+      }
+      if (!current) continue;
+      if (line.startsWith("author ")) current.author = line.slice("author ".length);
+      else if (line.startsWith("author-time ")) current.authorTime = new Date(Number(line.slice("author-time ".length)) * 1000).toISOString();
+      else if (line.startsWith("summary ")) current.summary = line.slice("summary ".length);
+      else if (line.startsWith("\t")) {
+        current.content = line.slice(1);
+        entries.push(current);
+        current = undefined;
+      }
+    }
+    return entries;
   }
 
   public async patch(paths: readonly string[]): Promise<string> {
