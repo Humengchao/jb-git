@@ -8,7 +8,7 @@ import { discoverRepositories, discoverRepository } from "../dist/git/repository
 import { GitRunner } from "../dist/git/runner.js";
 
 function git(cwd, ...args) {
-  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  return execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
 }
 
 test("discovers a repository and reads its status", async () => {

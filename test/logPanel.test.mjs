@@ -3,11 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const source = readFileSync(new URL("../src/webviews/logPanel.ts", import.meta.url), "utf8");
-const scriptMatch = source.match(/const logScript = String\.raw`([\s\S]*?)`;\n$/);
+const scriptMatch = source.match(/const logScript = String\.raw`([\s\S]*?)`;\r?\n$/);
 
 function graphHarness(collapsed = []) {
   assert.ok(scriptMatch);
-  const graphSource = scriptMatch[1].match(/(const graphEdgeKey = [\s\S]*?)(?=\n  const shortRef)/);
+  const graphSource = scriptMatch[1].match(/(const graphEdgeKey = [\s\S]*?)(?=\r?\n  const shortRef)/);
   assert.ok(graphSource);
   return new Function("collapsedGraphSeries", "colors", `${graphSource[1]}; return { graphModel, graphLayout };`)(new Set(collapsed), ["blue", "red", "green"]);
 }

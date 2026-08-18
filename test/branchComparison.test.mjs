@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const source = readFileSync(new URL("../src/webviews/branchComparison.ts", import.meta.url), "utf8");
-const scriptMatch = source.match(/const comparisonScript = String\.raw`([\s\S]*?)`;\n$/);
+const scriptMatch = source.match(/const comparisonScript = String\.raw`([\s\S]*?)`;\r?\n$/);
 
 test("keeps the branch comparison webview script syntactically valid", () => {
   assert.ok(scriptMatch, "embedded comparison script should be present");
