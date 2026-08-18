@@ -1,5 +1,7 @@
 # JB Git
 
+Languages: English · 简体中文版本见 `README.zh-CN.md`
+
 JB Git is a VS Code extension project that brings an IntelliJ IDEA-inspired Git workspace to VS Code.
 
 The implementation is intentionally layered:
