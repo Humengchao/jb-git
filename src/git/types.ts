@@ -51,3 +51,15 @@ export interface GitBranch {
   tracking?: string;
 }
 
+export interface GitCommitOptions {
+  amend?: boolean;
+  signoff?: boolean;
+  noVerify?: boolean;
+}
+
+export interface GitStashEntry {
+  ref: string;
+  message: string;
+}
+
+export type GitPullStrategy = "merge" | "rebase" | "ff-only";

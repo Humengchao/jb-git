@@ -1,7 +1,15 @@
 import * as path from "node:path";
+import { readFile } from "node:fs/promises";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
-import { GitBranch, GitRepositoryInfo, GitStatusSnapshot } from "./types";
+import {
+  GitBranch,
+  GitCommitOptions,
+  GitPullStrategy,
+  GitRepositoryInfo,
+  GitStashEntry,
+  GitStatusSnapshot,
+} from "./types";
 
 function trimOutput(value: string): string {
   return value.replace(/[\r\n]+$/, "");
@@ -72,6 +80,87 @@ export class GitRepository {
 
   public async fetch(): Promise<void> {
     await this.serial(() => this.runner.run(["fetch", "--all", "--prune"], { cwd: this.info.rootPath }));
+  }
+
+  public async pull(strategy: GitPullStrategy): Promise<void> {
+    await this.serial(() => {
+      const args = ["pull"];
+      if (strategy === "rebase") args.push("--rebase");
+      if (strategy === "ff-only") args.push("--ff-only");
+      return this.runner.run(args, { cwd: this.info.rootPath });
+    });
+  }
+
+  public async push(forceWithLease = false): Promise<void> {
+    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : [])], { cwd: this.info.rootPath }));
+  }
+
+  public async commit(message: string, options: GitCommitOptions = {}): Promise<string> {
+    return this.serial(async () => {
+      const args = ["commit", "--file=-"];
+      if (options.amend) args.push("--amend");
+      if (options.signoff) args.push("--signoff");
+      if (options.noVerify) args.push("--no-verify");
+      await this.runner.run(args, { cwd: this.info.rootPath, input: message });
+      return (await this.currentRevision()) ?? "";
+    });
+  }
+
+  public async createBranch(name: string, startPoint?: string): Promise<void> {
+    await this.serial(() => this.runner.run(["switch", "-c", name, ...(startPoint ? [startPoint] : [])], { cwd: this.info.rootPath }));
+  }
+
+  public async renameBranch(oldName: string, newName: string): Promise<void> {
+    await this.serial(() => this.runner.run(["branch", "-m", oldName, newName], { cwd: this.info.rootPath }));
+  }
+
+  public async deleteBranch(name: string, force = false): Promise<void> {
+    await this.serial(() => this.runner.run(["branch", force ? "-D" : "-d", name], { cwd: this.info.rootPath }));
+  }
+
+  public async stash(message?: string, includeUntracked = false, keepIndex = false): Promise<void> {
+    await this.serial(() => {
+      const args = ["stash", "push"];
+      if (includeUntracked) args.push("--include-untracked");
+      if (keepIndex) args.push("--keep-index");
+      if (message) args.push("--message", message);
+      return this.runner.run(args, { cwd: this.info.rootPath });
+    });
+  }
+
+  public async stashes(): Promise<GitStashEntry[]> {
+    const output = await this.runner.text(["stash", "list", "--format=%gd%x00%gs"], { cwd: this.info.rootPath });
+    return output.split(/\r?\n/).filter(Boolean).map((line) => {
+      const [ref, message] = line.split("\0");
+      return { ref, message: message ?? "" };
+    });
+  }
+
+  public async applyStash(ref: string, pop = false): Promise<void> {
+    await this.serial(() => this.runner.run(["stash", pop ? "pop" : "apply", ref], { cwd: this.info.rootPath }));
+  }
+
+  public async dropStash(ref: string): Promise<void> {
+    await this.serial(() => this.runner.run(["stash", "drop", ref], { cwd: this.info.rootPath }));
+  }
+
+  public async fileContent(pathSpec: string, revision?: string): Promise<Buffer> {
+    if (!revision) {
+      try {
+        return await readFile(path.resolve(this.info.rootPath, pathSpec));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return Buffer.alloc(0);
+        throw error;
+      }
+    }
+    try {
+      const objectSpec = revision === "INDEX" ? `:${pathSpec}` : `${revision}:${pathSpec}`;
+      const result = await this.runner.run(["show", objectSpec], { cwd: this.info.rootPath });
+      return result.stdout;
+    } catch (error) {
+      if (error instanceof GitCommandError) return Buffer.alloc(0);
+      throw error;
+    }
   }
 
   public async checkout(branch: string): Promise<void> {

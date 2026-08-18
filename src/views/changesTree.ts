@@ -35,9 +35,9 @@ export class ChangeNode extends vscode.TreeItem {
       change.conflicted ? "warning" : change.kind === "deleted" ? "trash" : change.kind === "added" ? "diff-added" : "diff-modified",
     );
     this.command = {
-      command: "vscode.open",
-      title: "Open File",
-      arguments: [this.resourceUri],
+      command: "jbGit.openDiff",
+      title: "Open Diff",
+      arguments: [this],
     };
   }
 }

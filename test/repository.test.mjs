@@ -33,3 +33,35 @@ test("discovers a repository and reads its status", async () => {
   const branches = await repository.branches();
   assert.equal(branches.find((branch) => branch.name === "master")?.kind, "local");
 });
+
+test("runs commit, branch, and stash operations through Git Core", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-operations-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), "one\n");
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "initial");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const defaultBranch = git(root, "branch", "--show-current");
+
+  writeFileSync(join(root, "file.txt"), "two\n");
+  await repository.stage(["file.txt"]);
+  const revision = await repository.commit("update");
+  assert.equal(git(root, "rev-parse", "HEAD"), revision);
+
+  await repository.createBranch("feature/test");
+  assert.equal(git(root, "branch", "--show-current"), "feature/test");
+  await repository.renameBranch("feature/test", "feature/renamed");
+  assert.equal(git(root, "branch", "--show-current"), "feature/renamed");
+  await repository.checkout(defaultBranch);
+
+  writeFileSync(join(root, "file.txt"), "stashed\n");
+  await repository.stash("temporary work");
+  const stashes = await repository.stashes();
+  assert.equal(stashes.length, 1);
+  assert.match(stashes[0].message, /temporary work/);
+  await repository.applyStash(stashes[0].ref);
+  assert.equal((await repository.status()).changes.find((change) => change.path === "file.txt")?.unstaged, true);
+});

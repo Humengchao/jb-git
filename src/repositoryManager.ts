@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { discoverRepositories, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
 import { GitBranch, GitStatusSnapshot } from "./git/types";
+import { GitCommitOptions, GitPullStrategy, GitStashEntry } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -97,6 +98,56 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
+  public async pull(rootPath: string, strategy: GitPullStrategy): Promise<void> {
+    await this.requireRepository(rootPath).pull(strategy);
+    await this.refresh(rootPath);
+  }
+
+  public async push(rootPath: string, forceWithLease = false): Promise<void> {
+    await this.requireRepository(rootPath).push(forceWithLease);
+    await this.refresh(rootPath);
+  }
+
+  public async commit(rootPath: string, message: string, options?: GitCommitOptions): Promise<string> {
+    const revision = await this.requireRepository(rootPath).commit(message, options);
+    await this.refresh(rootPath);
+    return revision;
+  }
+
+  public async createBranch(rootPath: string, name: string, startPoint?: string): Promise<void> {
+    await this.requireRepository(rootPath).createBranch(name, startPoint);
+    await this.refresh(rootPath);
+  }
+
+  public async renameBranch(rootPath: string, oldName: string, newName: string): Promise<void> {
+    await this.requireRepository(rootPath).renameBranch(oldName, newName);
+    await this.refresh(rootPath);
+  }
+
+  public async deleteBranch(rootPath: string, name: string, force = false): Promise<void> {
+    await this.requireRepository(rootPath).deleteBranch(name, force);
+    await this.refresh(rootPath);
+  }
+
+  public async stash(rootPath: string, message?: string, includeUntracked = false, keepIndex = false): Promise<void> {
+    await this.requireRepository(rootPath).stash(message, includeUntracked, keepIndex);
+    await this.refresh(rootPath);
+  }
+
+  public async stashes(rootPath: string): Promise<GitStashEntry[]> {
+    return this.requireRepository(rootPath).stashes();
+  }
+
+  public async applyStash(rootPath: string, ref: string, pop = false): Promise<void> {
+    await this.requireRepository(rootPath).applyStash(ref, pop);
+    await this.refresh(rootPath);
+  }
+
+  public async dropStash(rootPath: string, ref: string): Promise<void> {
+    await this.requireRepository(rootPath).dropStash(ref);
+    await this.refresh(rootPath);
+  }
+
   public async checkout(rootPath: string, branch: string): Promise<void> {
     await this.requireRepository(rootPath).checkout(branch);
     await this.refresh(rootPath);
@@ -133,4 +184,3 @@ export class RepositoryManager implements vscode.Disposable {
     this.changeEmitter.dispose();
   }
 }
-

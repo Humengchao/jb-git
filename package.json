@@ -46,6 +46,38 @@
         "title": "JB Git: Open Local Changes"
       },
       {
+        "command": "jbGit.openDiff",
+        "title": "JB Git: Open Diff"
+      },
+      {
+        "command": "jbGit.commit",
+        "title": "JB Git: Commit Staged Changes"
+      },
+      {
+        "command": "jbGit.pull",
+        "title": "JB Git: Pull"
+      },
+      {
+        "command": "jbGit.push",
+        "title": "JB Git: Push"
+      },
+      {
+        "command": "jbGit.createBranch",
+        "title": "JB Git: Create Branch"
+      },
+      {
+        "command": "jbGit.renameBranch",
+        "title": "JB Git: Rename Branch"
+      },
+      {
+        "command": "jbGit.deleteBranch",
+        "title": "JB Git: Delete Branch"
+      },
+      {
+        "command": "jbGit.stash",
+        "title": "JB Git: Stash Changes"
+      },
+      {
         "command": "jbGit.initializeRepository",
         "title": "JB Git: Initialize Repository"
       },
@@ -104,9 +136,44 @@
           "command": "jbGit.fetch",
           "when": "view == jbGit.repositories",
           "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.commit",
+          "when": "view == jbGit.changes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.push",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@3"
+        },
+        {
+          "command": "jbGit.pull",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
+        {
+          "command": "jbGit.createBranch",
+          "when": "view == jbGit.repositories && (viewItem == jbGit.repository || viewItem == jbGit.branch)",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.renameBranch",
+          "when": "view == jbGit.repositories && viewItem == jbGit.branch",
+          "group": "inline@2"
+        },
+        {
+          "command": "jbGit.deleteBranch",
+          "when": "view == jbGit.repositories && viewItem == jbGit.branch",
+          "group": "inline@3"
+        },
+        {
+          "command": "jbGit.openDiff",
+          "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
+          "group": "inline@0"
+        },
         {
           "command": "jbGit.stageChange",
           "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
