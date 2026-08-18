@@ -29,6 +29,24 @@ function resolveGitDir(rootPath: string, value: string): string {
   return path.isAbsolute(value) ? path.normalize(value) : path.normalize(path.resolve(rootPath, value));
 }
 
+function parseNameStatus(output: string): GitCommitFile[] {
+  const fields = output.split("\0");
+  const files: GitCommitFile[] = [];
+  for (let index = 0; index < fields.length;) {
+    const status = fields[index++];
+    if (!status) continue;
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const originalPath = fields[index++];
+      const filePath = fields[index++];
+      if (originalPath && filePath) files.push({ status, path: filePath, originalPath });
+      continue;
+    }
+    const filePath = fields[index++];
+    if (filePath) files.push({ status, path: filePath });
+  }
+  return files;
+}
+
 export class GitRepository {
   private operationPromise: Promise<unknown> = Promise.resolve();
 
@@ -139,27 +157,22 @@ export class GitRepository {
     return this.runner.text(["diff", left, right], { cwd: this.info.rootPath });
   }
 
+  public async diffFiles(leftRef: string, rightRef: string): Promise<GitCommitFile[]> {
+    const [left, right] = await Promise.all([this.resolveCommit(leftRef), this.resolveCommit(rightRef)]);
+    const output = await this.runner.text(
+      ["diff", "--no-ext-diff", "--name-status", "-z", "-M", left, right, "--"],
+      { cwd: this.info.rootPath },
+    );
+    return parseNameStatus(output);
+  }
+
   public async commitFiles(hash: string): Promise<GitCommitFile[]> {
     const revision = await this.resolveCommit(hash);
     const output = await this.runner.text(
       ["diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-M", "-z", revision],
       { cwd: this.info.rootPath },
     );
-    const fields = output.split("\0");
-    const files: GitCommitFile[] = [];
-    for (let index = 0; index < fields.length;) {
-      const status = fields[index++];
-      if (!status) continue;
-      if (status.startsWith("R") || status.startsWith("C")) {
-        const originalPath = fields[index++];
-        const filePath = fields[index++];
-        if (originalPath && filePath) files.push({ status, path: filePath, originalPath });
-        continue;
-      }
-      const filePath = fields[index++];
-      if (filePath) files.push({ status, path: filePath });
-    }
-    return files;
+    return parseNameStatus(output);
   }
 
   public async blame(pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
