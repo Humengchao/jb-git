@@ -1,0 +1,155 @@
+{
+  "name": "jb-git",
+  "displayName": "JB Git",
+  "description": "An IntelliJ IDEA-inspired Git workspace for Visual Studio Code.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "keywords": [
+    "git",
+    "version control",
+    "changelist",
+    "shelf",
+    "idea"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "workspaceContains:.git"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "test": "npm run compile && node --test test/*.test.mjs",
+    "package": "npm run compile && npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.8.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "jbGit.refresh",
+        "title": "JB Git: Refresh"
+      },
+      {
+        "command": "jbGit.openChanges",
+        "title": "JB Git: Open Local Changes"
+      },
+      {
+        "command": "jbGit.initializeRepository",
+        "title": "JB Git: Initialize Repository"
+      },
+      {
+        "command": "jbGit.fetch",
+        "title": "JB Git: Fetch All Remotes"
+      },
+      {
+        "command": "jbGit.checkoutBranch",
+        "title": "JB Git: Checkout Branch"
+      },
+      {
+        "command": "jbGit.stageChange",
+        "title": "JB Git: Stage Change"
+      },
+      {
+        "command": "jbGit.unstageChange",
+        "title": "JB Git: Unstage Change"
+      },
+      {
+        "command": "jbGit.discardChange",
+        "title": "JB Git: Discard Change"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "jbGit",
+          "title": "Git Workspace",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "jbGit": [
+        {
+          "id": "jbGit.repositories",
+          "name": "Repositories",
+          "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.changes",
+          "name": "Local Changes",
+          "when": "jbGit.hasWorkspace"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "jbGit.refresh",
+          "when": "view == jbGit.repositories || view == jbGit.changes",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jbGit.fetch",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "jbGit.stageChange",
+          "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.unstageChange",
+          "when": "view == jbGit.changes && viewItem == jbGit.change.staged",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.discardChange",
+          "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
+          "group": "inline@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "JB Git",
+      "properties": {
+        "jbGit.gitPath": {
+          "type": "string",
+          "default": "git",
+          "description": "Path to the Git executable."
+        },
+        "jbGit.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh repository state when files or Git metadata change."
+        },
+        "jbGit.refreshDebounceMs": {
+          "type": "number",
+          "default": 250,
+          "minimum": 50,
+          "maximum": 5000,
+          "description": "Debounce interval for repository refreshes."
+        },
+        "jbGit.confirmDiscard": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before discarding changes."
+        }
+      }
+    }
+  }
+}
