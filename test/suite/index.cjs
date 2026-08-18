@@ -20,9 +20,15 @@ async function run() {
 
   assert.deepEqual(
     manifest.contributes.views.jbGit.map((view) => ({ id: view.id, type: view.type })),
-    [{ id: "jbGit.commitTool", type: "webview" }],
-    "the activity bar should expose one cohesive Commit tool window instead of fragmented legacy trees",
+    [{ id: "jbGit.toolWindow", type: "webview" }],
+    "the bottom Git panel should expose one cohesive tool window instead of fragmented legacy trees",
   );
+  assert.deepEqual(
+    manifest.contributes.viewsContainers.panel.map((container) => ({ id: container.id, title: container.title })),
+    [{ id: "jbGit", title: "Git" }],
+    "the Git tool window must be contributed to the bottom panel",
+  );
+  assert.equal(manifest.contributes.viewsContainers.activitybar, undefined, "Git must not add an activity bar sidebar");
 
   const parent = await mkdtemp(path.join(tmpdir(), "jb-git-nested-init-"));
   execFileSync("git", ["init", "-q"], { cwd: parent });

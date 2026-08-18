@@ -14,8 +14,7 @@ import { RemoteNode } from "./views/remoteTree";
 import { StashNode } from "./views/stashTree";
 import { SubmoduleNode } from "./views/submoduleTree";
 import { RepositoryManager } from "./repositoryManager";
-import { IntelliJCommitViewProvider } from "./webviews/commitView";
-import { IntelliJGitLogPanel } from "./webviews/logPanel";
+import { IntelliJGitToolWindowProvider } from "./webviews/logPanel";
 
 function workspacePaths(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
@@ -69,12 +68,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await changelistStore.load();
   const shelfStore = new ShelfStore(context.globalStorageUri.fsPath);
   const diffProvider = new DiffContentProvider();
-  const commitView = new IntelliJCommitViewProvider(manager, changelistStore, shelfStore);
-  const logPanel = new IntelliJGitLogPanel(manager);
-  const traceRegistration = runner.onDidRun((event) => logPanel.appendTrace(event));
-  const commitViewRegistration = vscode.window.registerWebviewViewProvider(
-    IntelliJCommitViewProvider.viewType,
-    commitView,
+  const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore);
+  const traceRegistration = runner.onDidRun((event) => gitToolWindow.appendTrace(event));
+  const toolWindowRegistration = vscode.window.registerWebviewViewProvider(
+    IntelliJGitToolWindowProvider.viewType,
+    gitToolWindow,
     { webviewOptions: { retainContextWhenHidden: true } },
   );
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
@@ -193,10 +191,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     manager,
     changelistStore,
     shelfStore,
-    commitView,
-    logPanel,
+    gitToolWindow,
     traceRegistration,
-    commitViewRegistration,
+    toolWindowRegistration,
     diffProvider,
     gitMetadataWatcher,
     { dispose: () => {
@@ -226,13 +223,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     gitMetadataWatcher.onDidCreate(() => scheduleDiscovery()),
     gitMetadataWatcher.onDidDelete(() => scheduleDiscovery()),
     vscode.commands.registerCommand("jbGit.refresh", refresh),
-    vscode.commands.registerCommand("jbGit.openChanges", (rootPath?: string) => commitView.reveal(rootPath)),
+    vscode.commands.registerCommand("jbGit.openChanges", (rootPath?: string) => gitToolWindow.openChanges(rootPath)),
     vscode.commands.registerCommand("jbGit.openDiff", async (node?: ChangeNode) => {
       if (!node) return;
       await runWithNotification(`Loading diff for ${node.change.path}`, () => openChangeDiff(manager, diffProvider, node));
     }),
-    vscode.commands.registerCommand("jbGit.showHistory", () => logPanel.open()),
-    vscode.commands.registerCommand("jbGit.openGitToolWindow", (rootPath?: string) => logPanel.open(rootPath)),
+    vscode.commands.registerCommand("jbGit.showHistory", () => gitToolWindow.open()),
+    vscode.commands.registerCommand("jbGit.openGitToolWindow", (rootPath?: string) => gitToolWindow.open(rootPath)),
     vscode.commands.registerCommand("jbGit.branchesPopup", async (rootPath?: string) => {
       const snapshot = await pickRepository(rootPath);
       if (!snapshot) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
@@ -271,7 +268,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } else if (selected.action === "fetch") await runWithNotification("Fetching remotes", () => manager.fetch(root));
       else if (selected.action === "pull") await vscode.commands.executeCommand("jbGit.pull", root);
       else if (selected.action === "push") await vscode.commands.executeCommand("jbGit.push", root);
-      else if (selected.action === "log") await logPanel.open(root);
+      else if (selected.action === "log") await gitToolWindow.open(root);
     }),
     vscode.commands.registerCommand("jbGit.operationsPopup", async (rootPath?: string) => {
       const snapshot = await pickRepository(rootPath);
@@ -319,7 +316,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
       if (!snapshot) return void vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
-      await logPanel.open(snapshot.repository.info.rootPath, relativePath);
+      await gitToolWindow.open(snapshot.repository.info.rootPath, relativePath);
     }),
     vscode.commands.registerCommand("jbGit.showCommit", async (node?: CommitNode) => {
       if (!node) return;

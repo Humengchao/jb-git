@@ -311,10 +311,10 @@
       }
     ],
     "viewsContainers": {
-      "activitybar": [
+      "panel": [
         {
           "id": "jbGit",
-          "title": "Git Workspace",
+          "title": "Git",
           "icon": "resources/icon.svg"
         }
       ]
@@ -322,8 +322,8 @@
     "views": {
       "jbGit": [
         {
-          "id": "jbGit.commitTool",
-          "name": "Commit",
+          "id": "jbGit.toolWindow",
+          "name": "Git",
           "type": "webview",
           "when": "jbGit.hasWorkspace"
         }
@@ -345,17 +345,17 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.commitTool",
+          "when": "view == jbGit.toolWindow",
           "group": "navigation@1"
         },
         {
           "command": "jbGit.branchesPopup",
-          "when": "view == jbGit.commitTool",
+          "when": "view == jbGit.toolWindow",
           "group": "navigation@2"
         },
         {
-          "command": "jbGit.openGitToolWindow",
-          "when": "view == jbGit.commitTool",
+          "command": "jbGit.operationsPopup",
+          "when": "view == jbGit.toolWindow",
           "group": "navigation@3"
         }
       ]

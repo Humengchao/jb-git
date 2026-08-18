@@ -1,8 +1,11 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { GitBranch, GitCommit, GitCommitFile } from "../git/types";
+import { ChangelistStore } from "../changelists/store";
+import { GitBranch, GitChange, GitCommit, GitCommitFile } from "../git/types";
 import { GitTraceEvent } from "../git/runner";
 import { RepositoryManager } from "../repositoryManager";
+import { ShelfEntry, ShelfStore } from "../shelves/store";
+import { ChangeNode } from "../views/changesTree";
 import { webviewDocument } from "./html";
 
 type LogMessage =
@@ -18,56 +21,96 @@ type LogMessage =
   | { type: "showPatch"; hash: string }
   | { type: "refresh" }
   | { type: "clearConsole" }
-  | { type: "openCommitView" };
+  | { type: "togglePath"; path: string; checked: boolean }
+  | { type: "toggleAll"; checked: boolean }
+  | { type: "openDiff"; path: string }
+  | { type: "commit"; message: string; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean }
+  | { type: "createChangelist" }
+  | { type: "setActiveChangelist"; id: string }
+  | { type: "moveToChangelist"; path: string }
+  | { type: "stage"; path: string }
+  | { type: "unstage"; path: string }
+  | { type: "discard"; path: string }
+  | { type: "createShelf" }
+  | { type: "applyShelf"; id: string }
+  | { type: "deleteShelf"; id: string }
+  | { type: "runCommand"; command: string };
 
 interface LogSelection {
   commit: GitCommit;
   files: GitCommitFile[];
 }
 
-export class IntelliJGitLogPanel implements vscode.Disposable {
-  private panel?: vscode.WebviewPanel;
+type ToolTab = "log" | "console" | "changes" | "shelf";
+
+const ALLOWED_COMMANDS = new Set([
+  "jbGit.branchesPopup",
+  "jbGit.operationsPopup",
+  "jbGit.fetch",
+  "jbGit.pull",
+  "jbGit.push",
+  "jbGit.stash",
+  "jbGit.applyPatch",
+  "jbGit.continueOperation",
+  "jbGit.abortOperation",
+]);
+
+export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+  public static readonly viewType = "jbGit.toolWindow";
+
+  private view?: vscode.WebviewView;
   private selectedRoot?: string;
   private selectedRef?: string;
   private selectedHash?: string;
   private filePath?: string;
   private currentCommits: GitCommit[] = [];
   private traces: GitTraceEvent[] = [];
+  private readonly selectedPaths = new Map<string, Set<string>>();
+  private readonly knownPaths = new Map<string, Set<string>>();
   private updateVersion = 0;
   private readonly disposables: vscode.Disposable[] = [];
 
-  public constructor(private readonly manager: RepositoryManager) {
-    this.disposables.push(manager.onDidChange(() => void this.update()));
+  public constructor(
+    private readonly manager: RepositoryManager,
+    private readonly changelists: ChangelistStore,
+    private readonly shelves: ShelfStore,
+  ) {
+    this.disposables.push(
+      manager.onDidChange(() => void this.update()),
+      changelists.onDidChange(() => void this.update()),
+      shelves.onDidChange(() => void this.update()),
+    );
   }
 
-  public async open(root?: string, filePath?: string): Promise<void> {
+  public resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = webviewDocument(view.webview, "Git", logStyles, logScript);
+    this.disposables.push(
+      view.webview.onDidReceiveMessage((message: LogMessage) => void this.handleMessage(message)),
+      view.onDidDispose(() => { if (this.view === view) this.view = undefined; }),
+    );
+    void this.update();
+  }
+
+  public async open(root?: string, filePath?: string, tab: ToolTab = "log"): Promise<void> {
     if (root && this.manager.snapshot(root)) this.selectedRoot = root;
     this.filePath = filePath;
     this.selectedRef = undefined;
     this.selectedHash = undefined;
-    if (!this.panel) {
-      this.panel = vscode.window.createWebviewPanel(
-        "jbGit.gitLog",
-        filePath ? `Git: History · ${path.basename(filePath)}` : "Git",
-        vscode.ViewColumn.One,
-        { enableScripts: true, retainContextWhenHidden: true },
-      );
-      this.panel.webview.html = webviewDocument(this.panel.webview, "Git Log", logStyles, logScript);
-      this.disposables.push(
-        this.panel.webview.onDidReceiveMessage((message: LogMessage) => void this.handleMessage(message)),
-        this.panel.onDidDispose(() => { this.panel = undefined; }),
-      );
-    } else {
-      this.panel.title = filePath ? `Git: History · ${path.basename(filePath)}` : "Git";
-      this.panel.reveal(vscode.ViewColumn.One, false);
-    }
+    await vscode.commands.executeCommand(`${IntelliJGitToolWindowProvider.viewType}.focus`);
+    await this.view?.webview.postMessage({ type: "activateTab", tab });
     await this.update();
+  }
+
+  public async openChanges(root?: string): Promise<void> {
+    await this.open(root, undefined, "changes");
   }
 
   public appendTrace(event: GitTraceEvent): void {
     this.traces.push(event);
     if (this.traces.length > 400) this.traces = this.traces.slice(-400);
-    void this.panel?.webview.postMessage({ type: "trace", trace: event });
+    void this.view?.webview.postMessage({ type: "trace", trace: event });
   }
 
   private currentSnapshot() {
@@ -78,8 +121,23 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
     return this.selectedRoot ? this.manager.snapshot(this.selectedRoot) : undefined;
   }
 
+  private syncSelection(root: string, changes: readonly GitChange[]): Set<string> {
+    const live = new Set(changes.map((change) => change.path));
+    const known = this.knownPaths.get(root);
+    const selected = this.selectedPaths.get(root) ?? new Set<string>();
+    if (!known) {
+      for (const filePath of live) selected.add(filePath);
+    } else {
+      for (const filePath of live) if (!known.has(filePath)) selected.add(filePath);
+    }
+    for (const filePath of [...selected]) if (!live.has(filePath)) selected.delete(filePath);
+    this.knownPaths.set(root, live);
+    this.selectedPaths.set(root, selected);
+    return selected;
+  }
+
   private async update(): Promise<void> {
-    const webview = this.panel?.webview;
+    const webview = this.view?.webview;
     if (!webview) return;
     const version = ++this.updateVersion;
     const snapshot = this.currentSnapshot();
@@ -94,6 +152,15 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
     }
     try {
       const repository = snapshot.repository;
+      const root = repository.info.rootPath;
+      const changes = snapshot.status?.changes ?? [];
+      const selected = this.syncSelection(root, changes);
+      let shelfEntries: ShelfEntry[] = [];
+      try {
+        shelfEntries = await this.shelves.list(root);
+      } catch (error) {
+        if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
+      }
       const commits = this.selectedRef
         ? await repository.logRef(this.selectedRef, 300, this.filePath)
         : await repository.log(300, this.filePath);
@@ -106,6 +173,25 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
       const commit = commits.find((item) => item.hash === this.selectedHash);
       if (commit) selection = { commit, files: await this.manager.commitFiles(repository.info.rootPath, commit.hash) };
       if (version !== this.updateVersion) return;
+      const lists = this.changelists.lists(root).map((list) => ({
+        id: list.id,
+        name: list.name,
+        active: list.id === this.changelists.activeId(root),
+        changes: changes
+          .filter((change) => this.changelists.listForFile(root, change.path).id === list.id)
+          .map((change) => ({
+            path: change.path,
+            directory: path.dirname(change.path) === "." ? "" : path.dirname(change.path),
+            fileName: path.basename(change.path),
+            originalPath: change.originalPath,
+            kind: change.kind,
+            staged: change.staged,
+            unstaged: change.unstaged,
+            conflicted: change.conflicted,
+            checked: selected.has(change.path),
+            status: statusLabel(change),
+          })),
+      }));
       await webview.postMessage({
         type: "state",
         state: {
@@ -120,6 +206,15 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
           operation: snapshot.operation,
           error: snapshot.error,
           traces: this.traces,
+          lists,
+          totalChanges: changes.length,
+          selectedCount: selected.size,
+          shelves: shelfEntries.map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            createdAt: entry.createdAt,
+            paths: entry.paths,
+          })),
         },
       });
     } catch (error) {
@@ -130,10 +225,6 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
   private async handleMessage(message: LogMessage): Promise<void> {
     try {
       if (message.type === "ready") return void this.update();
-      if (message.type === "openCommitView") {
-        await vscode.commands.executeCommand("jbGit.openChanges");
-        return;
-      }
       if (message.type === "clearConsole") {
         this.traces = [];
         return void this.update();
@@ -147,6 +238,26 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
       const snapshot = this.currentSnapshot();
       if (!snapshot) return;
       const root = snapshot.repository.info.rootPath;
+      const changes = snapshot.status?.changes ?? [];
+      const selected = this.syncSelection(root, changes);
+      if (message.type === "togglePath") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change) return;
+        if (message.checked) selected.add(change.path); else selected.delete(change.path);
+        return void this.update();
+      }
+      if (message.type === "toggleAll") {
+        selected.clear();
+        if (message.checked) for (const change of changes) selected.add(change.path);
+        return void this.update();
+      }
+      if (message.type === "openDiff") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change) return;
+        const mode = change.staged && !change.unstaged ? "staged" : "unstaged";
+        await vscode.commands.executeCommand("jbGit.openDiff", new ChangeNode(root, change, mode));
+        return;
+      }
       if (message.type === "selectRef") {
         if (message.ref && !snapshot.branches.some((branch) => branch.name === message.ref)) return;
         this.selectedRef = message.ref;
@@ -160,11 +271,11 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
         this.selectedHash = message.hash;
         const files = await this.manager.commitFiles(root, commit.hash);
         if (this.selectedHash !== commit.hash) return;
-        await this.panel?.webview.postMessage({ type: "selection", selection: { commit, files } });
+        await this.view?.webview.postMessage({ type: "selection", selection: { commit, files } });
         return;
       }
       if (message.type === "refresh") {
-        await this.manager.fetch(root);
+        await this.manager.refresh(root);
         return;
       }
       if (message.type === "showPatch") {
@@ -174,7 +285,89 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
         await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
         return;
       }
+      if (message.type === "runCommand") {
+        if (ALLOWED_COMMANDS.has(message.command)) await vscode.commands.executeCommand(message.command, root);
+        return;
+      }
       if (!(await requireTrusted())) return;
+      if (message.type === "commit") {
+        const commitMessage = message.message.trim();
+        if (!commitMessage) return void vscode.window.showWarningMessage("Enter a commit message first.");
+        const paths = changes.filter((change) => selected.has(change.path)).map((change) => change.path);
+        if (!paths.length) return void vscode.window.showWarningMessage("Select at least one changed file to commit.");
+        const revision = await this.manager.commitPaths(root, paths, commitMessage, {
+          amend: message.amend,
+          signoff: message.signoff,
+          noVerify: message.noVerify,
+        });
+        await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
+        if (message.push) await this.manager.push(root);
+        await this.view?.webview.postMessage({ type: "committed" });
+        return;
+      }
+      if (message.type === "createChangelist") {
+        const name = await vscode.window.showInputBox({ title: "New Changelist", prompt: "Name", placeHolder: "Feature work" });
+        if (name?.trim()) await this.changelists.create(root, name.trim());
+        return;
+      }
+      if (message.type === "setActiveChangelist") {
+        await this.changelists.setActive(root, message.id);
+        return;
+      }
+      if (message.type === "moveToChangelist") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change) return;
+        const current = this.changelists.listForFile(root, change.path);
+        const target = await vscode.window.showQuickPick(
+          this.changelists.lists(root).filter((list) => list.id !== current.id).map((list) => ({ label: list.name, id: list.id })),
+          { title: `Move ${change.path}`, placeHolder: "Select target Changelist" },
+        );
+        if (target) await this.changelists.assign(root, change.path, target.id);
+        return;
+      }
+      if (message.type === "stage" || message.type === "unstage") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change) return;
+        if (message.type === "stage") await this.manager.stage(root, [change.path]);
+        else await this.manager.unstage(root, [change.path]);
+        return;
+      }
+      if (message.type === "discard") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change) return;
+        const action = change.kind === "untracked" ? "Delete" : "Rollback";
+        const confirmed = await vscode.window.showWarningMessage(
+          `${action} all local changes in ${change.path}?`, { modal: true }, action,
+        );
+        if (confirmed !== action) return;
+        if (change.kind === "untracked") await this.manager.cleanUntracked(root, [change.path]);
+        else await this.manager.discard(root, [change.path]);
+        return;
+      }
+      if (message.type === "createShelf") {
+        const paths = changes
+          .filter((change) => selected.has(change.path) && change.kind !== "untracked" && change.kind !== "ignored")
+          .flatMap((change) => [change.path, ...(change.originalPath ? [change.originalPath] : [])]);
+        if (!paths.length) return void vscode.window.showInformationMessage("Select at least one tracked change to shelf.");
+        const name = await vscode.window.showInputBox({ title: "Shelve Changes", prompt: "Shelf name", value: "Shelf" });
+        if (name?.trim()) {
+          await this.shelves.create(snapshot.repository, name.trim(), [...new Set(paths)]);
+          await this.manager.refresh(root);
+        }
+        return;
+      }
+      if (message.type === "applyShelf" || message.type === "deleteShelf") {
+        const entry = (await this.shelves.list(root)).find((item) => item.id === message.id);
+        if (!entry) return;
+        if (message.type === "applyShelf") {
+          await this.shelves.apply(snapshot.repository, entry);
+          await this.manager.refresh(root);
+        } else {
+          const confirmed = await vscode.window.showWarningMessage(`Delete shelf '${entry.name}'?`, { modal: true }, "Delete");
+          if (confirmed === "Delete") await this.shelves.remove(root, entry);
+        }
+        return;
+      }
       if (message.type === "checkout") {
         const branch = snapshot.branches.find((item) => item.name === message.name && item.kind === message.kind);
         if (branch) await this.manager.checkout(root, branch.name, branch.kind);
@@ -215,15 +408,22 @@ export class IntelliJGitLogPanel implements vscode.Disposable {
       }
     } catch (error) {
       await vscode.window.showErrorMessage(formatError(error));
-      await this.panel?.webview.postMessage({ type: "error", message: formatError(error) });
+      await this.view?.webview.postMessage({ type: "error", message: formatError(error) });
     }
   }
 
   public dispose(): void {
-    this.panel?.dispose();
-    this.panel = undefined;
     for (const disposable of this.disposables.splice(0)) disposable.dispose();
   }
+}
+
+function statusLabel(change: GitChange): string {
+  if (change.conflicted) return "!";
+  if (change.kind === "untracked") return "?";
+  if (change.kind === "added") return "A";
+  if (change.kind === "deleted") return "D";
+  if (change.kind === "renamed") return "R";
+  return "M";
 }
 
 async function requireTrusted(): Promise<boolean> {
@@ -240,8 +440,8 @@ const logStyles = String.raw`
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html, body, #app { width: 100%; height: 100%; margin: 0; padding: 0; }
-  body { overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: 12px var(--vscode-font-family); }
-  button, select, input { color: inherit; font: inherit; }
+  body { overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-panel-background, var(--vscode-editor-background)); font: 12px var(--vscode-font-family); }
+  button, select, input, textarea { color: inherit; font: inherit; }
   button { border: 0; background: transparent; cursor: pointer; }
   button:focus-visible, select:focus-visible, input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .root { height: 100%; display: grid; grid-template-rows: 34px 38px minmax(0, 1fr); }
@@ -303,6 +503,54 @@ const logStyles = String.raw`
   .trace-command { color: var(--vscode-terminal-ansiCyan); }
   .trace-cwd, .trace-time { color: var(--vscode-descriptionForeground); }
   .trace-error { color: var(--vscode-terminal-ansiRed); }
+  .count { display: inline-grid; place-items: center; min-width: 16px; height: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; }
+  .changes-toolbar { display: flex; align-items: center; gap: 5px; padding: 5px 7px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
+  .changes-toolbar select { max-width: 240px; height: 26px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; padding: 2px 5px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .changes-workspace { min-height: 0; display: grid; grid-template-columns: minmax(360px, 1fr) 340px; overflow: hidden; }
+  .changes-list { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--vscode-panel-border); }
+  .operation { margin: 6px; padding: 7px 8px; border-radius: 3px; background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); }
+  .operation-actions { margin-top: 6px; display: flex; gap: 5px; }
+  .small-button { min-height: 24px; padding: 3px 7px; border-radius: 2px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .change-group { margin-top: 2px; }
+  .group-header { height: 27px; display: flex; align-items: center; gap: 5px; padding: 0 8px; font-weight: 600; user-select: none; }
+  .group-header:hover { background: var(--vscode-list-hoverBackground); }
+  .twisty { width: 12px; color: var(--vscode-descriptionForeground); }
+  .active-dot { color: var(--vscode-charts-blue); }
+  .select-all { margin-left: auto; color: var(--vscode-descriptionForeground); }
+  .change-row { height: 26px; display: grid; grid-template-columns: 24px 20px minmax(0, 1fr) auto; align-items: center; padding: 0 6px 0 20px; }
+  .change-row:hover { background: var(--vscode-list-hoverBackground); }
+  .change-row input { margin: 0; }
+  .change-status { width: 18px; font-weight: 700; text-align: center; }
+  .status-M { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
+  .status-A, .status-q { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
+  .status-D { color: var(--vscode-gitDecoration-deletedResourceForeground); }
+  .status-R { color: var(--vscode-gitDecoration-renamedResourceForeground); }
+  .status-bang { color: var(--vscode-gitDecoration-conflictingResourceForeground); }
+  .change-file { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
+  .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .directory, .stage-mark { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .stage-mark { margin-left: auto; }
+  .row-actions { display: none; align-items: center; }
+  .change-row:hover .row-actions { display: flex; }
+  .row-action { width: 24px; height: 24px; border-radius: 2px; }
+  .row-action:hover { background: var(--vscode-toolbar-hoverBackground); }
+  .commit-form { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(60px, 1fr) auto auto; gap: 0; background: var(--vscode-panel-background, var(--vscode-editor-background)); }
+  .commit-form-title { height: 28px; display: flex; align-items: center; padding: 0 9px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
+  .commit-message { width: calc(100% - 14px); min-height: 60px; margin: 7px; padding: 7px 8px; resize: none; border: 1px solid var(--vscode-input-border, transparent); background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .commit-message::placeholder { color: var(--vscode-input-placeholderForeground); }
+  .commit-options { min-height: 30px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 8px; color: var(--vscode-descriptionForeground); }
+  .commit-options label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .commit-actions { display: grid; grid-template-columns: minmax(0, 1fr) 40px; gap: 4px; padding: 0 7px 7px; }
+  .primary { min-height: 29px; padding: 4px 10px; border-radius: 2px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .primary:hover { background: var(--vscode-button-hoverBackground); }
+  .secondary { min-height: 29px; padding: 4px 8px; border-radius: 2px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .shelf-pane { min-height: 0; overflow: auto; padding: 3px 0 16px; }
+  .shelf-row { margin: 2px 6px; padding: 7px 9px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; border-radius: 3px; }
+  .shelf-row:hover { background: var(--vscode-list-hoverBackground); }
+  .shelf-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .shelf-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .shelf-actions { grid-row: 1 / 3; grid-column: 2; display: flex; align-items: center; gap: 4px; }
   @media (max-width: 1000px) {
     .workspace { grid-template-columns: 145px minmax(270px, 1fr) 235px; }
     .table-head, .commit-row { grid-template-columns: minmax(210px, 1fr) 82px; }
@@ -312,6 +560,7 @@ const logStyles = String.raw`
     .detail-actions .action { padding: 0 5px; }
   }
   @media (max-width: 650px) { .workspace { grid-template-columns: 125px minmax(260px, 1fr); } .details { display: none; } }
+  @media (max-width: 760px) { .changes-workspace { grid-template-columns: minmax(310px, 1fr) 280px; } .commit-options { gap: 5px; font-size: 11px; } }
 `;
 
 const logScript = String.raw`
@@ -319,31 +568,165 @@ const logScript = String.raw`
   const app = document.getElementById('app');
   let state = { repositories: [], branches: [], commits: [] };
   let search = '';
-  let activeToolTab = 'log';
+  let uiState = vscode.getState() || {};
+  let activeToolTab = uiState.activeToolTab || 'log';
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
   const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
   const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; };
   const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = title; b.addEventListener('click', handler); return b; };
+  const saveUiState = extra => { uiState = { ...uiState, ...extra }; vscode.setState(uiState); };
+  const selectToolTab = tab => { activeToolTab = tab; saveUiState({ activeToolTab: tab }); render(); };
 
   function render() {
     app.replaceChildren(); const root = node('div', 'root');
     const tabs = node('div', 'tool-tabs');
-    tabs.append(
-      button('Log', 'Git Log', () => { activeToolTab = 'log'; render(); }, 'tool-tab' + (activeToolTab === 'log' ? ' active' : '')),
-      button('Console', 'Git Console', () => { activeToolTab = 'console'; render(); }, 'tool-tab' + (activeToolTab === 'console' ? ' active' : '')),
-      button('Local Changes', 'Open Commit tool window', () => post('openCommitView'), 'tool-tab'),
-    );
+    const logTab = button('Log', 'Git Log', () => selectToolTab('log'), 'tool-tab' + (activeToolTab === 'log' ? ' active' : ''));
+    const consoleTab = button('Console', 'Git Console', () => selectToolTab('console'), 'tool-tab' + (activeToolTab === 'console' ? ' active' : ''));
+    const changesTab = button('Local Changes', 'Local Changes', () => selectToolTab('changes'), 'tool-tab' + (activeToolTab === 'changes' ? ' active' : ''));
+    changesTab.append(node('span', 'count', String(state.totalChanges || 0)));
+    const shelfTab = button('Shelf', 'Shelved Changes', () => selectToolTab('shelf'), 'tool-tab' + (activeToolTab === 'shelf' ? ' active' : ''));
+    shelfTab.append(node('span', 'count', String((state.shelves || []).length)));
+    tabs.append(logTab, consoleTab, changesTab, shelfTab);
     root.append(tabs);
     if (activeToolTab === 'console') {
       const consoleBar = node('div', 'console-toolbar');
       consoleBar.append(node('span', '', 'Git Console'), node('span', 'spacer'), button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
       root.append(consoleBar, consolePanel()); app.append(root); return;
     }
+    if (activeToolTab === 'changes') {
+      root.append(changesToolbar(), changesWorkspace()); app.append(root); return;
+    }
+    if (activeToolTab === 'shelf') {
+      root.append(changesToolbar(), shelfPanel()); app.append(root); return;
+    }
     root.append(toolbar());
     const workspace = node('div', 'workspace');
     if (state.empty) workspace.append(node('div', 'empty', 'Open a folder containing a Git repository.'));
     else workspace.append(branchPane(), commitPane(), detailsPane());
     root.append(workspace); app.append(root); requestAnimationFrame(drawGraphs);
+  }
+
+  function repositorySelect() {
+    const repositories = node('select'); repositories.title = 'Git root';
+    for (const repo of state.repositories || []) {
+      const option = node('option', '', repo.name + (repo.branch ? ' · ' + repo.branch : ''));
+      option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option);
+    }
+    repositories.addEventListener('change', () => post('selectRepository', { root: repositories.value }));
+    return repositories;
+  }
+
+  function changesToolbar() {
+    const bar = node('div', 'changes-toolbar');
+    bar.append(
+      repositorySelect(),
+      button('⑂ ' + (state.branch || 'detached HEAD'), 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
+      button('↻', 'Refresh', () => post('refresh')),
+    );
+    if (activeToolTab === 'changes') {
+      bar.append(
+        button('+ Changelist', 'New Changelist', () => post('createChangelist'), 'action'),
+        button('Shelve', 'Shelve selected changes', () => post('createShelf'), 'action'),
+      );
+    }
+    bar.append(node('span', 'spacer'), button('⋮', 'More Git actions', () => post('runCommand', { command: 'jbGit.operationsPopup' })));
+    return bar;
+  }
+
+  function changesWorkspace() {
+    const workspace = node('div', 'changes-workspace');
+    workspace.append(changesPane(), commitForm());
+    return workspace;
+  }
+
+  function changesPane() {
+    const pane = node('div', 'changes-list');
+    if (state.error) pane.append(node('div', 'error', state.error));
+    if (state.operation && state.operation.kind !== 'none') {
+      const operation = node('div', 'operation', state.operation.kind.toUpperCase() + ' is in progress');
+      const actions = node('div', 'operation-actions');
+      if (state.operation.canContinue) actions.append(button('Continue', 'Continue operation', () => post('runCommand', { command: 'jbGit.continueOperation' }), 'small-button'));
+      if (state.operation.canAbort) actions.append(button('Abort', 'Abort operation', () => post('runCommand', { command: 'jbGit.abortOperation' }), 'small-button'));
+      operation.append(actions); pane.append(operation);
+    }
+    if (state.empty) { pane.append(node('div', 'empty', 'Open a folder containing a Git repository.')); return pane; }
+    if (!state.totalChanges) { pane.append(node('div', 'empty', 'No local changes')); return pane; }
+    for (const list of state.lists || []) {
+      const group = node('section', 'change-group');
+      const header = node('div', 'group-header');
+      header.append(
+        node('span', 'twisty', '⌄'),
+        node('span', list.active ? 'active-dot' : '', list.active ? '●' : '○'),
+        node('span', '', list.name),
+        node('span', 'count', String(list.changes.length)),
+      );
+      header.title = list.active ? 'Active Changelist' : 'Make active Changelist';
+      header.addEventListener('click', () => post('setActiveChangelist', { id: list.id }));
+      header.append(button('✓ All', 'Select all changes', event => { event.stopPropagation(); post('toggleAll', { checked: true }); }, 'select-all'));
+      group.append(header);
+      for (const change of list.changes) group.append(changeRow(change));
+      pane.append(group);
+    }
+    return pane;
+  }
+
+  function changeRow(change) {
+    const row = node('div', 'change-row'); row.title = change.path;
+    const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = change.checked; checkbox.title = 'Include in commit';
+    checkbox.addEventListener('change', () => post('togglePath', { path: change.path, checked: checkbox.checked }));
+    const statusClass = change.status === '?' ? 'status-q' : change.status === '!' ? 'status-bang' : 'status-' + change.status;
+    const file = node('div', 'change-file'); file.append(node('span', 'file-name', change.fileName));
+    if (change.directory) file.append(node('span', 'directory', change.directory));
+    if (change.staged) file.append(node('span', 'stage-mark', 'staged'));
+    file.addEventListener('dblclick', () => post('openDiff', { path: change.path }));
+    const actions = node('div', 'row-actions');
+    actions.append(button('↔', 'Show Diff', () => post('openDiff', { path: change.path }), 'row-action'));
+    if (change.staged && !change.unstaged) actions.append(button('−', 'Unstage', () => post('unstage', { path: change.path }), 'row-action'));
+    else actions.append(button('+', 'Stage', () => post('stage', { path: change.path }), 'row-action'));
+    actions.append(
+      button('⇥', 'Move to Changelist', () => post('moveToChangelist', { path: change.path }), 'row-action'),
+      button('↶', 'Rollback', () => post('discard', { path: change.path }), 'row-action'),
+    );
+    row.append(checkbox, node('span', 'change-status ' + statusClass, change.status), file, actions);
+    return row;
+  }
+
+  function commitForm() {
+    const form = node('div', 'commit-form');
+    form.append(node('div', 'commit-form-title', 'Commit Changes'));
+    const message = node('textarea', 'commit-message'); message.placeholder = 'Commit Message'; message.value = uiState.commitMessage || '';
+    message.addEventListener('input', () => saveUiState({ commitMessage: message.value }));
+    const options = node('div', 'commit-options');
+    const amend = checkboxOption('Amend', 'amend');
+    const signoff = checkboxOption('Sign-off', 'signoff');
+    const noVerify = checkboxOption('Skip hooks', 'noVerify');
+    options.append(amend.label, signoff.label, noVerify.label, node('span', 'spacer'), node('span', '', (state.selectedCount || 0) + ' selected'));
+    const submit = push => post('commit', { message: message.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push });
+    const actions = node('div', 'commit-actions');
+    actions.append(button('Commit', 'Commit selected changes', () => submit(false), 'primary'), button('↑', 'Commit and Push', () => submit(true), 'secondary'));
+    form.append(message, options, actions); return form;
+  }
+
+  function checkboxOption(text, key) {
+    const label = node('label'); const input = node('input'); input.type = 'checkbox'; input.checked = Boolean(uiState[key]);
+    input.addEventListener('change', () => saveUiState({ [key]: input.checked }));
+    label.append(input, node('span', '', text)); return { label, input };
+  }
+
+  function shelfPanel() {
+    const pane = node('div', 'shelf-pane');
+    const top = node('div', 'group-header');
+    top.append(node('span', '', 'Shelved Changes'), node('span', 'spacer'), button('+ Shelve', 'Shelve selected local changes', () => { selectToolTab('changes'); }, 'action'));
+    pane.append(top);
+    if (!(state.shelves || []).length) { pane.append(node('div', 'empty', 'No shelved changes')); return pane; }
+    for (const shelf of state.shelves) {
+      const item = node('div', 'shelf-row');
+      item.append(node('div', 'shelf-name', shelf.name), node('div', 'shelf-meta', new Date(shelf.createdAt).toLocaleString() + ' · ' + shelf.paths.length + ' files'));
+      const actions = node('div', 'shelf-actions');
+      actions.append(button('Unshelve', 'Apply shelved changes', () => post('applyShelf', { id: shelf.id }), 'small-button'), button('×', 'Delete Shelf', () => post('deleteShelf', { id: shelf.id }), 'row-action'));
+      item.append(actions); pane.append(item);
+    }
+    return pane;
   }
 
   function consolePanel() {
@@ -460,6 +843,8 @@ const logScript = String.raw`
     if (event.data.type === 'state') { state = event.data.state; render(); }
     if (event.data.type === 'selection') { state.selection = event.data.selection; render(); }
     if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-400); if (activeToolTab === 'console') render(); }
+    if (event.data.type === 'activateTab') { selectToolTab(event.data.tab); }
+    if (event.data.type === 'committed') { saveUiState({ commitMessage: '' }); render(); }
     if (event.data.type === 'error') { const error = node('div', 'error', event.data.message); app.prepend(error); }
   });
   post('ready'); render();
