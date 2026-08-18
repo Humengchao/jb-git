@@ -71,7 +71,8 @@
       },
       {
         "command": "jbGit.operationsPopup",
-        "title": "JB Git: Git Operations Popup"
+        "title": "JB Git: Git Operations Popup",
+        "icon": "$(ellipsis)"
       },
       {
         "command": "jbGit.fileHistory",

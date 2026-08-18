@@ -753,7 +753,7 @@ const logScript = String.raw`
     repositories.addEventListener('change', () => post('selectRepository', { root: repositories.value }));
     const input = node('input', 'search'); input.type = 'search'; input.placeholder = 'Search commits'; input.value = search;
     input.addEventListener('input', () => { search = input.value.toLowerCase(); renderCommitRows(); });
-    bar.append(repositories, button('↻', 'Fetch and Refresh', () => post('refresh')), input, node('span', 'spacer'), node('span', 'branch-label', '⑂ ' + (state.branch || 'detached HEAD')));
+    bar.append(repositories, button('↻', 'Refresh', () => post('refresh')), input, node('span', 'spacer'), node('span', 'branch-label', '⑂ ' + (state.branch || 'detached HEAD')));
     return bar;
   }
 
