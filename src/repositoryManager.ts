@@ -382,8 +382,8 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
-  public async checkout(rootPath: string, branch: string): Promise<void> {
-    await this.requireRepository(rootPath).checkout(branch);
+  public async checkout(rootPath: string, branch: string, kind?: GitBranch["kind"]): Promise<void> {
+    await this.requireRepository(rootPath).checkout(branch, kind);
     await this.refresh(rootPath);
   }
 

@@ -20,11 +20,11 @@ export class BranchNode extends vscode.TreeItem {
   public constructor(public readonly repositoryRoot: string, public readonly branch: GitBranch) {
     super(branch.name, vscode.TreeItemCollapsibleState.None);
     this.description = branch.tracking ?? branch.kind;
-    this.contextValue = "jbGit.branch";
+    this.contextValue = `jbGit.branch.${branch.kind}`;
     this.iconPath = new vscode.ThemeIcon(branch.kind === "tag" ? "tag" : "git-branch");
     this.command = {
       command: "jbGit.checkoutBranch",
-      title: "Checkout Branch",
+      title: branch.kind === "tag" ? "Checkout Tag (Detached)" : "Checkout Branch",
       arguments: [this],
     };
   }

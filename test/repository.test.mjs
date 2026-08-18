@@ -68,6 +68,10 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
 
   await repository.createTag("v0.1.0-test", "HEAD");
   assert.ok((await repository.branches()).some((branch) => branch.kind === "tag" && branch.name === "v0.1.0-test"));
+  await repository.checkout("v0.1.0-test", "tag");
+  assert.equal(git(root, "branch", "--show-current"), "");
+  assert.equal(git(root, "rev-parse", "HEAD"), git(root, "rev-list", "-n", "1", "v0.1.0-test"));
+  await repository.checkout(defaultBranch, "local");
   await repository.deleteTag("v0.1.0-test");
 
   const remotePath = mkdtempSync(join(tmpdir(), "jb-git-remote-"));

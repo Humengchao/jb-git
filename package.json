@@ -461,17 +461,17 @@
       "view/item/context": [
         {
           "command": "jbGit.createBranch",
-          "when": "view == jbGit.repositories && (viewItem == jbGit.repository || viewItem == jbGit.branch)",
+          "when": "view == jbGit.repositories && (viewItem == jbGit.repository || viewItem == jbGit.branch.local || viewItem == jbGit.branch.remote || viewItem == jbGit.branch.tag)",
           "group": "inline@1"
         },
         {
           "command": "jbGit.renameBranch",
-          "when": "view == jbGit.repositories && viewItem == jbGit.branch",
+          "when": "view == jbGit.repositories && viewItem == jbGit.branch.local",
           "group": "inline@2"
         },
         {
           "command": "jbGit.deleteBranch",
-          "when": "view == jbGit.repositories && viewItem == jbGit.branch",
+          "when": "view == jbGit.repositories && viewItem == jbGit.branch.local",
           "group": "inline@3"
         },
         {

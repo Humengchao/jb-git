@@ -560,8 +560,13 @@ export class GitRepository {
     }
   }
 
-  public async checkout(branch: string): Promise<void> {
+  public async checkout(branch: string, kind?: GitBranch["kind"]): Promise<void> {
     await this.serial(async () => {
+      const isTag = kind === "tag" || (kind === undefined && await this.hasRef(`refs/tags/${branch}`));
+      if (isTag) {
+        await this.runner.run(["switch", "--detach", `refs/tags/${branch}`], { cwd: this.info.rootPath });
+        return;
+      }
       const isRemote = await this.hasRef(`refs/remotes/${branch}`);
       const hasLocal = await this.hasRef(`refs/heads/${branch}`);
       await this.runner.run(
