@@ -106,3 +106,12 @@ export interface GitRemote {
   fetchUrl: string;
   pushUrl: string;
 }
+
+export interface GitDiffHunk {
+  header: string;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
+}

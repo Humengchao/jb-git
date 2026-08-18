@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { discoverRepositories, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
-import { GitBranch, GitCommitOptions, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
+import { GitBranch, GitCommitOptions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -84,6 +84,20 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async unstage(rootPath: string, paths: readonly string[]): Promise<void> {
     await this.requireRepository(rootPath).unstage(paths);
+    await this.refresh(rootPath);
+  }
+
+  public async diffHunks(rootPath: string, pathSpec: string, staged = false): Promise<GitDiffHunk[]> {
+    return this.requireRepository(rootPath).diffHunks(pathSpec, staged);
+  }
+
+  public async stageHunk(rootPath: string, pathSpec: string, hunkIndex: number): Promise<void> {
+    await this.requireRepository(rootPath).stageHunk(pathSpec, hunkIndex);
+    await this.refresh(rootPath);
+  }
+
+  public async unstageHunk(rootPath: string, pathSpec: string, hunkIndex: number): Promise<void> {
+    await this.requireRepository(rootPath).unstageHunk(pathSpec, hunkIndex);
     await this.refresh(rootPath);
   }
 

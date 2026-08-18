@@ -2,10 +2,12 @@ import * as path from "node:path";
 import { access, readFile } from "node:fs/promises";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
+import { parseUnifiedDiff, patchForHunk } from "./patch";
 import {
   GitBranch,
   GitCommitOptions,
   GitCommit,
+  GitDiffHunk,
   GitPullStrategy,
   GitOperationState,
   GitRepositoryInfo,
@@ -101,6 +103,49 @@ export class GitRepository {
 
   public async patch(paths: readonly string[]): Promise<string> {
     return this.runner.text(["diff", "--binary", "--no-ext-diff", "HEAD", "--", ...paths], { cwd: this.info.rootPath });
+  }
+
+  public async diffHunks(pathSpec: string, staged = false): Promise<GitDiffHunk[]> {
+    const output = await this.runner.text([
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--unified=3",
+      ...(staged ? ["--cached"] : []),
+      "--",
+      pathSpec,
+    ], { cwd: this.info.rootPath });
+    return parseUnifiedDiff(output);
+  }
+
+  public async stageHunk(pathSpec: string, hunkIndex: number): Promise<void> {
+    await this.applyHunk(pathSpec, hunkIndex, false, false);
+  }
+
+  public async unstageHunk(pathSpec: string, hunkIndex: number): Promise<void> {
+    await this.applyHunk(pathSpec, hunkIndex, true, true);
+  }
+
+  private async applyHunk(pathSpec: string, hunkIndex: number, staged: boolean, reverse: boolean): Promise<void> {
+    await this.serial(async () => {
+      const output = await this.runner.text([
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--unified=3",
+        ...(staged ? ["--cached"] : []),
+        "--",
+        pathSpec,
+      ], { cwd: this.info.rootPath });
+      const hunks = parseUnifiedDiff(output);
+      const hunk = hunks[hunkIndex];
+      if (!hunk) throw new Error(`Git hunk ${hunkIndex + 1} is no longer available; refresh the changes view.`);
+      const patch = patchForHunk(output, hunk);
+      await this.runner.run(["apply", "--cached", ...(reverse ? ["--reverse"] : []), "--whitespace=nowarn", "-"], {
+        cwd: this.info.rootPath,
+        input: patch,
+      });
+    });
   }
 
   public async applyPatchFile(patchFile: string): Promise<void> {

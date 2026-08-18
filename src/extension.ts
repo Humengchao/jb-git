@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { GitCommandError, GitRunner } from "./git/runner";
 import { BranchNode, RepositoryTreeProvider } from "./views/repositoryTree";
-import { ChangeNode, ChangesTreeProvider } from "./views/changesTree";
+import { ChangeNode, ChangesTreeProvider, HunkNode } from "./views/changesTree";
 import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
 import { CommitNode, HistoryTreeProvider } from "./views/historyTree";
 import { ChangelistChangeNode, ChangelistNode, ChangelistTreeProvider } from "./views/changelistTree";
@@ -564,6 +564,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.unstageChange", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;
       await runWithNotification(`Unstaging ${node.change.path}`, () => manager.unstage(node.repositoryRoot, [node.change.path]));
+    }),
+    vscode.commands.registerCommand("jbGit.stageHunk", async (node?: HunkNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      await runWithNotification(`Staging hunk in ${node.pathSpec}`, () => manager.stageHunk(node.repositoryRoot, node.pathSpec, node.index));
+    }),
+    vscode.commands.registerCommand("jbGit.unstageHunk", async (node?: HunkNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      await runWithNotification(`Unstaging hunk in ${node.pathSpec}`, () => manager.unstageHunk(node.repositoryRoot, node.pathSpec, node.index));
     }),
     vscode.commands.registerCommand("jbGit.discardChange", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;

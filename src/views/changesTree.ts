@@ -1,9 +1,10 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
-import { GitChange } from "../git/types";
+import { GitChange, GitDiffHunk } from "../git/types";
 
 type ChangeGroupKind = "staged" | "unstaged" | "untracked" | "conflicted";
+export type ChangeViewMode = "staged" | "unstaged";
 
 export class ChangeGroupNode extends vscode.TreeItem {
   public constructor(
@@ -19,14 +20,18 @@ export class ChangeGroupNode extends vscode.TreeItem {
 }
 
 export class ChangeNode extends vscode.TreeItem {
-  public constructor(public readonly repositoryRoot: string, public readonly change: GitChange) {
-    super(change.path, vscode.TreeItemCollapsibleState.None);
+  public constructor(
+    public readonly repositoryRoot: string,
+    public readonly change: GitChange,
+    public readonly mode: ChangeViewMode = change.staged ? "staged" : "unstaged",
+  ) {
+    super(change.path, vscode.TreeItemCollapsibleState.Collapsed);
     this.resourceUri = vscode.Uri.file(path.join(repositoryRoot, change.path));
     this.description = change.originalPath ? `← ${change.originalPath}` : change.kind;
     this.tooltip = `${change.indexStatus}${change.workTreeStatus} · ${change.path}`;
     this.contextValue = change.conflicted
       ? "jbGit.change.conflicted"
-      : change.staged
+      : mode === "staged"
         ? "jbGit.change.staged"
         : change.kind === "untracked"
           ? "jbGit.change.untracked"
@@ -42,19 +47,42 @@ export class ChangeNode extends vscode.TreeItem {
   }
 }
 
-export class ChangesTreeProvider implements vscode.TreeDataProvider<ChangeGroupNode | ChangeNode | RepositoryChangeRoot | EmptyChangesNode> {
-  private readonly changedEmitter = new vscode.EventEmitter<ChangeGroupNode | ChangeNode | RepositoryChangeRoot | EmptyChangesNode | undefined | null | void>();
+export class HunkNode extends vscode.TreeItem {
+  public constructor(
+    public readonly repositoryRoot: string,
+    public readonly pathSpec: string,
+    public readonly mode: ChangeViewMode,
+    public readonly index: number,
+    public readonly hunk: GitDiffHunk,
+  ) {
+    super(hunk.header, vscode.TreeItemCollapsibleState.None);
+    const additions = hunk.lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
+    const removals = hunk.lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
+    this.description = `+${additions} / -${removals}`;
+    this.tooltip = hunk.lines.join("\n");
+    this.contextValue = mode === "staged" ? "jbGit.hunk.unstage" : "jbGit.hunk.stage";
+    this.iconPath = new vscode.ThemeIcon(mode === "staged" ? "remove" : "add");
+    this.command = {
+      command: mode === "staged" ? "jbGit.unstageHunk" : "jbGit.stageHunk",
+      title: mode === "staged" ? "Unstage Hunk" : "Stage Hunk",
+      arguments: [this],
+    };
+  }
+}
+
+export class ChangesTreeProvider implements vscode.TreeDataProvider<ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode> {
+  private readonly changedEmitter = new vscode.EventEmitter<ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode | undefined | null | void>();
   public readonly onDidChangeTreeData = this.changedEmitter.event;
 
   public constructor(private readonly manager: RepositoryManager) {
     manager.onDidChange(() => this.changedEmitter.fire());
   }
 
-  public getTreeItem(element: ChangeGroupNode | ChangeNode | RepositoryChangeRoot | EmptyChangesNode): vscode.TreeItem {
+  public getTreeItem(element: ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode): vscode.TreeItem {
     return element;
   }
 
-  public getChildren(element?: ChangeGroupNode | ChangeNode | RepositoryChangeRoot | EmptyChangesNode): vscode.ProviderResult<(ChangeGroupNode | ChangeNode | RepositoryChangeRoot | EmptyChangesNode)[]> {
+  public async getChildren(element?: ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode): Promise<(ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode)[]> {
     if (!element) {
       return this.manager.all.map((snapshot) => new RepositoryChangeRoot(snapshot));
     }
@@ -75,7 +103,16 @@ export class ChangesTreeProvider implements vscode.TreeDataProvider<ChangeGroupN
       return groups;
     }
     if (element instanceof ChangeGroupNode) {
-      return element.changes.map((change) => new ChangeNode(element.repositoryRoot, change));
+      const mode: ChangeViewMode = element.group === "staged" ? "staged" : "unstaged";
+      return element.changes.map((change) => new ChangeNode(element.repositoryRoot, change, mode));
+    }
+    if (element instanceof ChangeNode && !element.change.conflicted && element.change.kind !== "untracked") {
+      try {
+        const hunks = await this.manager.diffHunks(element.repositoryRoot, element.change.path, element.mode === "staged");
+        return hunks.map((hunk, index) => new HunkNode(element.repositoryRoot, element.change.path, element.mode, index, hunk));
+      } catch {
+        return [];
+      }
     }
     return [];
   }

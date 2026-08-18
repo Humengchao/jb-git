@@ -36,15 +36,15 @@ export async function openChangeDiff(
   const change = node.change;
   const path = change.path;
   const oldPath = change.originalPath ?? path;
-  const leftRevision = change.staged ? "HEAD" : change.indexStatus !== " " ? "INDEX" : "HEAD";
-  const rightRevision = change.staged ? "INDEX" : undefined;
+  const staged = node.mode === "staged";
+  const leftRevision = staged ? "HEAD" : change.indexStatus !== " " ? "INDEX" : "HEAD";
+  const rightRevision = staged ? "INDEX" : undefined;
   const [left, right] = await Promise.all([
     repository.fileContent(oldPath, leftRevision),
     repository.fileContent(path, rightRevision),
   ]);
-  const label = `${path} (${change.staged ? "Index" : "Working Tree"})`;
+  const label = `${path} (${staged ? "Index" : "Working Tree"})`;
   const leftUri = provider.register(`${label}:left`, left.toString("utf8"));
   const rightUri = provider.register(`${label}:right`, right.toString("utf8"));
   await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
 }
-

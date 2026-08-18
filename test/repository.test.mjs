@@ -125,3 +125,29 @@ test("detects an in-progress merge operation", async () => {
   assert.equal(operation.canAbort, true);
   git(root, "merge", "--abort");
 });
+
+test("stages and unstages individual text diff hunks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-hunks-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "hunks.txt"), Array.from({ length: 16 }, (_, index) => `line ${index + 1}\n`).join(""));
+  git(root, "add", "hunks.txt");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "hunks.txt"), Array.from({ length: 16 }, (_, index) => {
+    if (index === 0) return "first change\n";
+    if (index === 14) return "second change\n";
+    return `line ${index + 1}\n`;
+  }).join(""));
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const hunks = await repository.diffHunks("hunks.txt");
+  assert.equal(hunks.length, 2);
+  await repository.stageHunk("hunks.txt", 0);
+  assert.equal((await repository.status()).changes[0].staged, true);
+  assert.equal((await repository.diffHunks("hunks.txt")).length, 1);
+  assert.equal((await repository.diffHunks("hunks.txt", true)).length, 1);
+  await repository.unstageHunk("hunks.txt", 0);
+  assert.equal((await repository.diffHunks("hunks.txt", true)).length, 0);
+  assert.equal((await repository.diffHunks("hunks.txt")).length, 2);
+});

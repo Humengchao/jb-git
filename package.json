@@ -218,6 +218,14 @@
         "title": "JB Git: Unstage Change"
       },
       {
+        "command": "jbGit.stageHunk",
+        "title": "JB Git: Stage Hunk"
+      },
+      {
+        "command": "jbGit.unstageHunk",
+        "title": "JB Git: Unstage Hunk"
+      },
+      {
         "command": "jbGit.discardChange",
         "title": "JB Git: Discard Change"
       }
@@ -372,6 +380,16 @@
         {
           "command": "jbGit.unstageChange",
           "when": "view == jbGit.changes && viewItem == jbGit.change.staged",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.stageHunk",
+          "when": "view == jbGit.changes && viewItem == jbGit.hunk.stage",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.unstageHunk",
+          "when": "view == jbGit.changes && viewItem == jbGit.hunk.unstage",
           "group": "inline@1"
         },
         {
