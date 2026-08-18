@@ -379,6 +379,7 @@ export class GitRepository {
   public async pull(strategy: GitPullStrategy): Promise<void> {
     await this.serial(() => {
       const args = ["pull"];
+      if (strategy === "merge") args.push("--no-rebase");
       if (strategy === "rebase") args.push("--rebase");
       if (strategy === "ff-only") args.push("--ff-only");
       return this.runner.run(args, { cwd: this.info.rootPath });

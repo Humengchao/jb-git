@@ -13,6 +13,31 @@ export interface GitResult {
   exitCode: number;
 }
 
+const SENSITIVE_OPTION = /^(?:--?(?:password|passwd|token|access-token|auth|authorization|oauth-token|private-key))(?:=|$)/i;
+
+/** Removes credentials from command arguments and Git output before they reach UI or logs. */
+export function redactGitText(value: string): string {
+  return value
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+@/gi, "$1***@")
+    .replace(/([?&](?:access_?token|auth|authorization|oauth_?token|password)=)[^&#\s]+/gi, "$1***")
+    .replace(/((?:authorization|password|access[_-]?token|oauth[_-]?token)\s*[:=]\s*)(?!\*\*\*)[^\s,;]+/gi, "$1***");
+}
+
+export function redactGitArgs(args: readonly string[]): string[] {
+  let redactNext = false;
+  return args.map((argument) => {
+    if (redactNext) {
+      redactNext = false;
+      return "***";
+    }
+    if (SENSITIVE_OPTION.test(argument)) {
+      if (!argument.includes("=")) redactNext = true;
+      return argument.includes("=") ? `${argument.slice(0, argument.indexOf("=") + 1)}***` : argument;
+    }
+    return redactGitText(argument);
+  });
+}
+
 export class GitCommandError extends Error {
   public readonly exitCode: number | null;
   public readonly stderr: string;
@@ -20,15 +45,16 @@ export class GitCommandError extends Error {
   public readonly args: readonly string[];
 
   public constructor(args: readonly string[], result: Partial<GitResult> = {}, cause?: unknown) {
-    const stderr = result.stderr?.toString("utf8") ?? "";
-    const stdout = result.stdout?.toString("utf8") ?? "";
+    const safeArgs = redactGitArgs(args);
+    const stderr = redactGitText(result.stderr?.toString("utf8") ?? "");
+    const stdout = redactGitText(result.stdout?.toString("utf8") ?? "");
     const detail = stderr.trim() || stdout.trim() || "Git command failed";
-    super(`git ${args.join(" ")}: ${detail}`);
+    super(`git ${safeArgs.join(" ")}: ${detail}`);
     this.name = "GitCommandError";
     this.exitCode = result.exitCode ?? null;
     this.stderr = stderr;
     this.stdout = stdout;
-    this.args = args;
+    this.args = safeArgs;
     if (cause !== undefined) {
       this.cause = cause;
     }
@@ -107,4 +133,3 @@ export class GitRunner {
     return (await this.text(["--version"], { cwd })).trim();
   }
 }
-

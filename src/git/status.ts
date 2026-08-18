@@ -33,16 +33,18 @@ function makeChange(
   workTreeStatus: GitStatusCode,
   path: string,
   originalPath?: string,
+  forceConflicted = false,
 ): GitChange {
+  const conflicted = forceConflicted || indexStatus === "U" || workTreeStatus === "U";
   return {
     path,
     originalPath,
     indexStatus,
     workTreeStatus,
-    kind: statusKind(indexStatus, workTreeStatus),
+    kind: conflicted ? "conflicted" : statusKind(indexStatus, workTreeStatus),
     staged: indexStatus !== " " && indexStatus !== "?" && indexStatus !== "!",
     unstaged: workTreeStatus !== " " && workTreeStatus !== "?" && workTreeStatus !== "!",
-    conflicted: indexStatus === "U" || workTreeStatus === "U",
+    conflicted,
   };
 }
 
@@ -107,10 +109,10 @@ export function parsePorcelainV2(output: Buffer | string): GitStatusSnapshot {
     if (recordType === "u" && fields.length >= 11) {
       const indexStatus = parseStatusCode(fields[1][0]);
       const workTreeStatus = parseStatusCode(fields[1][1]);
-      changes.push(makeChange(indexStatus, workTreeStatus, fields.slice(10).join(" ")));
+      // Every `u` record is unmerged; valid AA/DD pairs contain no literal U.
+      changes.push(makeChange(indexStatus, workTreeStatus, fields.slice(10).join(" "), undefined, true));
     }
   }
 
   return { branch, changes, generatedAt: Date.now() };
 }
-

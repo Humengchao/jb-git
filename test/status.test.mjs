@@ -49,3 +49,11 @@ test("parses an initial detached repository", () => {
   assert.equal(snapshot.changes[0].kind, "untracked");
 });
 
+test("treats every porcelain v2 unmerged record as conflicted", () => {
+  for (const xy of ["DD", "AU", "UD", "UA", "DU", "AA", "UU"]) {
+    const snapshot = parsePorcelainV2(`u ${xy} N... 100644 100644 100644 100644 a b c conflict-${xy}.txt\0`);
+    assert.equal(snapshot.changes.length, 1);
+    assert.equal(snapshot.changes[0].kind, "conflicted", xy);
+    assert.equal(snapshot.changes[0].conflicted, true, xy);
+  }
+});
