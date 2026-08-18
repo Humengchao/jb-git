@@ -12,6 +12,7 @@
 - Keep the Log table header and rows in one stable scroll area without jumping when commit details load.
 - Add IntelliJ-style context menus for branches, commits, and changed files, backed by validated Git operations.
 - Group changed files by folder and add a persistent draggable splitter for resizing the commit details pane.
+- Add persistent horizontal resizing for all three Log columns, Command/Ctrl branch multi-selection, branch comparison, and Branch/User/Date/Paths/order filters.
 
 ## 0.1.0-alpha.3
 

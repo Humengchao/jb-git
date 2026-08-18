@@ -24,3 +24,31 @@ test("uses one commit scroll area and a mouse-and-keyboard resizable details pan
   assert.match(scriptMatch[1], /event\.key !== 'ArrowUp'/);
   assert.match(scriptMatch[1], /aria-valuenow/);
 });
+
+test("supports persistent horizontal resizing for all three Git log columns", () => {
+  assert.ok(scriptMatch);
+  assert.match(scriptMatch[1], /columnSplitter\('branch'\)/);
+  assert.match(scriptMatch[1], /columnSplitter\('details'\)/);
+  assert.match(scriptMatch[1], /branchPaneWidth/);
+  assert.match(scriptMatch[1], /detailsPaneWidth/);
+  assert.match(scriptMatch[1], /event\.key !== 'ArrowLeft'/);
+});
+
+test("supports modifier-click branch selection and multi-branch actions", () => {
+  assert.ok(scriptMatch);
+  assert.match(scriptMatch[1], /event\.metaKey \|\| event\.ctrlKey/);
+  assert.match(scriptMatch[1], /selectedBranchKeys/);
+  assert.match(scriptMatch[1], /Compare Branches/);
+  assert.match(scriptMatch[1], /Show Files Diff/);
+  assert.match(scriptMatch[1], /deleteBranches/);
+});
+
+test("provides real branch, user, date, path, and ordering filters", () => {
+  assert.ok(scriptMatch);
+  assert.match(scriptMatch[1], /Text or hash/);
+  assert.match(scriptMatch[1], /branchFilterItems/);
+  assert.match(scriptMatch[1], /userFilterItems/);
+  assert.match(scriptMatch[1], /dateFilterItems/);
+  assert.match(scriptMatch[1], /setPathFilter/);
+  assert.match(scriptMatch[1], /sortAscending/);
+});

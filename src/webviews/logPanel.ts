@@ -13,6 +13,7 @@ type LogMessage =
   | { type: "ready" }
   | { type: "selectRepository"; root: string }
   | { type: "selectRef"; ref?: string }
+  | { type: "setPathFilter"; path?: string }
   | { type: "selectCommit"; hash: string }
   | { type: "checkout"; name: string; kind: GitBranch["kind"] }
   | { type: "newBranch"; hash: string }
@@ -39,6 +40,7 @@ type LogMessage =
   | { type: "runCommand"; command: string }
   | { type: "contextAction"; action: "copyRevision" | "createPatch" | "checkoutRevision" | "compareWithLocal" | "createTag"; hash: string }
   | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch"; ref: string; kind: GitBranch["kind"] }
+  | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
   | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string };
 
 interface LogSelection {
@@ -252,6 +254,38 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       const changes = snapshot.status?.changes ?? [];
       const selected = this.syncSelection(root, changes);
       if (message.type === "contextAction") {
+        if ("branches" in message) {
+          const branches = message.branches.map((requested) => snapshot.branches.find(
+            (candidate) => candidate.name === requested.name && candidate.kind === requested.kind,
+          ));
+          if (branches.some((branch) => !branch)) return;
+          const selectedBranches = branches.filter((branch): branch is GitBranch => Boolean(branch));
+          if (message.action === "compareBranches" || message.action === "showBranchesDiff") {
+            if (selectedBranches.length !== 2) return;
+            const [left, right] = selectedBranches;
+            const content = message.action === "compareBranches"
+              ? await snapshot.repository.compareRefHistory(left.name, right.name)
+              : await snapshot.repository.diffRefs(left.name, right.name);
+            await showDiffText(`${left.name} ↔ ${right.name}`, content);
+            return;
+          }
+          if (message.action === "deleteBranches") {
+            if (!(await requireTrusted())) return;
+            const current = snapshot.status?.branch.head;
+            const deletable = selectedBranches.filter((branch) => branch.kind === "local" && branch.name !== current);
+            if (!deletable.length) return;
+            const confirmed = await vscode.window.showWarningMessage(
+              `Delete ${deletable.length} selected branch${deletable.length === 1 ? "" : "es"}?`,
+              { modal: true, detail: deletable.map((branch) => branch.name).join("\n") },
+              "Delete",
+            );
+            if (confirmed === "Delete") {
+              for (const branch of deletable) await this.manager.deleteBranch(root, branch.name);
+            }
+            return;
+          }
+          return;
+        }
         if ("ref" in message) {
           const branch = snapshot.branches.find((item) => item.name === message.ref && item.kind === message.kind);
           if (!branch) return;
@@ -369,6 +403,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           if (name?.trim()) await this.manager.createTag(root, name.trim(), commit.hash);
           return;
         }
+        return;
       }
       if (message.type === "togglePath") {
         const change = changes.find((item) => item.path === message.path);
@@ -391,6 +426,13 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "selectRef") {
         if (message.ref && !snapshot.branches.some((branch) => branch.name === message.ref)) return;
         this.selectedRef = message.ref;
+        this.selectedHash = undefined;
+        return void this.update();
+      }
+      if (message.type === "setPathFilter") {
+        const filePath = message.path?.trim();
+        if (filePath && (filePath.length > 4096 || /[\r\n\0]/.test(filePath))) return;
+        this.filePath = filePath || undefined;
         this.selectedHash = undefined;
         return void this.update();
       }
@@ -619,19 +661,30 @@ const logStyles = String.raw`
   .icon-button:hover, .action:hover { background: var(--vscode-toolbar-hoverBackground); }
   .spacer { flex: 1; }
   .branch-label { color: var(--vscode-descriptionForeground); }
-  .workspace { min-height: 0; display: grid; grid-template-columns: 185px minmax(360px, 1fr) 300px; }
-  .pane { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--vscode-panel-border); }
-  .pane:last-child { border-right: 0; }
+  .workspace { --branch-width: 185px; --details-width: 300px; min-width: 0; min-height: 0; display: grid; grid-template-columns: var(--branch-width) 9px minmax(260px, 1fr) 9px var(--details-width); overflow: hidden; }
+  .pane { min-width: 0; min-height: 0; overflow: auto; }
+  .column-splitter { position: relative; min-width: 9px; cursor: col-resize; background: transparent; outline: none; touch-action: none; }
+  .column-splitter::before { content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: var(--vscode-panel-border); }
+  .column-splitter:hover::before, .column-splitter.dragging::before, .column-splitter:focus-visible::before { left: 3px; width: 2px; background: var(--vscode-focusBorder); }
   .branches { overscroll-behavior: contain; scrollbar-gutter: stable; }
   .pane-title { position: sticky; top: 0; z-index: 2; height: 28px; display: flex; align-items: center; padding: 0 9px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
   .branch-section { padding: 5px 0 2px; }
   .section-title { height: 23px; display: flex; align-items: center; padding: 0 9px; color: var(--vscode-descriptionForeground); font-weight: 600; }
   .branch-row { height: 25px; width: 100%; display: flex; align-items: center; gap: 6px; padding: 0 9px 0 16px; text-align: left; white-space: nowrap; }
   .branch-row:hover { background: var(--vscode-list-hoverBackground); }
-  .branch-row.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .branch-row.active, .branch-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .branch-row.current::before { content: '✓'; width: 11px; margin-left: -11px; color: var(--vscode-charts-green); }
   .branch-name { overflow: hidden; text-overflow: ellipsis; }
-  .commit-pane { overflow: hidden; display: block; }
+  .commit-pane { overflow: hidden; display: grid; grid-template-rows: 35px minmax(0, 1fr); }
+  .commit-filters { min-width: 0; display: flex; align-items: center; gap: 2px; padding: 4px 5px; overflow: visible; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
+  .commit-search { min-width: 125px; flex: 1 1 230px; height: 27px; padding: 3px 7px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .filter-button { height: 27px; flex: none; padding: 0 7px; border-radius: 3px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .filter-button:hover, .filter-button.active { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+  .sort-button { min-width: 29px; padding: 0 5px; font-size: 15px; }
+  .filter-popover { position: fixed; z-index: 1000; width: min(360px, calc(100vw - 12px)); padding: 8px; border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 6px; background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 8px 24px rgba(0,0,0,.38); }
+  .filter-popover-title { margin: 0 0 6px; color: var(--vscode-descriptionForeground); }
+  .filter-popover input { width: 100%; height: 28px; padding: 3px 7px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .filter-popover-actions { display: flex; justify-content: flex-end; gap: 5px; margin-top: 8px; }
   .commit-scroll { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .table-head, .commit-row { display: grid; grid-template-columns: minmax(300px, 1fr) 145px 135px 82px; align-items: center; }
   .table-head { position: sticky; top: 0; z-index: 3; height: 27px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); color: var(--vscode-descriptionForeground); font-size: 11px; }
@@ -671,7 +724,7 @@ const logStyles = String.raw`
   .file-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .file-status { font-weight: 700; }
   .file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .context-menu { position: fixed; z-index: 1000; min-width: 230px; max-width: min(360px, calc(100vw - 12px)); padding: 5px; border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 6px; background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 8px 24px rgba(0,0,0,.38); }
+  .context-menu { position: fixed; z-index: 1000; min-width: 230px; max-width: min(360px, calc(100vw - 12px)); max-height: calc(100vh - 12px); overflow: auto; padding: 5px; border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 6px; background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 8px 24px rgba(0,0,0,.38); }
   .context-menu-item { width: 100%; min-height: 28px; display: flex; align-items: center; gap: 8px; padding: 4px 9px; border-radius: 4px; text-align: left; white-space: nowrap; }
   .context-menu-item:hover, .context-menu-item:focus-visible { outline: 0; background: var(--vscode-menu-selectionBackground, var(--vscode-list-activeSelectionBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-list-activeSelectionForeground)); }
   .context-menu-item:disabled { opacity: .45; pointer-events: none; }
@@ -734,14 +787,14 @@ const logStyles = String.raw`
   .shelf-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
   .shelf-actions { grid-row: 1 / 3; grid-column: 2; display: flex; align-items: center; gap: 4px; }
   @media (max-width: 1000px) {
-    .workspace { grid-template-columns: 145px minmax(270px, 1fr) 235px; }
     .table-head, .commit-row { grid-template-columns: minmax(210px, 1fr) 82px; }
     .table-head > :nth-child(3), .table-head > :nth-child(4), .commit-row > :nth-child(3), .commit-row > :nth-child(4) { display: none; }
     .commit-details { padding: 8px; }
     .detail-meta { grid-template-columns: 44px 1fr; font-size: 11px; }
     .detail-actions .action { padding: 0 5px; }
   }
-  @media (max-width: 650px) { .workspace { grid-template-columns: 125px minmax(260px, 1fr); } .details { display: none; } }
+  @media (max-width: 760px) { .filter-button .filter-value { display: none; } }
+  @media (max-width: 650px) { .workspace { grid-template-columns: var(--branch-width) 9px minmax(260px, 1fr); } .details, .column-splitter[data-side="details"] { display: none; } }
   @media (max-width: 760px) { .changes-workspace { grid-template-columns: minmax(310px, 1fr) 280px; } .commit-options { gap: 5px; font-size: 11px; } }
 `;
 
@@ -749,9 +802,13 @@ const logScript = String.raw`
   const vscode = acquireVsCodeApi();
   const app = document.getElementById('app');
   let state = { repositories: [], branches: [], commits: [] };
-  let search = '';
   let uiState = vscode.getState() || {};
+  let search = uiState.search || '';
   let activeToolTab = uiState.activeToolTab || 'log';
+  let selectedBranchKeys = new Set(uiState.selectedBranchKeys || []);
+  let authorFilter = uiState.authorFilter || '';
+  let dateFilter = uiState.dateFilter || 'all';
+  let sortAscending = Boolean(uiState.sortAscending);
   let pendingCommitHash;
   let selectedFilePath;
   let openMenu;
@@ -813,6 +870,11 @@ const logScript = String.raw`
     menu.querySelector('.context-menu-item:not(:disabled)')?.focus();
   }
 
+  function showMenuForElement(element, items) {
+    const bounds = element.getBoundingClientRect();
+    showContextMenuAt(bounds.left, bounds.bottom + 2, items);
+  }
+
   function attachContextMenu(element, items) {
     const entries = () => typeof items === 'function' ? items() : items;
     element.addEventListener('contextmenu', event => showContextMenu(event, entries()));
@@ -848,10 +910,11 @@ const logScript = String.raw`
       root.append(changesToolbar(), shelfPanel()); finishRender(root, saved); return;
     }
     root.append(toolbar());
-    const workspace = node('div', 'workspace');
+    const workspace = node('div', 'workspace'); workspace.id = 'log-workspace';
     if (state.empty) workspace.append(node('div', 'empty', 'Open a folder containing a Git repository.'));
-    else workspace.append(branchPane(), commitPane(), detailsPane());
+    else workspace.append(branchPane(), columnSplitter('branch'), commitPane(), columnSplitter('details'), detailsPane());
     root.append(workspace); finishRender(root, saved, true);
+    if (!state.empty) requestAnimationFrame(() => setupWorkspaceColumns(workspace));
   }
 
   function repositorySelect() {
@@ -999,32 +1062,151 @@ const logScript = String.raw`
     const repositories = node('select'); repositories.title = 'Git root';
     for (const repo of state.repositories || []) { const option = node('option', '', repo.name); option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option); }
     repositories.addEventListener('change', () => post('selectRepository', { root: repositories.value }));
-    const input = node('input', 'search'); input.type = 'search'; input.placeholder = 'Search commits'; input.value = search;
-    input.addEventListener('input', () => { search = input.value.toLowerCase(); renderCommitRows(); });
-    bar.append(repositories, button('↻', 'Refresh', () => post('refresh')), input, node('span', 'spacer'), node('span', 'branch-label', '⑂ ' + (state.branch || 'detached HEAD')));
+    bar.append(repositories, button('↻', 'Refresh', () => post('refresh')), node('span', 'spacer'), node('span', 'branch-label', '⑂ ' + (state.branch || 'detached HEAD')));
     return bar;
+  }
+
+  function columnSplitter(side) {
+    const splitter = node('div', 'column-splitter'); splitter.dataset.side = side; splitter.tabIndex = 0;
+    splitter.setAttribute('role', 'separator'); splitter.setAttribute('aria-orientation', 'vertical');
+    splitter.title = side === 'branch' ? 'Drag to resize branches' : 'Drag to resize commit details';
+    return splitter;
+  }
+
+  function setupWorkspaceColumns(workspace) {
+    setColumnWidths(workspace, Number(uiState.branchPaneWidth) || 185, Number(uiState.detailsPaneWidth) || 300, false);
+    workspace.querySelectorAll('.column-splitter').forEach(splitter => setupColumnSplitter(workspace, splitter));
+    if ('ResizeObserver' in window) {
+      const observer = new ResizeObserver(() => {
+        if (!workspace.isConnected) { observer.disconnect(); return; }
+        setColumnWidths(workspace, readColumnWidth(workspace, 'branch'), readColumnWidth(workspace, 'details'), false);
+      });
+      observer.observe(workspace);
+    }
+  }
+
+  function setupColumnSplitter(workspace, splitter) {
+    const side = splitter.dataset.side;
+    const resize = event => {
+      const bounds = workspace.getBoundingClientRect();
+      const requested = side === 'branch' ? event.clientX - bounds.left : bounds.right - event.clientX;
+      const left = side === 'branch' ? requested : readColumnWidth(workspace, 'branch');
+      const right = side === 'details' ? requested : readColumnWidth(workspace, 'details');
+      setColumnWidths(workspace, left, right, false);
+    };
+    splitter.addEventListener('mousedown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault(); splitter.focus(); splitter.classList.add('dragging'); resize(event);
+      const move = moveEvent => resize(moveEvent);
+      const finish = () => {
+        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', finish);
+        splitter.classList.remove('dragging'); persistColumnWidths(workspace);
+      };
+      window.addEventListener('mousemove', move); window.addEventListener('mouseup', finish);
+    });
+    splitter.addEventListener('dblclick', () => {
+      setColumnWidths(workspace, side === 'branch' ? 185 : readColumnWidth(workspace, 'branch'), side === 'details' ? 300 : readColumnWidth(workspace, 'details'), true);
+    });
+    splitter.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault(); const delta = event.key === 'ArrowRight' ? 16 : -16;
+      const left = readColumnWidth(workspace, 'branch') + (side === 'branch' ? delta : 0);
+      const right = readColumnWidth(workspace, 'details') + (side === 'details' ? -delta : 0);
+      setColumnWidths(workspace, left, right, true);
+    });
+  }
+
+  function readColumnWidth(workspace, side) {
+    const property = side === 'branch' ? '--branch-width' : '--details-width';
+    return parseFloat(getComputedStyle(workspace).getPropertyValue(property)) || (side === 'branch' ? 185 : 300);
+  }
+
+  function setColumnWidths(workspace, requestedLeft, requestedRight, persist) {
+    const compact = window.matchMedia('(max-width: 650px)').matches;
+    const total = workspace.clientWidth || window.innerWidth;
+    const leftMinimum = 125; const rightMinimum = 190; const centerMinimum = 260; const gutters = compact ? 9 : 18;
+    let left = Math.max(leftMinimum, requestedLeft || 185);
+    let right = Math.max(rightMinimum, requestedRight || 300);
+    if (compact) left = Math.min(left, Math.max(leftMinimum, total - gutters - centerMinimum));
+    else {
+      const maximumSides = Math.max(leftMinimum + rightMinimum, total - gutters - centerMinimum);
+      if (left + right > maximumSides) {
+        const overflow = left + right - maximumSides;
+        const shrinkRight = Math.min(overflow, Math.max(0, right - rightMinimum)); right -= shrinkRight;
+        left = Math.max(leftMinimum, left - (overflow - shrinkRight));
+      }
+      left = Math.min(left, Math.max(leftMinimum, maximumSides - rightMinimum));
+      right = Math.min(right, Math.max(rightMinimum, maximumSides - left));
+    }
+    workspace.style.setProperty('--branch-width', Math.round(left) + 'px');
+    workspace.style.setProperty('--details-width', Math.round(right) + 'px');
+    const leftSplitter = workspace.querySelector('.column-splitter[data-side="branch"]');
+    const rightSplitter = workspace.querySelector('.column-splitter[data-side="details"]');
+    if (leftSplitter) { leftSplitter.setAttribute('aria-valuemin', String(leftMinimum)); leftSplitter.setAttribute('aria-valuenow', String(Math.round(left))); }
+    if (rightSplitter) { rightSplitter.setAttribute('aria-valuemin', String(rightMinimum)); rightSplitter.setAttribute('aria-valuenow', String(Math.round(right))); }
+    if (persist) persistColumnWidths(workspace);
+  }
+
+  function persistColumnWidths(workspace) {
+    saveUiState({ branchPaneWidth: Math.round(readColumnWidth(workspace, 'branch')), detailsPaneWidth: Math.round(readColumnWidth(workspace, 'details')) });
+  }
+
+  const branchKey = branch => JSON.stringify([branch.kind, branch.name]);
+  const selectedBranches = () => (state.branches || []).filter(branch => selectedBranchKeys.has(branchKey(branch)));
+  function setBranchSelection(branches) {
+    selectedBranchKeys = new Set(branches.map(branchKey));
+    saveUiState({ selectedBranchKeys: [...selectedBranchKeys] });
+    document.querySelectorAll('.branch-row[data-branch-key]').forEach(row => {
+      const active = selectedBranchKeys.has(row.dataset.branchKey);
+      row.classList.toggle('selected', active); row.setAttribute('aria-selected', String(active));
+    });
+  }
+
+  function branchContextItems(branch) {
+    if (!selectedBranchKeys.has(branchKey(branch))) setBranchSelection([branch]);
+    const selected = selectedBranches();
+    if (selected.length > 1) {
+      const descriptors = selected.map(item => ({ name: item.name, kind: item.kind }));
+      const deletable = selected.some(item => item.kind === 'local' && item.name !== state.branch);
+      return [
+        { icon: '↔', label: 'Compare Branches', disabled: selected.length !== 2, run: () => post('contextAction', { action: 'compareBranches', branches: descriptors }) },
+        { icon: '⇄', label: 'Show Files Diff', disabled: selected.length !== 2, run: () => post('contextAction', { action: 'showBranchesDiff', branches: descriptors }) },
+        { separator: true },
+        { icon: '×', label: 'Delete Selected Branches…', disabled: !deletable, run: () => post('contextAction', { action: 'deleteBranches', branches: descriptors }) },
+      ];
+    }
+    const kind = branch.kind;
+    return [
+      { icon: '+', label: "New Branch from '" + branch.name + "'…", run: () => post('contextAction', { action: 'newBranchFromRef', ref: branch.name, kind: branch.kind }) },
+      { icon: '↔', label: 'Show Diff with Working Tree', run: () => post('contextAction', { action: 'showRefDiff', ref: branch.name, kind: branch.kind }) },
+      { icon: '▣', label: "New Worktree from '" + branch.name + "'…", run: () => post('contextAction', { action: 'createWorktreeFromRef', ref: branch.name, kind: branch.kind }) },
+      { separator: true },
+      { icon: '✓', label: 'Checkout', disabled: kind === 'local' && branch.name === state.branch, run: () => post('checkout', { name: branch.name, kind: branch.kind }) },
+      { icon: '⧉', label: 'Copy Branch Name', run: () => post('contextAction', { action: 'copyBranch', ref: branch.name, kind: branch.kind }) },
+      { separator: true },
+      { icon: '✎', label: 'Rename…', disabled: kind !== 'local', run: () => post('contextAction', { action: 'renameBranch', ref: branch.name, kind: branch.kind }) },
+      { icon: '×', label: 'Delete…', disabled: kind !== 'local' || branch.name === state.branch, run: () => post('contextAction', { action: 'deleteBranch', ref: branch.name, kind: branch.kind }) },
+    ];
   }
 
   function branchPane() {
     const pane = node('aside', 'pane branches'); pane.id = 'branch-pane'; pane.append(node('div', 'pane-title', 'Branches'));
-    const all = button('All', 'Show all branches', () => post('selectRef', {}), 'branch-row' + (!state.selectedRef ? ' active' : ''));
+    const all = button('All', 'Show all branches', () => { setBranchSelection([]); post('selectRef', {}); }, 'branch-row' + (!state.selectedRef && !selectedBranchKeys.size ? ' active' : ''));
     pane.append(all);
     for (const [kind, title] of [['local','Local'], ['remote','Remote'], ['tag','Tags']]) {
       const section = node('section', 'branch-section'); section.append(node('div', 'section-title', title));
       for (const branch of (state.branches || []).filter(item => item.kind === kind)) {
-        const row = button(branch.name, 'Filter by ' + branch.name, () => post('selectRef', { ref: branch.name }), 'branch-row' + (state.selectedRef === branch.name ? ' active' : '') + (kind === 'local' && branch.name === state.branch ? ' current' : ''));
+        const key = branchKey(branch); const selected = selectedBranchKeys.has(key);
+        const row = button(branch.name, 'Filter by ' + branch.name + ' (Command/Ctrl-click to select multiple)', event => {
+          if (event.metaKey || event.ctrlKey) {
+            const next = new Set(selectedBranchKeys); if (next.has(key)) next.delete(key); else next.add(key);
+            selectedBranchKeys = next; setBranchSelection(selectedBranches()); return;
+          }
+          setBranchSelection([branch]); post('selectRef', { ref: branch.name });
+        }, 'branch-row' + (selected ? ' selected' : '') + (kind === 'local' && branch.name === state.branch ? ' current' : ''));
+        row.dataset.branchKey = key; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
         row.addEventListener('dblclick', () => post('checkout', { name: branch.name, kind: branch.kind }));
-        attachContextMenu(row, () => [
-          { icon: '+', label: "New Branch from '" + branch.name + "'…", run: () => post('contextAction', { action: 'newBranchFromRef', ref: branch.name, kind: branch.kind }) },
-          { icon: '↔', label: 'Show Diff with Working Tree', run: () => post('contextAction', { action: 'showRefDiff', ref: branch.name, kind: branch.kind }) },
-          { icon: '▣', label: "New Worktree from '" + branch.name + "'…", run: () => post('contextAction', { action: 'createWorktreeFromRef', ref: branch.name, kind: branch.kind }) },
-          { separator: true },
-          { icon: '✓', label: 'Checkout', disabled: kind === 'local' && branch.name === state.branch, run: () => post('checkout', { name: branch.name, kind: branch.kind }) },
-          { icon: '⧉', label: 'Copy Branch Name', run: () => post('contextAction', { action: 'copyBranch', ref: branch.name, kind: branch.kind }) },
-          { separator: true },
-          { icon: '✎', label: 'Rename…', disabled: kind !== 'local', run: () => post('contextAction', { action: 'renameBranch', ref: branch.name, kind: branch.kind }) },
-          { icon: '×', label: 'Delete…', disabled: kind !== 'local' || branch.name === state.branch, run: () => post('contextAction', { action: 'deleteBranch', ref: branch.name, kind: branch.kind }) },
-        ]);
+        attachContextMenu(row, () => branchContextItems(branch));
         section.append(row);
       }
       pane.append(section);
@@ -1034,9 +1216,93 @@ const logScript = String.raw`
 
   function commitPane() {
     const pane = node('main', 'pane commit-pane');
+    pane.append(commitFilterBar());
     const head = node('div', 'table-head'); head.append(node('span', '', 'Commit'), node('span', '', 'Author'), node('span', '', 'Date'), node('span', '', 'Hash'));
     const scroll = node('div', 'commit-scroll'); scroll.id = 'commit-scroll';
     const list = node('div', 'commit-list'); list.id = 'commit-list'; scroll.append(head, list); pane.append(scroll); renderCommitRows(list); return pane;
+  }
+
+  function filterButton(label, value, title, active, items) {
+    const buttonElement = button('', title, () => showMenuForElement(buttonElement, typeof items === 'function' ? items() : items), 'filter-button' + (active ? ' active' : ''));
+    buttonElement.append(node('span', '', label), node('span', 'filter-value', value ? ': ' + value : ''), node('span', '', '⌄'));
+    return buttonElement;
+  }
+
+  function commitFilterBar() {
+    const bar = node('div', 'commit-filters');
+    const input = node('input', 'commit-search'); input.type = 'search'; input.placeholder = 'Text or hash'; input.value = search;
+    input.setAttribute('aria-label', 'Filter commits by text or hash');
+    input.addEventListener('input', () => { search = input.value.toLowerCase(); saveUiState({ search }); renderCommitRows(); });
+    const branch = filterButton('Branch', state.selectedRef ? shortRef(state.selectedRef) : '', 'Filter by branch', Boolean(state.selectedRef), branchFilterItems);
+    const user = filterButton('User', authorFilter, 'Filter by author', Boolean(authorFilter), userFilterItems);
+    const dateLabels = { all: '', today: 'Today', week: '7 days', month: '30 days', year: '1 year' };
+    const date = filterButton('Date', dateLabels[dateFilter] || '', 'Filter by date', dateFilter !== 'all', dateFilterItems);
+    const pathValue = state.filePath ? compactPath(state.filePath) : '';
+    const paths = button('', 'Filter by changed path', () => showPathFilterPopover(paths), 'filter-button' + (state.filePath ? ' active' : ''));
+    paths.append(node('span', '', 'Paths'), node('span', 'filter-value', pathValue ? ': ' + pathValue : ''), node('span', '', '⌄'));
+    const sort = button(sortAscending ? '↑' : '↓', sortAscending ? 'Oldest commits first' : 'Newest commits first', () => {
+      sortAscending = !sortAscending; saveUiState({ sortAscending }); sort.textContent = sortAscending ? '↑' : '↓'; sort.title = sortAscending ? 'Oldest commits first' : 'Newest commits first'; renderCommitRows();
+    }, 'filter-button sort-button');
+    bar.append(input, branch, user, date, paths, sort); return bar;
+  }
+
+  function branchFilterItems() {
+    const items = [{ icon: state.selectedRef ? '' : '✓', label: 'All Branches', run: () => { setBranchSelection([]); post('selectRef', {}); } }];
+    for (const kind of ['local', 'remote', 'tag']) {
+      const branches = (state.branches || []).filter(branch => branch.kind === kind);
+      if (!branches.length) continue;
+      items.push({ separator: true });
+      for (const branch of branches) items.push({
+        icon: state.selectedRef === branch.name ? '✓' : kind === 'local' ? '⑂' : kind === 'remote' ? '☁' : '◆',
+        label: branch.name,
+        run: () => { setBranchSelection([branch]); post('selectRef', { ref: branch.name }); },
+      });
+    }
+    return items;
+  }
+
+  function userFilterItems() {
+    const authors = [...new Set((state.commits || []).map(commit => commit.author).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+    return [
+      { icon: authorFilter ? '' : '✓', label: 'All Users', run: () => setAuthorFilter('') },
+      { separator: true },
+      ...authors.map(author => ({ icon: authorFilter === author ? '✓' : '', label: author, run: () => setAuthorFilter(author) })),
+    ];
+  }
+
+  function setAuthorFilter(author) {
+    authorFilter = author; saveUiState({ authorFilter }); render();
+  }
+
+  function dateFilterItems() {
+    return [
+      ['all', 'All Dates'], ['today', 'Today'], ['week', 'Last 7 Days'], ['month', 'Last 30 Days'], ['year', 'Last Year'],
+    ].map(([value, label]) => ({ icon: dateFilter === value ? '✓' : '', label, run: () => {
+      dateFilter = value; saveUiState({ dateFilter }); render();
+    } }));
+  }
+
+  function showPathFilterPopover(anchor) {
+    closeContextMenu();
+    const popover = node('form', 'filter-popover');
+    popover.append(node('div', 'filter-popover-title', 'Show commits affecting this path'));
+    const input = node('input'); input.type = 'text'; input.placeholder = 'src/path or file name'; input.value = state.filePath || '';
+    const actions = node('div', 'filter-popover-actions');
+    const clear = button('Clear', 'Clear path filter', () => { closeContextMenu(); post('setPathFilter', {}); }, 'action');
+    clear.disabled = !state.filePath;
+    const apply = button('Apply', 'Apply path filter', () => {}, 'primary'); apply.type = 'submit';
+    actions.append(clear, apply); popover.append(input, actions);
+    popover.addEventListener('submit', event => { event.preventDefault(); closeContextMenu(); post('setPathFilter', { path: input.value.trim() }); });
+    document.body.append(popover); openMenu = popover;
+    const bounds = anchor.getBoundingClientRect(); const popupBounds = popover.getBoundingClientRect();
+    popover.style.left = Math.max(6, Math.min(bounds.left, window.innerWidth - popupBounds.width - 6)) + 'px';
+    popover.style.top = Math.max(6, Math.min(bounds.bottom + 2, window.innerHeight - popupBounds.height - 6)) + 'px';
+    input.focus(); input.select();
+  }
+
+  function compactPath(value) {
+    if (value.length <= 24) return value;
+    return '…/' + value.split('/').slice(-2).join('/');
   }
 
   function renderCommitRows(existing) {
@@ -1093,8 +1359,20 @@ const logScript = String.raw`
   }
 
   function filteredCommits() {
-    if (!search) return state.commits || [];
-    return (state.commits || []).filter(c => (c.subject + '\n' + c.body + '\n' + c.author + '\n' + c.hash + '\n' + (c.refs || []).join(' ')).toLowerCase().includes(search));
+    let commits = [...(state.commits || [])];
+    if (search) commits = commits.filter(c => (c.subject + '\n' + c.body + '\n' + c.author + '\n' + c.email + '\n' + c.hash + '\n' + (c.refs || []).join(' ')).toLowerCase().includes(search));
+    if (authorFilter) commits = commits.filter(commit => commit.author === authorFilter);
+    if (dateFilter !== 'all') {
+      const now = new Date(); let cutoff;
+      if (dateFilter === 'today') cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      else cutoff = new Date(now.getTime() - ({ week: 7, month: 30, year: 365 }[dateFilter] || 0) * 86400000);
+      commits = commits.filter(commit => new Date(commit.authoredAt) >= cutoff);
+    }
+    commits.sort((left, right) => {
+      const result = new Date(right.authoredAt).getTime() - new Date(left.authoredAt).getTime();
+      return sortAscending ? -result : result;
+    });
+    return commits;
   }
 
   function detailsPane() {
@@ -1268,6 +1546,13 @@ const logScript = String.raw`
   window.addEventListener('message', event => {
     if (event.data.type === 'state') {
       state = event.data.state; pendingCommitHash = undefined;
+      const liveBranchKeys = new Set((state.branches || []).map(branchKey));
+      selectedBranchKeys = new Set([...selectedBranchKeys].filter(key => liveBranchKeys.has(key)));
+      if (!selectedBranchKeys.size && state.selectedRef) {
+        const selectedRefBranch = (state.branches || []).find(branch => branch.name === state.selectedRef);
+        if (selectedRefBranch) selectedBranchKeys.add(branchKey(selectedRefBranch));
+      }
+      saveUiState({ selectedBranchKeys: [...selectedBranchKeys] });
       if (state.selection && !(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
       render();
     }

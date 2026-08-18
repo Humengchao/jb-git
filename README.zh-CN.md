@@ -13,8 +13,9 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - Git 以原生底部 Panel 工具窗口显示，不占用活动栏侧边栏，也不会打开编辑器标签页。
 - 同一个底部 Git 工具窗口包含 `Log`、`Console`、`Local Changes` 和 `Shelf` 四个页签。
 - Local Changes 包含 Changelist、文件勾选、提交消息、Amend、Sign-off、跳过 Hooks、Commit 和 Commit and Push。
-- Log 使用横向三栏布局：左侧 Branches、中间提交图和提交表、右侧 Changed Files 与 Commit Details。
-- Git Log 支持搜索、按分支过滤、彩色提交拓扑、Cherry-pick、Revert、从提交创建分支和 Reset。
+- Log 使用横向三栏布局：左侧 Branches、中间提交图和提交表、右侧 Changed Files 与 Commit Details；三栏宽度都可以拖动调节并自动记忆。
+- Git Log 支持文本/哈希、Branch、User、Date、Paths 和顺序筛选；左侧分支支持 Command/Ctrl 多选、分支比较和文件差异。
+- Git Log 还支持彩色提交拓扑、Cherry-pick、Revert、从提交创建分支和 Reset。
 - 状态栏分支入口提供类似 VCS Widget 的分支弹窗，更多菜单提供集中式 Git Operations Popup。
 - Git Console 记录 Git 命令、耗时与输出，并在显示前隐藏 URL、令牌和认证信息。
 
@@ -140,7 +141,7 @@ npm run package
 
 ## 当前范围
 
-当前版本已经按 IntelliJ IDEA 的主要工作流重新组织为底部 Git 工具窗口、Branches 弹窗和 Git Operations Popup。底部工具窗口的页签、信息层级和 Log 三栏结构均以 IDEA 的 Git 窗口为基准；VS Code 自身的 Panel 标题栏、菜单与原生控件仍由 VS Code 渲染。
+当前版本已经按 IntelliJ IDEA 的主要工作流重新组织为底部 Git 工具窗口、Branches 弹窗和 Git Operations Popup。底部工具窗口的页签、信息层级、可调宽 Log 三栏、分支多选和提交筛选均以 IDEA 的 Git 窗口为基准；VS Code 自身的 Panel 标题栏、菜单与原生控件仍由 VS Code 渲染。
 
 仍在规划中的主要能力包括：
 
