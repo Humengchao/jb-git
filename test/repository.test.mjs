@@ -72,6 +72,8 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   const history = await repository.log(10);
   assert.equal(history[0].hash, revision);
   assert.equal(history[0].subject, "update");
+  assert.deepEqual(await repository.commitFiles(revision), [{ status: "M", path: "file.txt" }]);
+  assert.equal((await repository.logRef(revision, 10))[0].hash, revision);
   assert.equal((await repository.operationState()).kind, "none");
   assert.match(await repository.showCommit(revision), /update/);
   const blame = await repository.blame("file.txt");

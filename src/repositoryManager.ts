@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { discoverRepositories, discoverRepository, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
-import { GitBlameEntry, GitBranch, GitCommitOptions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
+import { GitBlameEntry, GitBranch, GitCommitFile, GitCommitOptions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -93,6 +93,10 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async blame(rootPath: string, pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
     return this.requireRepository(rootPath).blame(pathSpec, revision);
+  }
+
+  public async commitFiles(rootPath: string, hash: string): Promise<GitCommitFile[]> {
+    return this.requireRepository(rootPath).commitFiles(hash);
   }
 
   public async stageHunk(rootPath: string, pathSpec: string, hunk: GitDiffHunk): Promise<void> {

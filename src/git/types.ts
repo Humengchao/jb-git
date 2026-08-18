@@ -76,6 +76,12 @@ export interface GitCommit {
   body: string;
 }
 
+export interface GitCommitFile {
+  status: string;
+  path: string;
+  originalPath?: string;
+}
+
 export type GitOperationKind = "merge" | "rebase" | "cherry-pick" | "revert" | "bisect" | "sequencer" | "none";
 
 export interface GitOperationState {

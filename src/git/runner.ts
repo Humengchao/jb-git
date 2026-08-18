@@ -13,6 +13,16 @@ export interface GitResult {
   exitCode: number;
 }
 
+export interface GitTraceEvent {
+  cwd: string;
+  args: readonly string[];
+  startedAt: string;
+  durationMs: number;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
 const SENSITIVE_OPTION = /^(?:--?(?:password|passwd|token|access-token|auth|authorization|oauth-token|private-key))(?:=|$)/i;
 
 /** Removes credentials from command arguments and Git output before they reach UI or logs. */
@@ -64,10 +74,19 @@ export class GitCommandError extends Error {
 
 /** Executes Git without passing a command through a shell. */
 export class GitRunner {
+  private readonly traceListeners = new Set<(event: GitTraceEvent) => void>();
+
   public constructor(public readonly gitPath = "git") {}
+
+  public onDidRun(listener: (event: GitTraceEvent) => void): { dispose(): void } {
+    this.traceListeners.add(listener);
+    return { dispose: () => this.traceListeners.delete(listener) };
+  }
 
   public run(args: readonly string[], options: GitRunOptions): Promise<GitResult> {
     return new Promise<GitResult>((resolve, reject) => {
+      const startedAt = new Date();
+      const started = Date.now();
       let settled = false;
       const child = spawn(this.gitPath, [...args], {
         cwd: options.cwd,
@@ -87,7 +106,10 @@ export class GitRunner {
       child.stdout.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
       child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
       child.on("error", (error) => {
-        finish(() => reject(new GitCommandError(args, {}, error)));
+        finish(() => {
+          this.emitTrace(args, options.cwd, startedAt, started, null, "", error.message);
+          reject(new GitCommandError(args, {}, error));
+        });
       });
       child.on("close", (exitCode) => {
         const result: GitResult = {
@@ -96,6 +118,7 @@ export class GitRunner {
           exitCode: exitCode ?? -1,
         };
         finish(() => {
+          this.emitTrace(args, options.cwd, startedAt, started, result.exitCode, result.stdout.toString("utf8"), result.stderr.toString("utf8"));
           if (result.exitCode === 0) {
             resolve(result);
           } else {
@@ -106,7 +129,10 @@ export class GitRunner {
 
       const abort = (): void => {
         child.kill();
-        finish(() => reject(new GitCommandError(args, {}, new Error("Git command aborted"))));
+        finish(() => {
+          this.emitTrace(args, options.cwd, startedAt, started, null, "", "Git command aborted");
+          reject(new GitCommandError(args, {}, new Error("Git command aborted")));
+        });
       };
       if (options.signal) {
         if (options.signal.aborted) {
@@ -132,5 +158,27 @@ export class GitRunner {
 
   public async version(cwd: string): Promise<string> {
     return (await this.text(["--version"], { cwd })).trim();
+  }
+
+  private emitTrace(
+    args: readonly string[], cwd: string, startedAt: Date, started: number,
+    exitCode: number | null, stdout: string, stderr: string,
+  ): void {
+    const event: GitTraceEvent = {
+      cwd,
+      args: redactGitArgs(args),
+      startedAt: startedAt.toISOString(),
+      durationMs: Date.now() - started,
+      exitCode,
+      stdout: redactGitText(stdout).slice(0, 20_000),
+      stderr: redactGitText(stderr).slice(0, 20_000),
+    };
+    for (const listener of this.traceListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Observability must never change the outcome of a Git command.
+      }
+    }
   }
 }

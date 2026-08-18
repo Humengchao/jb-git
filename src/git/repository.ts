@@ -8,6 +8,7 @@ import {
   GitBranch,
   GitCommitOptions,
   GitCommit,
+  GitCommitFile,
   GitBlameEntry,
   GitDiffHunk,
   GitPullStrategy,
@@ -70,18 +71,24 @@ export class GitRepository {
   }
 
   public async log(limit = 50, filePath?: string): Promise<GitCommit[]> {
-    const output = await this.runner.text(
-      [
-        "log",
-        "--all",
-        "--topo-order",
-        `--max-count=${Math.max(1, Math.min(limit, 500))}`,
-        "--date=iso-strict",
-        "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B%x01",
-        ...(filePath ? ["--", filePath] : []),
-      ],
-      { cwd: this.info.rootPath },
-    );
+    return this.readLog(["--all"], limit, filePath);
+  }
+
+  public async logRef(ref: string, limit = 200, filePath?: string): Promise<GitCommit[]> {
+    const revision = await this.resolveCommit(ref);
+    return this.readLog([revision], limit, filePath);
+  }
+
+  private async readLog(revisions: readonly string[], limit: number, filePath?: string): Promise<GitCommit[]> {
+    const output = await this.runner.text([
+      "log",
+      "--topo-order",
+      `--max-count=${Math.max(1, Math.min(limit, 500))}`,
+      "--date=iso-strict",
+      "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B%x01",
+      ...revisions,
+      ...(filePath ? ["--", filePath] : []),
+    ], { cwd: this.info.rootPath });
     return output.split("\x01").filter((record) => record.trim()).map((record) => {
       const fields = record.split("\x00");
       const [hash, parents, author, email, authoredAt, committedAt, refs, subject, ...body] = fields;
@@ -101,6 +108,29 @@ export class GitRepository {
 
   public async showCommit(hash: string): Promise<string> {
     return this.runner.text(["show", "--format=fuller", "--stat", "--patch", "--decorate=short", hash], { cwd: this.info.rootPath });
+  }
+
+  public async commitFiles(hash: string): Promise<GitCommitFile[]> {
+    const revision = await this.resolveCommit(hash);
+    const output = await this.runner.text(
+      ["diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-M", "-z", revision],
+      { cwd: this.info.rootPath },
+    );
+    const fields = output.split("\0");
+    const files: GitCommitFile[] = [];
+    for (let index = 0; index < fields.length;) {
+      const status = fields[index++];
+      if (!status) continue;
+      if (status.startsWith("R") || status.startsWith("C")) {
+        const originalPath = fields[index++];
+        const filePath = fields[index++];
+        if (originalPath && filePath) files.push({ status, path: filePath, originalPath });
+        continue;
+      }
+      const filePath = fields[index++];
+      if (filePath) files.push({ status, path: filePath });
+    }
+    return files;
   }
 
   public async blame(pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
