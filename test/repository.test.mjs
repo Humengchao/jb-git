@@ -50,6 +50,11 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   await repository.stage(["file.txt"]);
   const revision = await repository.commit("update");
   assert.equal(git(root, "rev-parse", "HEAD"), revision);
+  const history = await repository.log(10);
+  assert.equal(history[0].hash, revision);
+  assert.equal(history[0].subject, "update");
+  assert.equal((await repository.operationState()).kind, "none");
+  assert.match(await repository.showCommit(revision), /update/);
 
   await repository.createBranch("feature/test");
   assert.equal(git(root, "branch", "--show-current"), "feature/test");
@@ -64,4 +69,34 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.match(stashes[0].message, /temporary work/);
   await repository.applyStash(stashes[0].ref);
   assert.equal((await repository.status()).changes.find((change) => change.path === "file.txt")?.unstaged, true);
+});
+
+test("detects an in-progress merge operation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-merge-state-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "conflict.txt"), "base\n");
+  git(root, "add", "conflict.txt");
+  git(root, "commit", "-qm", "base");
+  const defaultBranch = git(root, "branch", "--show-current");
+  git(root, "switch", "-q", "-c", "feature");
+  writeFileSync(join(root, "conflict.txt"), "feature\n");
+  git(root, "commit", "-qam", "feature change");
+  git(root, "switch", "-q", defaultBranch);
+  writeFileSync(join(root, "conflict.txt"), "main\n");
+  git(root, "commit", "-qam", "main change");
+  try {
+    git(root, "merge", "feature");
+    assert.fail("merge should conflict");
+  } catch {
+    // Expected conflict leaves MERGE_HEAD in place.
+  }
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const operation = await repository.operationState();
+  assert.equal(operation.kind, "merge");
+  assert.equal(operation.canContinue, true);
+  assert.equal(operation.canAbort, true);
+  git(root, "merge", "--abort");
 });

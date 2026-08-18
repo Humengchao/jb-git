@@ -50,6 +50,14 @@
         "title": "JB Git: Open Diff"
       },
       {
+        "command": "jbGit.showHistory",
+        "title": "JB Git: Show History"
+      },
+      {
+        "command": "jbGit.showCommit",
+        "title": "JB Git: Show Commit"
+      },
+      {
         "command": "jbGit.commit",
         "title": "JB Git: Commit Staged Changes"
       },
@@ -122,6 +130,11 @@
           "id": "jbGit.changes",
           "name": "Local Changes",
           "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.history",
+          "name": "History",
+          "when": "jbGit.hasWorkspace"
         }
       ]
     },
@@ -129,7 +142,7 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.repositories || view == jbGit.changes",
+          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history",
           "group": "navigation@1"
         },
         {
@@ -151,6 +164,11 @@
           "command": "jbGit.pull",
           "when": "view == jbGit.repositories",
           "group": "navigation@4"
+        },
+        {
+          "command": "jbGit.showHistory",
+          "when": "view == jbGit.history",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [

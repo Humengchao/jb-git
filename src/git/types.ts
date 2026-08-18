@@ -63,3 +63,24 @@ export interface GitStashEntry {
 }
 
 export type GitPullStrategy = "merge" | "rebase" | "ff-only";
+
+export interface GitCommit {
+  hash: string;
+  parents: string[];
+  author: string;
+  email: string;
+  authoredAt: string;
+  committedAt: string;
+  refs: string[];
+  subject: string;
+  body: string;
+}
+
+export type GitOperationKind = "merge" | "rebase" | "cherry-pick" | "revert" | "bisect" | "sequencer" | "none";
+
+export interface GitOperationState {
+  kind: GitOperationKind;
+  canContinue: boolean;
+  canAbort: boolean;
+  detail?: string;
+}

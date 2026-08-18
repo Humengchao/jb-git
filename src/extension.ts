@@ -4,6 +4,7 @@ import { GitCommandError, GitRunner } from "./git/runner";
 import { BranchNode, RepositoryTreeProvider } from "./views/repositoryTree";
 import { ChangeNode, ChangesTreeProvider } from "./views/changesTree";
 import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
+import { CommitNode, HistoryTreeProvider } from "./views/historyTree";
 import { RepositoryManager } from "./repositoryManager";
 
 function workspacePaths(): string[] {
@@ -44,8 +45,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const repositories = new RepositoryTreeProvider(manager);
   const changes = new ChangesTreeProvider(manager);
   const diffProvider = new DiffContentProvider();
+  const history = new HistoryTreeProvider(manager);
   const repositoryView = vscode.window.createTreeView("jbGit.repositories", { treeDataProvider: repositories, showCollapseAll: true });
   const changesView = vscode.window.createTreeView("jbGit.changes", { treeDataProvider: changes, showCollapseAll: true });
+  const historyView = vscode.window.createTreeView("jbGit.history", { treeDataProvider: history, showCollapseAll: true });
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   branchStatus.command = "jbGit.openChanges";
   branchStatus.tooltip = "Open JB Git Local Changes";
@@ -80,8 +83,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     manager,
     repositories,
     changes,
+    history,
     repositoryView,
     changesView,
+    historyView,
     diffProvider,
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
@@ -96,6 +101,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.openDiff", async (node?: ChangeNode) => {
       if (!node) return;
       await runWithNotification(`Loading diff for ${node.change.path}`, () => openChangeDiff(manager, diffProvider, node));
+    }),
+    vscode.commands.registerCommand("jbGit.showHistory", () => vscode.commands.executeCommand("workbench.view.extension.jbGit")),
+    vscode.commands.registerCommand("jbGit.showCommit", async (node?: CommitNode) => {
+      if (!node) return;
+      const snapshot = manager.snapshot(node.repositoryRoot);
+      if (!snapshot) return;
+      const output = await runWithNotification(`Loading commit ${node.commit.hash.slice(0, 12)}`, () => snapshot.repository.showCommit(node.commit.hash));
+      if (output === undefined) return;
+      const channel = vscode.window.createOutputChannel(`JB Git · ${node.commit.hash.slice(0, 12)}`);
+      channel.append(output);
+      channel.show(true);
     }),
     vscode.commands.registerCommand("jbGit.initializeRepository", async () => {
       if (!(await requireTrustedWorkspace())) return;

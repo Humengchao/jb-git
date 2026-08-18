@@ -1,13 +1,13 @@
 import * as vscode from "vscode";
 import { discoverRepositories, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
-import { GitBranch, GitStatusSnapshot } from "./git/types";
-import { GitCommitOptions, GitPullStrategy, GitStashEntry } from "./git/types";
+import { GitBranch, GitCommitOptions, GitOperationState, GitPullStrategy, GitStashEntry, GitStatusSnapshot } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
   status: GitStatusSnapshot | null;
   branches: GitBranch[];
+  operation: GitOperationState;
   error?: string;
 }
 
@@ -155,13 +155,14 @@ export class RepositoryManager implements vscode.Disposable {
 
   private async readSnapshot(repository: GitRepository): Promise<RepositorySnapshot> {
     try {
-      const [status, branches] = await Promise.all([repository.status(), repository.branches()]);
-      return { repository, status, branches };
+      const [status, branches, operation] = await Promise.all([repository.status(), repository.branches(), repository.operationState()]);
+      return { repository, status, branches, operation };
     } catch (error) {
       return {
         repository,
         status: null,
         branches: [],
+        operation: { kind: "none", canContinue: false, canAbort: false },
         error: error instanceof Error ? error.message : String(error),
       };
     }

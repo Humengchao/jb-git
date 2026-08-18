@@ -7,8 +7,9 @@ export class RepositoryNode extends vscode.TreeItem {
     const status = snapshot.status;
     const branch = status?.branch.head ?? "detached HEAD";
     const changeCount = status?.changes.length ?? 0;
+    const operation = snapshot.operation.kind !== "none" ? ` · ${snapshot.operation.kind} in progress` : "";
     super(snapshot.repository.info.rootPath, vscode.TreeItemCollapsibleState.Collapsed);
-    this.description = `${branch}${changeCount ? ` · ${changeCount} change${changeCount === 1 ? "" : "s"}` : ""}`;
+    this.description = `${branch}${changeCount ? ` · ${changeCount} change${changeCount === 1 ? "" : "s"}` : ""}${operation}`;
     this.tooltip = snapshot.error ?? snapshot.repository.info.rootPath;
     this.contextValue = "jbGit.repository";
     this.iconPath = new vscode.ThemeIcon("repo");
@@ -56,4 +57,3 @@ export class RepositoryTreeProvider implements vscode.TreeDataProvider<Repositor
     this.changedEmitter.dispose();
   }
 }
-

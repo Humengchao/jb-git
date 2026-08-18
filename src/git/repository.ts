@@ -1,11 +1,13 @@
 import * as path from "node:path";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
 import {
   GitBranch,
   GitCommitOptions,
+  GitCommit,
   GitPullStrategy,
+  GitOperationState,
   GitRepositoryInfo,
   GitStashEntry,
   GitStatusSnapshot,
@@ -33,6 +35,65 @@ export class GitRepository {
       { cwd: this.info.rootPath, signal },
     );
     return parsePorcelainV2(result.stdout);
+  }
+
+  public async operationState(): Promise<GitOperationState> {
+    const candidates: Array<{ kind: GitOperationState["kind"]; paths: string[]; canContinue: boolean; canAbort: boolean }> = [
+      { kind: "merge", paths: ["MERGE_HEAD"], canContinue: true, canAbort: true },
+      { kind: "cherry-pick", paths: ["CHERRY_PICK_HEAD"], canContinue: true, canAbort: true },
+      { kind: "revert", paths: ["REVERT_HEAD"], canContinue: true, canAbort: true },
+      { kind: "rebase", paths: ["rebase-merge", "rebase-apply"], canContinue: true, canAbort: true },
+      { kind: "bisect", paths: ["BISECT_LOG"], canContinue: false, canAbort: true },
+      { kind: "sequencer", paths: ["sequencer"], canContinue: true, canAbort: true },
+    ];
+    for (const candidate of candidates) {
+      for (const gitPath of candidate.paths) {
+        const resolved = await this.gitPath(gitPath);
+        if (await this.exists(resolved)) {
+          return {
+            kind: candidate.kind,
+            canContinue: candidate.canContinue,
+            canAbort: candidate.canAbort,
+            detail: resolved,
+          };
+        }
+      }
+    }
+    return { kind: "none", canContinue: false, canAbort: false };
+  }
+
+  public async log(limit = 50, filePath?: string): Promise<GitCommit[]> {
+    const output = await this.runner.text(
+      [
+        "log",
+        "--all",
+        "--topo-order",
+        `--max-count=${Math.max(1, Math.min(limit, 500))}`,
+        "--date=iso-strict",
+        "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B%x01",
+        ...(filePath ? ["--", filePath] : []),
+      ],
+      { cwd: this.info.rootPath },
+    );
+    return output.split("\x01").filter((record) => record.trim()).map((record) => {
+      const fields = record.split("\x00");
+      const [hash, parents, author, email, authoredAt, committedAt, refs, subject, ...body] = fields;
+      return {
+        hash,
+        parents: parents ? parents.split(" ").filter(Boolean) : [],
+        author,
+        email,
+        authoredAt,
+        committedAt,
+        refs: refs ? refs.split(",").map((ref) => ref.trim()).filter(Boolean) : [],
+        subject,
+        body: body.join("\0").trim(),
+      };
+    });
+  }
+
+  public async showCommit(hash: string): Promise<string> {
+    return this.runner.text(["show", "--format=fuller", "--stat", "--patch", "--decorate=short", hash], { cwd: this.info.rootPath });
   }
 
   public async branches(signal?: AbortSignal): Promise<GitBranch[]> {
@@ -208,6 +269,20 @@ export class GitRepository {
     } catch (error) {
       if (error instanceof GitCommandError) return false;
       throw error;
+    }
+  }
+
+  private async gitPath(relativePath: string): Promise<string> {
+    const raw = trimOutput(await this.runner.text(["rev-parse", "--git-path", relativePath], { cwd: this.info.rootPath }));
+    return path.isAbsolute(raw) ? raw : path.resolve(this.info.rootPath, raw);
+  }
+
+  private async exists(filePath: string): Promise<boolean> {
+    try {
+      await access(filePath);
+      return true;
+    } catch {
+      return false;
     }
   }
 }
