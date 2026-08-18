@@ -99,6 +99,80 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   git(root, "restore", "file.txt");
   await repository.applyPatchFile(patchFile);
   assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "stashed\n");
+  const applied = (await repository.status()).changes.find((change) => change.path === "file.txt");
+  assert.equal(applied?.staged, false);
+  assert.equal(applied?.unstaged, true);
+});
+
+test("shelves tracked changes and restores them as unstaged work", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-shelf-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), "base\n");
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "file.txt"), "shelved\n");
+  git(root, "add", "file.txt");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const patchFile = join(mkdtempSync(join(tmpdir(), "jb-git-shelf-patch-")), "saved.patch");
+  writeFileSync(patchFile, await repository.patch(["file.txt"]));
+
+  await repository.shelveTrackedPaths(["file.txt"]);
+  assert.equal((await repository.status()).changes.length, 0);
+  await repository.applyPatchFile(patchFile);
+  const restored = (await repository.status()).changes[0];
+  assert.equal(restored.staged, false);
+  assert.equal(restored.unstaged, true);
+  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "shelved\n");
+});
+
+test("keeps the real index intact when a selected-path commit fails", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-changelist-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), Array.from({ length: 16 }, (_, index) => `line ${index + 1}\n`).join(""));
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "file.txt"), Array.from({ length: 16 }, (_, index) => {
+    if (index === 0) return "first change\n";
+    if (index === 14) return "second change\n";
+    return `line ${index + 1}\n`;
+  }).join(""));
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  await repository.stageHunk("file.txt", 0);
+  const cachedBefore = git(root, "diff", "--cached");
+  writeFileSync(join(root, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+  await assert.rejects(repository.commitPaths(["file.txt"], "must fail"));
+  assert.equal(git(root, "diff", "--cached"), cachedBefore);
+  assert.equal((await repository.status()).changes[0].staged, true);
+  assert.equal((await repository.status()).changes[0].unstaged, true);
+});
+
+test("commits selected paths with an isolated index", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-selected-commit-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "selected.txt"), "base\n");
+  writeFileSync(join(root, "other.txt"), "base\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "selected.txt"), "selected change\n");
+  writeFileSync(join(root, "other.txt"), "other change\n");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  await repository.commitPaths(["selected.txt"], "selected only");
+  assert.equal(git(root, "show", "HEAD:selected.txt"), "selected change");
+  assert.equal(git(root, "show", "HEAD:other.txt"), "base");
+  const status = await repository.status();
+  assert.equal(status.changes.find((change) => change.path === "other.txt")?.unstaged, true);
+  assert.equal(status.changes.some((change) => change.staged), false);
 });
 
 test("detects an in-progress merge operation", async () => {

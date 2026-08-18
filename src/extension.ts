@@ -501,16 +501,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       const message = await vscode.window.showInputBox({ prompt: `Commit Changelist '${node.changelist.name}'` });
       if (!message?.trim()) return;
-      try {
-        await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `Staging Changelist '${node.changelist.name}'` },
-          () => manager.stage(node.repositoryRoot, [...selected]),
-        );
-      } catch (error) {
-        await vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
-        return;
-      }
-      const revision = await runWithNotification("Creating Changelist commit", () => manager.commit(node.repositoryRoot, message.trim()));
+      const revision = await runWithNotification(
+        "Creating Changelist commit",
+        () => manager.commitPaths(node.repositoryRoot, [...selected], message.trim()),
+      );
       if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
     }),
     vscode.commands.registerCommand("jbGit.createShelf", async () => {

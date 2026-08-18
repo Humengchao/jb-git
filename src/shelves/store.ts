@@ -65,7 +65,14 @@ export class ShelfStore implements vscode.Disposable {
     };
     await writeFile(patchFile, patch, "utf8");
     await writeFile(metadataFile, JSON.stringify(entry, null, 2), "utf8");
-    this.changedEmitter.fire(repository.info.rootPath);
+    // Persist first: if cleanup fails, the patch remains recoverable and the
+    // working copy is never modified without a saved shelf.
+    try {
+      await repository.shelveTrackedPaths(paths);
+    } finally {
+      // The persisted recovery patch must be visible even when cleanup fails.
+      this.changedEmitter.fire(repository.info.rootPath);
+    }
     return entry;
   }
 
@@ -90,4 +97,3 @@ export class ShelfStore implements vscode.Disposable {
     this.changedEmitter.dispose();
   }
 }
-

@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
 import { parseUnifiedDiff, patchForHunk } from "./patch";
@@ -187,7 +188,16 @@ export class GitRepository {
   }
 
   public async applyPatchFile(patchFile: string): Promise<void> {
-    await this.serial(() => this.runner.run(["apply", "--3way", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath }));
+    // Applying without --index/--3way deliberately leaves restored shelf changes unstaged.
+    await this.serial(() => this.runner.run(["apply", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath }));
+  }
+
+  /** Removes tracked paths from both index and worktree after their patch has been persisted. */
+  public async shelveTrackedPaths(paths: readonly string[]): Promise<void> {
+    await this.serial(() => this.runner.run(
+      ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...paths],
+      { cwd: this.info.rootPath },
+    ));
   }
 
   public async cleanUntracked(paths: readonly string[]): Promise<void> {
@@ -452,6 +462,44 @@ export class GitRepository {
       if (options.noVerify) args.push("--no-verify");
       await this.runner.run(args, { cwd: this.info.rootPath, input: message });
       return (await this.currentRevision()) ?? "";
+    });
+  }
+
+  /**
+   * Commits complete selected paths through an isolated index. The user's real
+   * index is untouched if staging or hooks fail, so partial staging is not lost.
+   */
+  public async commitPaths(paths: readonly string[], message: string, options: GitCommitOptions = {}): Promise<string> {
+    return this.serial(async () => {
+      if (paths.length === 0) throw new Error("No paths were selected for the commit.");
+      const selected = new Set(paths);
+      const status = await this.status();
+      if (status.changes.some((change) => change.staged && !selected.has(change.path))) {
+        throw new Error("Cannot commit selected paths while unrelated staged changes exist.");
+      }
+      const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "jb-git-index-"));
+      const temporaryIndex = path.join(temporaryDirectory, "index");
+      const environment = { GIT_INDEX_FILE: temporaryIndex };
+      try {
+        const revision = await this.currentRevision();
+        await this.runner.run(revision ? ["read-tree", "HEAD"] : ["read-tree", "--empty"], {
+          cwd: this.info.rootPath,
+          env: environment,
+        });
+        await this.runner.run(["add", "--", ...paths], { cwd: this.info.rootPath, env: environment });
+        const args = ["commit", "--file=-"];
+        if (options.amend) args.push("--amend");
+        if (options.signoff) args.push("--signoff");
+        if (options.noVerify) args.push("--no-verify");
+        await this.runner.run(args, { cwd: this.info.rootPath, env: environment, input: message });
+
+        // The selected working-tree content is now HEAD. Align the real index
+        // with that commit; callers reject staged changes outside these paths.
+        await this.runner.run(["reset", "--mixed", "HEAD"], { cwd: this.info.rootPath });
+        return (await this.currentRevision()) ?? "";
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
     });
   }
 

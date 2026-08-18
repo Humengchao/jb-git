@@ -267,6 +267,14 @@ export class RepositoryManager implements vscode.Disposable {
     return revision;
   }
 
+  public async commitPaths(rootPath: string, paths: readonly string[], message: string, options?: GitCommitOptions): Promise<string> {
+    try {
+      return await this.requireRepository(rootPath).commitPaths(paths, message, options);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
   public async createBranch(rootPath: string, name: string, startPoint?: string): Promise<void> {
     await this.requireRepository(rootPath).createBranch(name, startPoint);
     await this.refresh(rootPath);
