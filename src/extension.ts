@@ -9,6 +9,7 @@ import { ChangelistChangeNode, ChangelistNode, ChangelistTreeProvider } from "./
 import { ChangelistStore } from "./changelists/store";
 import { ShelfStore } from "./shelves/store";
 import { ShelfNode, ShelfTreeProvider } from "./views/shelfTree";
+import { WorktreeNode, WorktreeTreeProvider } from "./views/worktreeTree";
 import { RepositoryManager } from "./repositoryManager";
 
 function workspacePaths(): string[] {
@@ -55,11 +56,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const history = new HistoryTreeProvider(manager);
   const changelists = new ChangelistTreeProvider(manager, changelistStore);
   const shelves = new ShelfTreeProvider(manager, shelfStore);
+  const worktrees = new WorktreeTreeProvider(manager);
   const repositoryView = vscode.window.createTreeView("jbGit.repositories", { treeDataProvider: repositories, showCollapseAll: true });
   const changesView = vscode.window.createTreeView("jbGit.changes", { treeDataProvider: changes, showCollapseAll: true });
   const historyView = vscode.window.createTreeView("jbGit.history", { treeDataProvider: history, showCollapseAll: true });
   const changelistsView = vscode.window.createTreeView("jbGit.changelists", { treeDataProvider: changelists, showCollapseAll: true });
   const shelvesView = vscode.window.createTreeView("jbGit.shelves", { treeDataProvider: shelves, showCollapseAll: true });
+  const worktreesView = vscode.window.createTreeView("jbGit.worktrees", { treeDataProvider: worktrees, showCollapseAll: true });
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   branchStatus.command = "jbGit.openChanges";
   branchStatus.tooltip = "Open JB Git Local Changes";
@@ -99,11 +102,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     history,
     changelists,
     shelves,
+    worktrees,
     repositoryView,
     changesView,
     historyView,
     changelistsView,
     shelvesView,
+    worktreesView,
     diffProvider,
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
@@ -397,6 +402,55 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const answer = await vscode.window.showWarningMessage(`Delete shelf '${node.entry.name}'?`, { modal: true }, "Delete");
       if (answer !== "Delete") return;
       await shelfStore.remove(node.repositoryRoot, node.entry);
+    }),
+    vscode.commands.registerCommand("jbGit.createWorktree", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const worktreePath = await vscode.window.showInputBox({ prompt: "Worktree path", placeHolder: "../feature-worktree" });
+      if (!worktreePath?.trim()) return;
+      const ref = await vscode.window.showInputBox({ prompt: "Optional starting ref", value: first.status?.branch.head ?? "HEAD" });
+      const newBranch = await vscode.window.showInputBox({ prompt: "Optional new branch name", placeHolder: "feature/worktree" });
+      await runWithNotification("Creating Git worktree", () => manager.addWorktree(first.repository.info.rootPath, worktreePath.trim(), ref?.trim() || undefined, newBranch?.trim() || undefined));
+    }),
+    vscode.commands.registerCommand("jbGit.removeWorktree", async (node?: WorktreeNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      const answer = await vscode.window.showWarningMessage(`Remove worktree ${node.worktree.path}?`, { modal: true }, "Remove");
+      if (answer !== "Remove") return;
+      await runWithNotification("Removing Git worktree", () => manager.removeWorktree(node.repositoryRoot, node.worktree.path, node.worktree.prunable));
+    }),
+    vscode.commands.registerCommand("jbGit.pruneWorktrees", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      await runWithNotification("Pruning Git worktrees", () => manager.pruneWorktrees(first.repository.info.rootPath));
+    }),
+    vscode.commands.registerCommand("jbGit.updateSubmodules", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      await runWithNotification("Updating Git submodules", () => manager.updateSubmodules(first.repository.info.rootPath));
+    }),
+    vscode.commands.registerCommand("jbGit.createTag", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const name = await vscode.window.showInputBox({ prompt: "Tag name" });
+      if (!name?.trim()) return;
+      const ref = await vscode.window.showInputBox({ prompt: "Revision to tag", value: "HEAD" });
+      if (!ref?.trim()) return;
+      await runWithNotification(`Creating tag ${name.trim()}`, () => manager.createTag(first.repository.info.rootPath, name.trim(), ref.trim()));
+    }),
+    vscode.commands.registerCommand("jbGit.deleteTag", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const tags = first.branches.filter((branch) => branch.kind === "tag").map((branch) => branch.name);
+      const tag = await vscode.window.showQuickPick(tags, { placeHolder: "Select a tag to delete" });
+      if (!tag) return;
+      const answer = await vscode.window.showWarningMessage(`Delete tag ${tag}?`, { modal: true }, "Delete");
+      if (answer !== "Delete") return;
+      await runWithNotification(`Deleting tag ${tag}`, () => manager.deleteTag(first.repository.info.rootPath, tag));
     }),
     vscode.commands.registerCommand("jbGit.checkoutBranch", async (node?: BranchNode) => {
       if (!(await requireTrustedWorkspace())) return;

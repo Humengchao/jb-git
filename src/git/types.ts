@@ -84,3 +84,25 @@ export interface GitOperationState {
   canAbort: boolean;
   detail?: string;
 }
+
+export interface GitWorktree {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  bare: boolean;
+  detached: boolean;
+  prunable: boolean;
+}
+
+export interface GitSubmodule {
+  path: string;
+  oid: string;
+  status: string;
+  url?: string;
+}
+
+export interface GitRemote {
+  name: string;
+  fetchUrl: string;
+  pushUrl: string;
+}

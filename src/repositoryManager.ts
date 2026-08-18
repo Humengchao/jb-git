@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { discoverRepositories, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
-import { GitBranch, GitCommitOptions, GitOperationKind, GitOperationState, GitPullStrategy, GitStashEntry, GitStatusSnapshot } from "./git/types";
+import { GitBranch, GitCommitOptions, GitOperationKind, GitOperationState, GitPullStrategy, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -190,6 +190,44 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async deleteBranch(rootPath: string, name: string, force = false): Promise<void> {
     await this.requireRepository(rootPath).deleteBranch(name, force);
+    await this.refresh(rootPath);
+  }
+
+  public async createTag(rootPath: string, name: string, ref = "HEAD"): Promise<void> {
+    await this.requireRepository(rootPath).createTag(name, ref);
+    await this.refresh(rootPath);
+  }
+
+  public async deleteTag(rootPath: string, name: string): Promise<void> {
+    await this.requireRepository(rootPath).deleteTag(name);
+    await this.refresh(rootPath);
+  }
+
+  public async worktrees(rootPath: string): Promise<GitWorktree[]> {
+    return this.requireRepository(rootPath).worktrees();
+  }
+
+  public async addWorktree(rootPath: string, worktreePath: string, ref?: string, newBranch?: string): Promise<void> {
+    await this.requireRepository(rootPath).addWorktree(worktreePath, ref, newBranch);
+    await this.refresh(rootPath);
+  }
+
+  public async removeWorktree(rootPath: string, worktreePath: string, force = false): Promise<void> {
+    await this.requireRepository(rootPath).removeWorktree(worktreePath, force);
+    await this.refresh(rootPath);
+  }
+
+  public async pruneWorktrees(rootPath: string): Promise<void> {
+    await this.requireRepository(rootPath).pruneWorktrees();
+    await this.refresh(rootPath);
+  }
+
+  public async submodules(rootPath: string): Promise<GitSubmodule[]> {
+    return this.requireRepository(rootPath).submodules();
+  }
+
+  public async updateSubmodules(rootPath: string): Promise<void> {
+    await this.requireRepository(rootPath).updateSubmodules();
     await this.refresh(rootPath);
   }
 

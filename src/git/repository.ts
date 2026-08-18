@@ -9,8 +9,11 @@ import {
   GitPullStrategy,
   GitOperationState,
   GitRepositoryInfo,
+  GitRemote,
   GitStashEntry,
   GitStatusSnapshot,
+  GitSubmodule,
+  GitWorktree,
 } from "./types";
 
 function trimOutput(value: string): string {
@@ -133,6 +136,101 @@ export class GitRepository {
       });
     }
     return branches;
+  }
+
+  public async remotes(): Promise<GitRemote[]> {
+    const output = await this.runner.text(["remote", "-v"], { cwd: this.info.rootPath });
+    const byName = new Map<string, GitRemote>();
+    for (const line of output.split(/\r?\n/).filter(Boolean)) {
+      const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(line.trim());
+      if (!match) continue;
+      const [, name, url, kind] = match;
+      const existing = byName.get(name) ?? { name, fetchUrl: url, pushUrl: url };
+      if (kind === "fetch") existing.fetchUrl = url;
+      else existing.pushUrl = url;
+      byName.set(name, existing);
+    }
+    return [...byName.values()];
+  }
+
+  public async addRemote(name: string, url: string): Promise<void> {
+    await this.serial(() => this.runner.run(["remote", "add", name, url], { cwd: this.info.rootPath }));
+  }
+
+  public async removeRemote(name: string): Promise<void> {
+    await this.serial(() => this.runner.run(["remote", "remove", name], { cwd: this.info.rootPath }));
+  }
+
+  public async createTag(name: string, ref = "HEAD"): Promise<void> {
+    await this.serial(() => this.runner.run(["tag", name, ref], { cwd: this.info.rootPath }));
+  }
+
+  public async deleteTag(name: string): Promise<void> {
+    await this.serial(() => this.runner.run(["tag", "-d", name], { cwd: this.info.rootPath }));
+  }
+
+  public async worktrees(): Promise<GitWorktree[]> {
+    const output = await this.runner.text(["worktree", "list", "--porcelain"], { cwd: this.info.rootPath });
+    const entries: GitWorktree[] = [];
+    let current: GitWorktree | undefined;
+    const finish = (): void => {
+      if (current) entries.push(current);
+      current = undefined;
+    };
+    for (const line of output.split(/\r?\n/)) {
+      if (!line) {
+        finish();
+        continue;
+      }
+      if (line.startsWith("worktree ")) {
+        finish();
+        current = { path: line.slice("worktree ".length), head: null, branch: null, bare: false, detached: false, prunable: false };
+      } else if (!current) {
+        continue;
+      } else if (line.startsWith("HEAD ")) {
+        current.head = line.slice("HEAD ".length);
+      } else if (line.startsWith("branch ")) {
+        current.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+      } else if (line === "bare") {
+        current.bare = true;
+      } else if (line === "detached") {
+        current.detached = true;
+      } else if (line.startsWith("prunable")) {
+        current.prunable = true;
+      }
+    }
+    finish();
+    return entries;
+  }
+
+  public async addWorktree(worktreePath: string, ref?: string, newBranch?: string): Promise<void> {
+    const args = ["worktree", "add"];
+    if (newBranch) args.push("-b", newBranch);
+    args.push(worktreePath);
+    if (ref) args.push(ref);
+    await this.serial(() => this.runner.run(args, { cwd: this.info.rootPath }));
+  }
+
+  public async removeWorktree(worktreePath: string, force = false): Promise<void> {
+    await this.serial(() => this.runner.run(["worktree", "remove", ...(force ? ["--force"] : []), worktreePath], { cwd: this.info.rootPath }));
+  }
+
+  public async pruneWorktrees(): Promise<void> {
+    await this.serial(() => this.runner.run(["worktree", "prune"], { cwd: this.info.rootPath }));
+  }
+
+  public async submodules(): Promise<GitSubmodule[]> {
+    const output = await this.runner.text(["submodule", "status", "--recursive"], { cwd: this.info.rootPath });
+    return output.split(/\r?\n/).filter(Boolean).map((line) => {
+      const match = /^([-+ ])([0-9a-f]+)\s+([^ ]+)(?:\s+\(([^)]+)\))?/.exec(line);
+      return match
+        ? { status: match[1], oid: match[2], path: match[3], url: match[4] }
+        : { status: "?", oid: "", path: line.trim() };
+    });
+  }
+
+  public async updateSubmodules(init = true, recursive = true): Promise<void> {
+    await this.serial(() => this.runner.run(["submodule", "update", ...(init ? ["--init"] : []), ...(recursive ? ["--recursive"] : [])], { cwd: this.info.rootPath }));
   }
 
   public async stage(paths: readonly string[]): Promise<void> {

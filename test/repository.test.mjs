@@ -62,6 +62,16 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.equal(git(root, "branch", "--show-current"), "feature/renamed");
   await repository.checkout(defaultBranch);
 
+  await repository.createTag("v0.1.0-test", "HEAD");
+  assert.ok((await repository.branches()).some((branch) => branch.kind === "tag" && branch.name === "v0.1.0-test"));
+  await repository.deleteTag("v0.1.0-test");
+
+  const worktreePath = `${root}-worktree`;
+  await repository.addWorktree(worktreePath, defaultBranch, "feature/worktree");
+  const worktrees = await repository.worktrees();
+  assert.ok(worktrees.some((worktree) => worktree.path === realpathSync(worktreePath) && worktree.branch === "feature/worktree"));
+  await repository.removeWorktree(worktreePath);
+
   writeFileSync(join(root, "file.txt"), "stashed\n");
   await repository.stash("temporary work");
   const stashes = await repository.stashes();

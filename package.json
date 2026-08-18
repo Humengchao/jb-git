@@ -142,6 +142,30 @@
         "title": "JB Git: Delete Shelf"
       },
       {
+        "command": "jbGit.createWorktree",
+        "title": "JB Git: Create Worktree"
+      },
+      {
+        "command": "jbGit.removeWorktree",
+        "title": "JB Git: Remove Worktree"
+      },
+      {
+        "command": "jbGit.pruneWorktrees",
+        "title": "JB Git: Prune Worktrees"
+      },
+      {
+        "command": "jbGit.updateSubmodules",
+        "title": "JB Git: Update Submodules"
+      },
+      {
+        "command": "jbGit.createTag",
+        "title": "JB Git: Create Tag"
+      },
+      {
+        "command": "jbGit.deleteTag",
+        "title": "JB Git: Delete Tag"
+      },
+      {
         "command": "jbGit.initializeRepository",
         "title": "JB Git: Initialize Repository"
       },
@@ -201,6 +225,11 @@
           "id": "jbGit.shelves",
           "name": "Shelf",
           "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.worktrees",
+          "name": "Worktrees",
+          "when": "jbGit.hasWorkspace"
         }
       ]
     },
@@ -208,7 +237,7 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves",
+          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves || view == jbGit.worktrees",
           "group": "navigation@1"
         },
         {
@@ -250,6 +279,16 @@
           "command": "jbGit.createShelf",
           "when": "view == jbGit.shelves",
           "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.createWorktree",
+          "when": "view == jbGit.worktrees",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.pruneWorktrees",
+          "when": "view == jbGit.worktrees",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -312,6 +351,11 @@
           "command": "jbGit.deleteShelf",
           "when": "view == jbGit.shelves && viewItem == jbGit.shelf",
           "group": "inline@2"
+        },
+        {
+          "command": "jbGit.removeWorktree",
+          "when": "view == jbGit.worktrees && (viewItem == jbGit.worktree || viewItem == jbGit.worktree.prunable)",
+          "group": "inline@1"
         }
       ]
     },
