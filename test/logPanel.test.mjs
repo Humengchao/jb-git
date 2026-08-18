@@ -32,6 +32,7 @@ test("supports persistent horizontal resizing for all three Git log columns", ()
   assert.match(scriptMatch[1], /branchPaneWidth/);
   assert.match(scriptMatch[1], /detailsPaneWidth/);
   assert.match(scriptMatch[1], /event\.key !== 'ArrowLeft'/);
+  assert.match(scriptMatch[1], /aria-valuemax/);
 });
 
 test("supports modifier-click branch selection and multi-branch actions", () => {

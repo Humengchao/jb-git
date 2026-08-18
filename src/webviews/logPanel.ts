@@ -1125,11 +1125,11 @@ const logScript = String.raw`
     const compact = window.matchMedia('(max-width: 650px)').matches;
     const total = workspace.clientWidth || window.innerWidth;
     const leftMinimum = 125; const rightMinimum = 190; const centerMinimum = 260; const gutters = compact ? 9 : 18;
+    const maximumSides = Math.max(leftMinimum + rightMinimum, total - gutters - centerMinimum);
     let left = Math.max(leftMinimum, requestedLeft || 185);
     let right = Math.max(rightMinimum, requestedRight || 300);
     if (compact) left = Math.min(left, Math.max(leftMinimum, total - gutters - centerMinimum));
     else {
-      const maximumSides = Math.max(leftMinimum + rightMinimum, total - gutters - centerMinimum);
       if (left + right > maximumSides) {
         const overflow = left + right - maximumSides;
         const shrinkRight = Math.min(overflow, Math.max(0, right - rightMinimum)); right -= shrinkRight;
@@ -1142,8 +1142,8 @@ const logScript = String.raw`
     workspace.style.setProperty('--details-width', Math.round(right) + 'px');
     const leftSplitter = workspace.querySelector('.column-splitter[data-side="branch"]');
     const rightSplitter = workspace.querySelector('.column-splitter[data-side="details"]');
-    if (leftSplitter) { leftSplitter.setAttribute('aria-valuemin', String(leftMinimum)); leftSplitter.setAttribute('aria-valuenow', String(Math.round(left))); }
-    if (rightSplitter) { rightSplitter.setAttribute('aria-valuemin', String(rightMinimum)); rightSplitter.setAttribute('aria-valuenow', String(Math.round(right))); }
+    if (leftSplitter) { leftSplitter.setAttribute('aria-valuemin', String(leftMinimum)); leftSplitter.setAttribute('aria-valuemax', String(Math.max(leftMinimum, compact ? total - gutters - centerMinimum : maximumSides - rightMinimum))); leftSplitter.setAttribute('aria-valuenow', String(Math.round(left))); }
+    if (rightSplitter) { rightSplitter.setAttribute('aria-valuemin', String(rightMinimum)); rightSplitter.setAttribute('aria-valuemax', String(Math.max(rightMinimum, maximumSides - leftMinimum))); rightSplitter.setAttribute('aria-valuenow', String(Math.round(right))); }
     if (persist) persistColumnWidths(workspace);
   }
 
