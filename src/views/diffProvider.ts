@@ -18,6 +18,28 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider, 
     return uri;
   }
 
+  public registerFile(repositoryRoot: string, label: string, filePath: string, content: string): vscode.Uri {
+    const id = ++this.sequence;
+    const normalizedPath = filePath.replaceAll("\\", "/").replace(/^\/+/, "");
+    const uri = vscode.Uri.from({
+      scheme: "jb-git-diff",
+      authority: "revision",
+      path: `/${id}/${normalizedPath}`,
+      query: `repository=${encodeURIComponent(repositoryRoot)}&label=${encodeURIComponent(label)}`,
+    });
+    this.remember(uri, content);
+    return uri;
+  }
+
+  private remember(uri: vscode.Uri, content: string): void {
+    this.contents.set(uri.toString(), content);
+    while (this.contents.size > 100) {
+      const oldest = this.contents.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.contents.delete(oldest);
+    }
+  }
+
   public provideTextDocumentContent(uri: vscode.Uri): string {
     return this.contents.get(uri.toString()) ?? "";
   }

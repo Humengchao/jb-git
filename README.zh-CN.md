@@ -15,6 +15,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - Local Changes 包含 Changelist、文件勾选、提交消息、Amend、Sign-off、跳过 Hooks、Commit 和 Commit and Push。
 - Log 使用横向三栏布局：左侧 Branches、中间提交图和提交表、右侧 Changed Files 与 Commit Details；三栏宽度都可以拖动调节并自动记忆。
 - Git Log 支持文本/哈希、Branch、User、Date、Paths 和顺序筛选；左侧分支支持 Command/Ctrl 多选、分支比较和文件差异。
+- `Show Files Diff` 会打开 `Changes Between` 工作区：左侧按目录展示分支间文件变化，右侧使用 VS Code 原生并排代码 Diff，包含语法高亮、行号和行内增删高亮。
 - Git Log 还支持彩色提交拓扑、Cherry-pick、Revert、从提交创建分支和 Reset。
 - 状态栏分支入口提供类似 VCS Widget 的分支弹窗，更多菜单提供集中式 Git Operations Popup。
 - Git Console 记录 Git 命令、耗时与输出，并在显示前隐藏 URL、令牌和认证信息。

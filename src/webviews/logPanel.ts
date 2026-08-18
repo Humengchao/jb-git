@@ -7,6 +7,7 @@ import { RepositoryManager } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
 import { ChangeNode } from "../views/changesTree";
 import { DiffContentProvider } from "../views/diffProvider";
+import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
 
 type LogMessage =
@@ -76,6 +77,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private readonly selectedPaths = new Map<string, Set<string>>();
   private readonly knownPaths = new Map<string, Set<string>>();
   private updateVersion = 0;
+  private readonly branchComparisons: BranchComparisonWorkspace;
   private readonly disposables: vscode.Disposable[] = [];
 
   public constructor(
@@ -84,7 +86,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     private readonly shelves: ShelfStore,
     private readonly diffProvider: DiffContentProvider,
   ) {
+    this.branchComparisons = new BranchComparisonWorkspace(diffProvider);
     this.disposables.push(
+      this.branchComparisons,
       manager.onDidChange(() => void this.update()),
       changelists.onDidChange(() => void this.update()),
       shelves.onDidChange(() => void this.update()),
@@ -263,9 +267,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           if (message.action === "compareBranches" || message.action === "showBranchesDiff") {
             if (selectedBranches.length !== 2) return;
             const [left, right] = selectedBranches;
-            const content = message.action === "compareBranches"
-              ? await snapshot.repository.compareRefHistory(left.name, right.name)
-              : await snapshot.repository.diffRefs(left.name, right.name);
+            if (message.action === "showBranchesDiff") {
+              await this.branchComparisons.open(snapshot.repository, left, right);
+              return;
+            }
+            const content = await snapshot.repository.compareRefHistory(left.name, right.name);
             await showDiffText(`${left.name} ↔ ${right.name}`, content);
             return;
           }

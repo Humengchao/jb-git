@@ -13,6 +13,7 @@
 - Add IntelliJ-style context menus for branches, commits, and changed files, backed by validated Git operations.
 - Group changed files by folder and add a persistent draggable splitter for resizing the commit details pane.
 - Add persistent horizontal resizing for all three Log columns, Command/Ctrl branch multi-selection, branch comparison, and Branch/User/Date/Paths/order filters.
+- Replace raw Show Files Diff output with a Changes Between file tree and native side-by-side, syntax-highlighted file diffs.
 
 ## 0.1.0-alpha.3
 
