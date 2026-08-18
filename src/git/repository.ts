@@ -110,6 +110,22 @@ export class GitRepository {
     return this.runner.text(["show", "--format=fuller", "--stat", "--patch", "--decorate=short", hash], { cwd: this.info.rootPath });
   }
 
+  public async formatPatch(ref: string, pathSpec?: string): Promise<string> {
+    const revision = await this.resolveCommit(ref);
+    return this.runner.text([
+      "format-patch", "-1", "--stdout", revision,
+      ...(pathSpec ? ["--", pathSpec] : []),
+    ], { cwd: this.info.rootPath });
+  }
+
+  public async diffAgainstWorkingTree(ref: string, pathSpec?: string): Promise<string> {
+    const revision = await this.resolveCommit(ref);
+    return this.runner.text([
+      "diff", revision,
+      ...(pathSpec ? ["--", pathSpec] : []),
+    ], { cwd: this.info.rootPath });
+  }
+
   public async commitFiles(hash: string): Promise<GitCommitFile[]> {
     const revision = await this.resolveCommit(hash);
     const output = await this.runner.text(
@@ -456,6 +472,20 @@ export class GitRepository {
     await this.serial(async () => {
       const revision = await this.resolveCommit(ref);
       await this.runner.run(["reset", `--${mode}`, revision], { cwd: this.info.rootPath });
+    });
+  }
+
+  public async checkoutRevision(ref: string): Promise<void> {
+    await this.serial(async () => {
+      const revision = await this.resolveCommit(ref);
+      await this.runner.run(["switch", "--detach", revision], { cwd: this.info.rootPath });
+    });
+  }
+
+  public async restoreFileFromRevision(ref: string, pathSpec: string): Promise<void> {
+    await this.serial(async () => {
+      const revision = await this.resolveCommit(ref);
+      await this.runner.run(["restore", `--source=${revision}`, "--", pathSpec], { cwd: this.info.rootPath });
     });
   }
 

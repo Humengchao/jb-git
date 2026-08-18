@@ -79,10 +79,21 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.equal((await repository.logRef(revision, 10))[0].hash, revision);
   assert.equal((await repository.operationState()).kind, "none");
   assert.match(await repository.showCommit(revision), /update/);
+  assert.match(await repository.formatPatch(revision, "file.txt"), /Subject: \[PATCH\] update/);
   const blame = await repository.blame("file.txt");
   assert.equal(blame.length, 1);
   assert.equal(blame[0].author, "JB Git Test");
   assert.equal(blame[0].content, "two");
+
+  writeFileSync(join(root, "file.txt"), "working tree\n");
+  assert.match(await repository.diffAgainstWorkingTree(revision, "file.txt"), /\+working tree/);
+  await repository.restoreFileFromRevision(revision, "file.txt");
+  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "two\n");
+
+  await repository.checkoutRevision(initialRevision);
+  assert.equal(git(root, "branch", "--show-current"), "");
+  assert.equal(git(root, "rev-parse", "HEAD"), initialRevision);
+  await repository.checkout(defaultBranch, "local");
 
   await repository.createBranch("feature/test");
   assert.equal(git(root, "branch", "--show-current"), "feature/test");
