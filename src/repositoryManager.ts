@@ -273,9 +273,15 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).submodules();
   }
 
-  public async updateSubmodules(rootPath: string): Promise<void> {
-    await this.requireRepository(rootPath).updateSubmodules();
+  public async updateSubmodules(rootPath: string, paths: readonly string[] = []): Promise<void> {
+    await this.requireRepository(rootPath).updateSubmodules(true, true, paths);
     await this.refresh(rootPath);
+  }
+
+  public async clone(source: string, destination: string, bare = false): Promise<void> {
+    const cwd = this.workspacePaths()[0] ?? ".";
+    await this.runner.run(["clone", ...(bare ? ["--bare"] : []), source, destination], { cwd });
+    await this.discoverAndRefresh();
   }
 
   public async stash(rootPath: string, message?: string, includeUntracked = false, keepIndex = false): Promise<void> {

@@ -162,6 +162,10 @@
         "title": "JB Git: Update Submodules"
       },
       {
+        "command": "jbGit.updateSubmodule",
+        "title": "JB Git: Update Submodule"
+      },
+      {
         "command": "jbGit.createTag",
         "title": "JB Git: Create Tag"
       },
@@ -204,6 +208,10 @@
       {
         "command": "jbGit.initializeRepository",
         "title": "JB Git: Initialize Repository"
+      },
+      {
+        "command": "jbGit.cloneRepository",
+        "title": "JB Git: Clone Repository"
       },
       {
         "command": "jbGit.fetch",
@@ -284,6 +292,11 @@
           "id": "jbGit.stashes",
           "name": "Stashes",
           "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.submodules",
+          "name": "Submodules",
+          "when": "jbGit.hasWorkspace"
         }
       ]
     },
@@ -298,13 +311,18 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves || view == jbGit.worktrees || view == jbGit.remotes || view == jbGit.stashes",
+          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves || view == jbGit.worktrees || view == jbGit.remotes || view == jbGit.stashes || view == jbGit.submodules",
           "group": "navigation@1"
         },
         {
           "command": "jbGit.fetch",
           "when": "view == jbGit.repositories",
           "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.cloneRepository",
+          "when": "view == jbGit.repositories",
+          "group": "navigation@1"
         },
         {
           "command": "jbGit.commit",
@@ -359,6 +377,11 @@
         {
           "command": "jbGit.stash",
           "when": "view == jbGit.stashes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.updateSubmodules",
+          "when": "view == jbGit.submodules",
           "group": "navigation@2"
         }
       ],
@@ -472,6 +495,11 @@
           "command": "jbGit.dropStash",
           "when": "view == jbGit.stashes && viewItem == jbGit.stash",
           "group": "inline@2"
+        },
+        {
+          "command": "jbGit.updateSubmodule",
+          "when": "view == jbGit.submodules && viewItem == jbGit.submodule",
+          "group": "inline@1"
         }
       ]
     },

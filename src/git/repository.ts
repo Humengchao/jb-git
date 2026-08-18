@@ -324,8 +324,8 @@ export class GitRepository {
     });
   }
 
-  public async updateSubmodules(init = true, recursive = true): Promise<void> {
-    await this.serial(() => this.runner.run(["submodule", "update", ...(init ? ["--init"] : []), ...(recursive ? ["--recursive"] : [])], { cwd: this.info.rootPath }));
+  public async updateSubmodules(init = true, recursive = true, paths: readonly string[] = []): Promise<void> {
+    await this.serial(() => this.runner.run(["submodule", "update", ...(init ? ["--init"] : []), ...(recursive ? ["--recursive"] : []), ...(paths.length ? ["--", ...paths] : [])], { cwd: this.info.rootPath }));
   }
 
   public async stage(paths: readonly string[]): Promise<void> {

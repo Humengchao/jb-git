@@ -83,6 +83,7 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   const worktrees = await repository.worktrees();
   assert.ok(worktrees.some((worktree) => worktree.path === realpathSync(worktreePath) && worktree.branch === "feature/worktree"));
   await repository.removeWorktree(worktreePath);
+  assert.deepEqual(await repository.submodules(), []);
 
   writeFileSync(join(root, "file.txt"), "stashed\n");
   await repository.stash("temporary work");

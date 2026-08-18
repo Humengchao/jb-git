@@ -12,6 +12,7 @@ import { ShelfNode, ShelfTreeProvider } from "./views/shelfTree";
 import { WorktreeNode, WorktreeTreeProvider } from "./views/worktreeTree";
 import { RemoteNode, RemoteTreeProvider } from "./views/remoteTree";
 import { StashNode, StashTreeProvider } from "./views/stashTree";
+import { SubmoduleNode, SubmoduleTreeProvider } from "./views/submoduleTree";
 import { RepositoryManager } from "./repositoryManager";
 
 function workspacePaths(): string[] {
@@ -61,6 +62,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const worktrees = new WorktreeTreeProvider(manager);
   const remotes = new RemoteTreeProvider(manager);
   const stashes = new StashTreeProvider(manager);
+  const submodules = new SubmoduleTreeProvider(manager);
   const repositoryView = vscode.window.createTreeView("jbGit.repositories", { treeDataProvider: repositories, showCollapseAll: true });
   const changesView = vscode.window.createTreeView("jbGit.changes", { treeDataProvider: changes, showCollapseAll: true });
   const historyView = vscode.window.createTreeView("jbGit.history", { treeDataProvider: history, showCollapseAll: true });
@@ -69,6 +71,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const worktreesView = vscode.window.createTreeView("jbGit.worktrees", { treeDataProvider: worktrees, showCollapseAll: true });
   const remotesView = vscode.window.createTreeView("jbGit.remotes", { treeDataProvider: remotes, showCollapseAll: true });
   const stashesView = vscode.window.createTreeView("jbGit.stashes", { treeDataProvider: stashes, showCollapseAll: true });
+  const submodulesView = vscode.window.createTreeView("jbGit.submodules", { treeDataProvider: submodules, showCollapseAll: true });
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   branchStatus.command = "jbGit.openChanges";
   branchStatus.tooltip = "Open JB Git Local Changes";
@@ -111,6 +114,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     worktrees,
     remotes,
     stashes,
+    submodules,
     repositoryView,
     changesView,
     historyView,
@@ -119,6 +123,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     worktreesView,
     remotesView,
     stashesView,
+    submodulesView,
     diffProvider,
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
@@ -173,6 +178,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       await runWithNotification("Initializing Git repository", () => manager.initializeRepository(root));
+    }),
+    vscode.commands.registerCommand("jbGit.cloneRepository", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const source = await vscode.window.showInputBox({ prompt: "Repository URL or local path", placeHolder: "https://example.com/repository.git" });
+      if (!source?.trim()) return;
+      const destination = await vscode.window.showInputBox({ prompt: "Destination folder", placeHolder: "./repository" });
+      if (!destination?.trim()) return;
+      const mode = await vscode.window.showQuickPick(
+        [{ label: "Standard clone", bare: false }, { label: "Bare clone", bare: true }],
+        { placeHolder: "Clone type" },
+      );
+      if (!mode) return;
+      await runWithNotification(`Cloning ${source.trim()}`, () => manager.clone(source.trim(), destination.trim(), mode.bare));
+      if (!mode.bare) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(path.resolve(destination.trim())), { forceNewWindow: false });
     }),
     vscode.commands.registerCommand("jbGit.fetch", async () => {
       if (!(await requireTrustedWorkspace())) return;
@@ -460,6 +479,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const first = manager.all[0];
       if (!first) return;
       await runWithNotification("Updating Git submodules", () => manager.updateSubmodules(first.repository.info.rootPath));
+    }),
+    vscode.commands.registerCommand("jbGit.updateSubmodule", async (node?: SubmoduleNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      await runWithNotification(`Updating submodule ${node.submodule.path}`, () => manager.updateSubmodules(node.repositoryRoot, [node.submodule.path]));
     }),
     vscode.commands.registerCommand("jbGit.createTag", async () => {
       if (!(await requireTrustedWorkspace())) return;
