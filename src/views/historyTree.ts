@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { GitCommit } from "../git/types";
+import { ErrorNode } from "./errorNode";
 
 export class HistoryRootNode extends vscode.TreeItem {
   public constructor(public readonly snapshot: RepositorySnapshot) {
@@ -27,19 +28,19 @@ export class CommitNode extends vscode.TreeItem {
   }
 }
 
-export class HistoryTreeProvider implements vscode.TreeDataProvider<HistoryRootNode | CommitNode> {
-  private readonly changedEmitter = new vscode.EventEmitter<HistoryRootNode | CommitNode | undefined | null | void>();
+export class HistoryTreeProvider implements vscode.TreeDataProvider<HistoryRootNode | CommitNode | ErrorNode> {
+  private readonly changedEmitter = new vscode.EventEmitter<HistoryRootNode | CommitNode | ErrorNode | undefined | null | void>();
   public readonly onDidChangeTreeData = this.changedEmitter.event;
 
   public constructor(private readonly manager: RepositoryManager) {
     manager.onDidChange(() => this.changedEmitter.fire());
   }
 
-  public getTreeItem(element: HistoryRootNode | CommitNode): vscode.TreeItem {
+  public getTreeItem(element: HistoryRootNode | CommitNode | ErrorNode): vscode.TreeItem {
     return element;
   }
 
-  public async getChildren(element?: HistoryRootNode | CommitNode): Promise<(HistoryRootNode | CommitNode)[]> {
+  public async getChildren(element?: HistoryRootNode | CommitNode | ErrorNode): Promise<(HistoryRootNode | CommitNode | ErrorNode)[]> {
     if (!element) return this.manager.all.map((snapshot) => new HistoryRootNode(snapshot));
     if (element instanceof HistoryRootNode) {
       try {
@@ -52,8 +53,8 @@ export class HistoryTreeProvider implements vscode.TreeDataProvider<HistoryRootN
           lanes.splice(lane, 1, ...commit.parents);
           return new CommitNode(element.snapshot.repository.info.rootPath, commit, prefix);
         });
-      } catch {
-        return [];
+      } catch (error) {
+        return [new ErrorNode(error)];
       }
     }
     return [];

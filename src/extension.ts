@@ -229,7 +229,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
     outputChannel,
-    manager.onDidChange(() => { updateStatusBar(); rebuildRepositoryMetadataWatchers(); }),
+    manager.onDidChange(() => {
+      updateStatusBar();
+      rebuildRepositoryMetadataWatchers();
+      for (const snapshot of manager.all) {
+        if (snapshot.status) {
+          void changelistStore.reconcile(snapshot.repository.info.rootPath, snapshot.status.changes)
+            .catch((error) => vscode.window.showErrorMessage(formatGitError(error)));
+        }
+      }
+    }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh()),
     vscode.workspace.onDidSaveTextDocument((document) => scheduleRefreshForPath(document.uri.fsPath)),
     vscode.workspace.onDidCreateFiles((event) => event.files.forEach((uri) => scheduleRefreshForPath(uri.fsPath))),

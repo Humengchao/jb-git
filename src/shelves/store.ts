@@ -82,10 +82,8 @@ export class ShelfStore implements vscode.Disposable {
   }
 
   public async remove(repositoryRoot: string, entry: ShelfEntry): Promise<void> {
-    await Promise.allSettled([
-      unlink(entry.patchFile),
-      unlink(path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.json`)),
-    ]);
+    await unlinkIfPresent(entry.patchFile);
+    await unlinkIfPresent(path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.json`));
     this.changedEmitter.fire(repositoryRoot);
   }
 
@@ -95,5 +93,13 @@ export class ShelfStore implements vscode.Disposable {
 
   public dispose(): void {
     this.changedEmitter.dispose();
+  }
+}
+
+async function unlinkIfPresent(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }

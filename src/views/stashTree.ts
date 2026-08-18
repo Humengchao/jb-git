@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { GitStashEntry } from "../git/types";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
+import { ErrorNode } from "./errorNode";
 
 export class StashRootNode extends vscode.TreeItem {
   public constructor(public readonly snapshot: RepositorySnapshot) {
@@ -26,26 +27,26 @@ export class StashNode extends vscode.TreeItem {
   }
 }
 
-export class StashTreeProvider implements vscode.TreeDataProvider<StashRootNode | StashNode> {
-  private readonly changedEmitter = new vscode.EventEmitter<StashRootNode | StashNode | undefined | null | void>();
+export class StashTreeProvider implements vscode.TreeDataProvider<StashRootNode | StashNode | ErrorNode> {
+  private readonly changedEmitter = new vscode.EventEmitter<StashRootNode | StashNode | ErrorNode | undefined | null | void>();
   public readonly onDidChangeTreeData = this.changedEmitter.event;
 
   public constructor(private readonly manager: RepositoryManager) {
     manager.onDidChange(() => this.changedEmitter.fire());
   }
 
-  public getTreeItem(element: StashRootNode | StashNode): vscode.TreeItem {
+  public getTreeItem(element: StashRootNode | StashNode | ErrorNode): vscode.TreeItem {
     return element;
   }
 
-  public async getChildren(element?: StashRootNode | StashNode): Promise<(StashRootNode | StashNode)[]> {
+  public async getChildren(element?: StashRootNode | StashNode | ErrorNode): Promise<(StashRootNode | StashNode | ErrorNode)[]> {
     if (!element) return this.manager.all.map((snapshot) => new StashRootNode(snapshot));
     if (element instanceof StashRootNode) {
       try {
         const entries = await this.manager.stashes(element.snapshot.repository.info.rootPath);
         return entries.map((entry) => new StashNode(element.snapshot.repository.info.rootPath, entry));
-      } catch {
-        return [];
+      } catch (error) {
+        return [new ErrorNode(error)];
       }
     }
     return [];

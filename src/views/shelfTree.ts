@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
+import { ErrorNode } from "./errorNode";
 
 export class ShelfRootNode extends vscode.TreeItem {
   public constructor(public readonly snapshot: RepositorySnapshot) {
@@ -26,8 +27,8 @@ export class ShelfNode extends vscode.TreeItem {
   }
 }
 
-export class ShelfTreeProvider implements vscode.TreeDataProvider<ShelfRootNode | ShelfNode> {
-  private readonly changedEmitter = new vscode.EventEmitter<ShelfRootNode | ShelfNode | undefined | null | void>();
+export class ShelfTreeProvider implements vscode.TreeDataProvider<ShelfRootNode | ShelfNode | ErrorNode> {
+  private readonly changedEmitter = new vscode.EventEmitter<ShelfRootNode | ShelfNode | ErrorNode | undefined | null | void>();
   public readonly onDidChangeTreeData = this.changedEmitter.event;
 
   public constructor(private readonly manager: RepositoryManager, private readonly shelves: ShelfStore) {
@@ -35,15 +36,19 @@ export class ShelfTreeProvider implements vscode.TreeDataProvider<ShelfRootNode 
     shelves.onDidChange(() => this.changedEmitter.fire());
   }
 
-  public getTreeItem(element: ShelfRootNode | ShelfNode): vscode.TreeItem {
+  public getTreeItem(element: ShelfRootNode | ShelfNode | ErrorNode): vscode.TreeItem {
     return element;
   }
 
-  public async getChildren(element?: ShelfRootNode | ShelfNode): Promise<(ShelfRootNode | ShelfNode)[]> {
+  public async getChildren(element?: ShelfRootNode | ShelfNode | ErrorNode): Promise<(ShelfRootNode | ShelfNode | ErrorNode)[]> {
     if (!element) return this.manager.all.map((snapshot) => new ShelfRootNode(snapshot));
     if (element instanceof ShelfRootNode) {
-      const entries = await this.shelves.list(element.snapshot.repository.info.rootPath);
-      return entries.map((entry) => new ShelfNode(element.snapshot.repository.info.rootPath, entry));
+      try {
+        const entries = await this.shelves.list(element.snapshot.repository.info.rootPath);
+        return entries.map((entry) => new ShelfNode(element.snapshot.repository.info.rootPath, entry));
+      } catch (error) {
+        return [new ErrorNode(error)];
+      }
     }
     return [];
   }
@@ -52,4 +57,3 @@ export class ShelfTreeProvider implements vscode.TreeDataProvider<ShelfRootNode 
     this.changedEmitter.dispose();
   }
 }
-

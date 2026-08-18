@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { GitChange } from "../git/types";
 
 export interface Changelist {
   id: string;
@@ -92,6 +93,30 @@ export class ChangelistStore implements vscode.Disposable {
     if (!repository.lists.some((list) => list.id === listId)) throw new Error("Changelist not found");
     repository.activeId = listId;
     await this.save(repositoryRoot);
+  }
+
+  /** Migrates rename assignments and removes paths that no longer have changes. */
+  public async reconcile(repositoryRoot: string, changes: readonly GitChange[]): Promise<void> {
+    const repository = this.ensure(repositoryRoot);
+    let modified = false;
+    for (const change of changes) {
+      if (!change.originalPath) continue;
+      for (const list of repository.lists) {
+        if (!list.files.includes(change.originalPath)) continue;
+        list.files = list.files.filter((file) => file !== change.originalPath);
+        if (!list.files.includes(change.path)) list.files.push(change.path);
+        modified = true;
+      }
+    }
+    const livePaths = new Set(changes.map((change) => change.path));
+    for (const list of repository.lists) {
+      const reconciled = list.files.filter((file) => livePaths.has(file));
+      if (reconciled.length !== list.files.length) {
+        list.files = reconciled;
+        modified = true;
+      }
+    }
+    if (modified) await this.save(repositoryRoot);
   }
 
   private ensure(repositoryRoot: string): RepositoryChangelists {

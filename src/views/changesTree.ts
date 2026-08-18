@@ -2,6 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { GitChange, GitDiffHunk } from "../git/types";
+import { ErrorNode } from "./errorNode";
 
 type ChangeGroupKind = "staged" | "unstaged" | "untracked" | "conflicted";
 export type ChangeViewMode = "staged" | "unstaged";
@@ -70,19 +71,19 @@ export class HunkNode extends vscode.TreeItem {
   }
 }
 
-export class ChangesTreeProvider implements vscode.TreeDataProvider<ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode> {
-  private readonly changedEmitter = new vscode.EventEmitter<ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode | undefined | null | void>();
+export class ChangesTreeProvider implements vscode.TreeDataProvider<ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode | ErrorNode> {
+  private readonly changedEmitter = new vscode.EventEmitter<ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode | ErrorNode | undefined | null | void>();
   public readonly onDidChangeTreeData = this.changedEmitter.event;
 
   public constructor(private readonly manager: RepositoryManager) {
     manager.onDidChange(() => this.changedEmitter.fire());
   }
 
-  public getTreeItem(element: ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode): vscode.TreeItem {
+  public getTreeItem(element: ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode | ErrorNode): vscode.TreeItem {
     return element;
   }
 
-  public async getChildren(element?: ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode): Promise<(ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode)[]> {
+  public async getChildren(element?: ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode | ErrorNode): Promise<(ChangeGroupNode | ChangeNode | HunkNode | RepositoryChangeRoot | EmptyChangesNode | ErrorNode)[]> {
     if (!element) {
       return this.manager.all.map((snapshot) => new RepositoryChangeRoot(snapshot));
     }
@@ -110,8 +111,8 @@ export class ChangesTreeProvider implements vscode.TreeDataProvider<ChangeGroupN
       try {
         const hunks = await this.manager.diffHunks(element.repositoryRoot, element.change.path, element.mode === "staged");
         return hunks.map((hunk, index) => new HunkNode(element.repositoryRoot, element.change.path, element.mode, index, hunk));
-      } catch {
-        return [];
+      } catch (error) {
+        return [new ErrorNode(error)];
       }
     }
     return [];

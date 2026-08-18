@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { GitWorktree } from "../git/types";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
+import { ErrorNode } from "./errorNode";
 
 export class WorktreeRootNode extends vscode.TreeItem {
   public constructor(public readonly snapshot: RepositorySnapshot) {
@@ -26,25 +27,25 @@ export class WorktreeNode extends vscode.TreeItem {
   }
 }
 
-export class WorktreeTreeProvider implements vscode.TreeDataProvider<WorktreeRootNode | WorktreeNode> {
-  private readonly changedEmitter = new vscode.EventEmitter<WorktreeRootNode | WorktreeNode | undefined | null | void>();
+export class WorktreeTreeProvider implements vscode.TreeDataProvider<WorktreeRootNode | WorktreeNode | ErrorNode> {
+  private readonly changedEmitter = new vscode.EventEmitter<WorktreeRootNode | WorktreeNode | ErrorNode | undefined | null | void>();
   public readonly onDidChangeTreeData = this.changedEmitter.event;
 
   public constructor(private readonly manager: RepositoryManager) {
     manager.onDidChange(() => this.changedEmitter.fire());
   }
 
-  public getTreeItem(element: WorktreeRootNode | WorktreeNode): vscode.TreeItem {
+  public getTreeItem(element: WorktreeRootNode | WorktreeNode | ErrorNode): vscode.TreeItem {
     return element;
   }
 
-  public async getChildren(element?: WorktreeRootNode | WorktreeNode): Promise<(WorktreeRootNode | WorktreeNode)[]> {
+  public async getChildren(element?: WorktreeRootNode | WorktreeNode | ErrorNode): Promise<(WorktreeRootNode | WorktreeNode | ErrorNode)[]> {
     if (!element) return this.manager.all.map((snapshot) => new WorktreeRootNode(snapshot));
     if (element instanceof WorktreeRootNode) {
       try {
         return (await this.manager.worktrees(element.snapshot.repository.info.rootPath)).map((worktree) => new WorktreeNode(element.snapshot.repository.info.rootPath, worktree));
-      } catch {
-        return [];
+      } catch (error) {
+        return [new ErrorNode(error)];
       }
     }
     return [];
@@ -54,4 +55,3 @@ export class WorktreeTreeProvider implements vscode.TreeDataProvider<WorktreeRoo
     this.changedEmitter.dispose();
   }
 }
-

@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { GitRemote } from "../git/types";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { redactGitText } from "../git/runner";
+import { ErrorNode } from "./errorNode";
 
 export class RemoteRootNode extends vscode.TreeItem {
   public constructor(public readonly snapshot: RepositorySnapshot) {
@@ -29,26 +30,26 @@ export class RemoteNode extends vscode.TreeItem {
   }
 }
 
-export class RemoteTreeProvider implements vscode.TreeDataProvider<RemoteRootNode | RemoteNode> {
-  private readonly changedEmitter = new vscode.EventEmitter<RemoteRootNode | RemoteNode | undefined | null | void>();
+export class RemoteTreeProvider implements vscode.TreeDataProvider<RemoteRootNode | RemoteNode | ErrorNode> {
+  private readonly changedEmitter = new vscode.EventEmitter<RemoteRootNode | RemoteNode | ErrorNode | undefined | null | void>();
   public readonly onDidChangeTreeData = this.changedEmitter.event;
 
   public constructor(private readonly manager: RepositoryManager) {
     manager.onDidChange(() => this.changedEmitter.fire());
   }
 
-  public getTreeItem(element: RemoteRootNode | RemoteNode): vscode.TreeItem {
+  public getTreeItem(element: RemoteRootNode | RemoteNode | ErrorNode): vscode.TreeItem {
     return element;
   }
 
-  public async getChildren(element?: RemoteRootNode | RemoteNode): Promise<(RemoteRootNode | RemoteNode)[]> {
+  public async getChildren(element?: RemoteRootNode | RemoteNode | ErrorNode): Promise<(RemoteRootNode | RemoteNode | ErrorNode)[]> {
     if (!element) return this.manager.all.map((snapshot) => new RemoteRootNode(snapshot));
     if (element instanceof RemoteRootNode) {
       try {
         const remotes = await this.manager.remotes(element.snapshot.repository.info.rootPath);
         return remotes.map((remote) => new RemoteNode(element.snapshot.repository.info.rootPath, remote));
-      } catch {
-        return [];
+      } catch (error) {
+        return [new ErrorNode(error)];
       }
     }
     return [];

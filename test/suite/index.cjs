@@ -36,6 +36,36 @@ async function run() {
   } finally {
     manager.dispose();
   }
+
+  const memory = new Map();
+  const memento = {
+    get: (key) => memory.get(key),
+    update: async (key, value) => { memory.set(key, value); },
+    keys: () => [...memory.keys()],
+  };
+  const { ChangelistStore } = require(path.join(extension.extensionPath, "dist", "changelists", "store.js"));
+  const changelists = new ChangelistStore(memento);
+  const feature = await changelists.create(parent, "Feature");
+  await changelists.assign(parent, "old.txt", feature.id);
+  await changelists.reconcile(parent, [{
+    path: "new.txt", originalPath: "old.txt", indexStatus: "R", workTreeStatus: " ",
+    kind: "renamed", staged: true, unstaged: false, conflicted: false,
+  }]);
+  assert.equal(changelists.listForFile(parent, "new.txt").id, feature.id, "rename assignments should migrate");
+  await changelists.reconcile(parent, []);
+  assert.deepEqual(changelists.files(parent, feature.id), [], "clean paths should be removed from persisted assignments");
+  changelists.dispose();
+
+  const { ShelfStore } = require(path.join(extension.extensionPath, "dist", "shelves", "store.js"));
+  const shelfRoot = await mkdtemp(path.join(tmpdir(), "jb-git-shelf-delete-"));
+  const invalidPatch = path.join(shelfRoot, "patch-is-a-directory");
+  await mkdir(invalidPatch);
+  const shelfStore = new ShelfStore(shelfRoot);
+  await assert.rejects(shelfStore.remove(parent, {
+    id: "broken", repositoryRoot: parent, name: "Broken", createdAt: new Date().toISOString(),
+    patchFile: invalidPatch, paths: [],
+  }), "shelf deletion errors must be reported");
+  shelfStore.dispose();
 }
 
 module.exports = { run };
