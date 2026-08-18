@@ -200,6 +200,46 @@ export class RepositoryManager implements vscode.Disposable {
     }
   }
 
+  public async bisectStart(rootPath: string, bad: string, good: string): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).bisectStart(bad, good);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async bisectGood(rootPath: string, ref = "HEAD"): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).bisectGood(ref);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async bisectBad(rootPath: string, ref = "HEAD"): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).bisectBad(ref);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async bisectSkip(rootPath: string): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).bisectSkip();
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async bisectReset(rootPath: string, ref?: string): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).bisectReset(ref);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
   public async commit(rootPath: string, message: string, options?: GitCommitOptions): Promise<string> {
     const revision = await this.requireRepository(rootPath).commit(message, options);
     await this.refresh(rootPath);

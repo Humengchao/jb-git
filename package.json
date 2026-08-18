@@ -54,6 +54,10 @@
         "title": "JB Git: Show History"
       },
       {
+        "command": "jbGit.fileHistory",
+        "title": "JB Git: File History"
+      },
+      {
         "command": "jbGit.showCommit",
         "title": "JB Git: Show Commit"
       },
@@ -132,6 +136,26 @@
       {
         "command": "jbGit.skipOperation",
         "title": "JB Git: Skip Operation"
+      },
+      {
+        "command": "jbGit.bisectStart",
+        "title": "JB Git: Bisect Start"
+      },
+      {
+        "command": "jbGit.bisectGood",
+        "title": "JB Git: Bisect Good"
+      },
+      {
+        "command": "jbGit.bisectBad",
+        "title": "JB Git: Bisect Bad"
+      },
+      {
+        "command": "jbGit.bisectSkip",
+        "title": "JB Git: Bisect Skip"
+      },
+      {
+        "command": "jbGit.bisectReset",
+        "title": "JB Git: Bisect Reset"
       },
       {
         "command": "jbGit.createShelf",
@@ -314,6 +338,11 @@
           "command": "jbGit.blame",
           "when": "resourceScheme == file",
           "group": "navigation@80"
+        },
+        {
+          "command": "jbGit.fileHistory",
+          "when": "resourceScheme == file",
+          "group": "navigation@81"
         }
       ],
       "view/title": [

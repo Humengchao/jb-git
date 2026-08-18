@@ -395,6 +395,26 @@ export class GitRepository {
     await this.serial(() => this.runner.run([command, "--abort"], { cwd: this.info.rootPath }));
   }
 
+  public async bisectStart(bad: string, good: string): Promise<void> {
+    await this.serial(() => this.runner.run(["bisect", "start", bad, good], { cwd: this.info.rootPath }));
+  }
+
+  public async bisectGood(ref = "HEAD"): Promise<void> {
+    await this.serial(() => this.runner.run(["bisect", "good", ref], { cwd: this.info.rootPath }));
+  }
+
+  public async bisectBad(ref = "HEAD"): Promise<void> {
+    await this.serial(() => this.runner.run(["bisect", "bad", ref], { cwd: this.info.rootPath }));
+  }
+
+  public async bisectSkip(): Promise<void> {
+    await this.serial(() => this.runner.run(["bisect", "skip"], { cwd: this.info.rootPath }));
+  }
+
+  public async bisectReset(ref?: string): Promise<void> {
+    await this.serial(() => this.runner.run(["bisect", "reset", ...(ref ? [ref] : [])], { cwd: this.info.rootPath }));
+  }
+
   public async skipOperation(kind: "rebase" | "cherry-pick"): Promise<void> {
     await this.serial(() => this.runner.run([kind, "--skip"], { cwd: this.info.rootPath }));
   }

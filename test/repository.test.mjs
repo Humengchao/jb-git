@@ -159,3 +159,23 @@ test("stages and unstages individual text diff hunks", async () => {
   assert.equal((await repository.diffHunks("hunks.txt", true)).length, 0);
   assert.equal((await repository.diffHunks("hunks.txt")).length, 2);
 });
+
+test("runs and resets a Git bisect session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-bisect-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "bisect.txt"), "one\n");
+  git(root, "add", "bisect.txt");
+  git(root, "commit", "-qm", "one");
+  writeFileSync(join(root, "bisect.txt"), "two\n");
+  git(root, "commit", "-qam", "two");
+  writeFileSync(join(root, "bisect.txt"), "three\n");
+  git(root, "commit", "-qam", "three");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  await repository.bisectStart("HEAD", "HEAD~2");
+  assert.equal((await repository.operationState()).kind, "bisect");
+  await repository.bisectReset();
+  assert.equal((await repository.operationState()).kind, "none");
+});

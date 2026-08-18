@@ -140,6 +140,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await runWithNotification(`Loading diff for ${node.change.path}`, () => openChangeDiff(manager, diffProvider, node));
     }),
     vscode.commands.registerCommand("jbGit.showHistory", () => vscode.commands.executeCommand("workbench.view.extension.jbGit")),
+    vscode.commands.registerCommand("jbGit.fileHistory", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== "file") return void vscode.window.showInformationMessage("Open a file before showing its Git history.");
+      const filePath = editor.document.uri.fsPath;
+      const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
+      if (!snapshot) return void vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
+      const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
+      const commits = await runWithNotification(`Loading history for ${relativePath}`, () => snapshot.repository.log(100, relativePath));
+      if (!commits) return;
+      const channel = vscode.window.createOutputChannel(`JB Git · File History · ${path.basename(filePath)}`);
+      channel.append(commits.map((commit) => `${commit.hash.slice(0, 12)}  ${commit.authoredAt.slice(0, 10)}  ${commit.author}  ${commit.subject}`).join("\n"));
+      channel.show(true);
+    }),
     vscode.commands.registerCommand("jbGit.showCommit", async (node?: CommitNode) => {
       if (!node) return;
       const snapshot = manager.snapshot(node.repositoryRoot);
@@ -209,13 +222,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           { label: "Amend", description: "Amend the current HEAD commit" },
           { label: "Sign-off", description: "Create a signed-off commit" },
           { label: "Amend and sign-off", description: "Amend HEAD and add a sign-off trailer" },
+          { label: "Commit without hooks", description: "Skip client-side commit hooks" },
         ],
         { placeHolder: "Choose commit mode" },
       );
       if (!mode) return;
       const amend = mode.label.includes("Amend");
       const signoff = mode.label.includes("sign-off");
-      const revision = await runWithNotification("Creating Git commit", () => manager.commit(first.repository.info.rootPath, message, { amend, signoff }));
+      const noVerify = mode.label.includes("without hooks");
+      const revision = await runWithNotification("Creating Git commit", () => manager.commit(first.repository.info.rootPath, message, { amend, signoff, noVerify }));
       if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
     }),
     vscode.commands.registerCommand("jbGit.pull", async () => {
@@ -334,6 +349,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const kind = first?.operation.kind;
       if (!first || (kind !== "rebase" && kind !== "cherry-pick")) return;
       await runWithNotification(`Skipping ${kind}`, () => manager.skipOperation(first.repository.info.rootPath, kind));
+    }),
+    vscode.commands.registerCommand("jbGit.bisectStart", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const bad = await vscode.window.showInputBox({ prompt: "Known bad revision", value: "HEAD" });
+      if (!bad?.trim()) return;
+      const good = await vscode.window.showInputBox({ prompt: "Known good revision" });
+      if (!good?.trim()) return;
+      await runWithNotification("Starting Git bisect", () => manager.bisectStart(first.repository.info.rootPath, bad.trim(), good.trim()));
+    }),
+    vscode.commands.registerCommand("jbGit.bisectGood", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const ref = await vscode.window.showInputBox({ prompt: "Good revision (or HEAD)", value: "HEAD" });
+      if (!ref?.trim()) return;
+      await runWithNotification("Marking revision good", () => manager.bisectGood(first.repository.info.rootPath, ref.trim()));
+    }),
+    vscode.commands.registerCommand("jbGit.bisectBad", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const ref = await vscode.window.showInputBox({ prompt: "Bad revision (or HEAD)", value: "HEAD" });
+      if (!ref?.trim()) return;
+      await runWithNotification("Marking revision bad", () => manager.bisectBad(first.repository.info.rootPath, ref.trim()));
+    }),
+    vscode.commands.registerCommand("jbGit.bisectSkip", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      await runWithNotification("Skipping Git bisect revision", () => manager.bisectSkip(first.repository.info.rootPath));
+    }),
+    vscode.commands.registerCommand("jbGit.bisectReset", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      await runWithNotification("Resetting Git bisect", () => manager.bisectReset(first.repository.info.rootPath));
     }),
     vscode.commands.registerCommand("jbGit.createBranch", async () => {
       if (!(await requireTrustedWorkspace())) return;
