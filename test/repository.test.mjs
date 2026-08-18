@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,16 @@ import { GitRunner } from "../dist/git/runner.js";
 
 function git(cwd, ...args) {
   return execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
+}
+
+function readText(filePath) {
+  return readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
+}
+
+function sameDirectory(left, right) {
+  const leftStat = statSync(left);
+  const rightStat = statSync(right);
+  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
 }
 
 test("discovers a repository and reads its status", async () => {
@@ -24,7 +34,7 @@ test("discovers a repository and reads its status", async () => {
 
   const repository = await discoverRepository(root, new GitRunner());
   assert.ok(repository);
-  assert.equal(repository.info.rootPath, realpathSync(root));
+  assert.equal(sameDirectory(repository.info.rootPath, root), true);
   const status = await repository.status();
   const initialBranch = git(root, "branch", "--show-current");
   assert.equal(status.branch.head, initialBranch);
@@ -121,7 +131,7 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   writeFileSync(join(root, "file.txt"), "working tree\n");
   assert.match(await repository.diffAgainstWorkingTree(revision, "file.txt"), /\+working tree/);
   await repository.restoreFileFromRevision(revision, "file.txt");
-  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "two\n");
+  assert.equal(readText(join(root, "file.txt")), "two\n");
 
   await repository.checkoutRevision(initialRevision);
   assert.equal(git(root, "branch", "--show-current"), "");
@@ -153,7 +163,7 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   const worktreePath = `${root}-worktree`;
   await repository.addWorktree(worktreePath, defaultBranch, "feature/worktree");
   const worktrees = await repository.worktrees();
-  assert.ok(worktrees.some((worktree) => worktree.path === realpathSync(worktreePath) && worktree.branch === "feature/worktree"));
+  assert.ok(worktrees.some((worktree) => sameDirectory(worktree.path, worktreePath) && worktree.branch === "feature/worktree"));
   await repository.removeWorktree(worktreePath);
   assert.deepEqual(await repository.submodules(), []);
 
@@ -170,7 +180,7 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   writeFileSync(patchFile, patch);
   git(root, "restore", "file.txt");
   await repository.applyPatchFile(patchFile);
-  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "stashed\n");
+  assert.equal(readText(join(root, "file.txt")), "stashed\n");
   const applied = (await repository.status()).changes.find((change) => change.path === "file.txt");
   assert.equal(applied?.staged, false);
   assert.equal(applied?.unstaged, true);
@@ -197,7 +207,7 @@ test("shelves tracked changes and restores them as unstaged work", async () => {
   const restored = (await repository.status()).changes[0];
   assert.equal(restored.staged, false);
   assert.equal(restored.unstaged, true);
-  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "shelved\n");
+  assert.equal(readText(join(root, "file.txt")), "shelved\n");
 });
 
 test("keeps the real index intact when a selected-path commit fails", async () => {
@@ -280,7 +290,7 @@ test("shelves renames and unborn tracked additions completely", async () => {
   await repository.shelveTrackedPaths(["old.txt", "new.txt"]);
   assert.equal((await repository.status()).changes.length, 0);
   await repository.applyPatchFile(renamePatch);
-  assert.equal(readFileSync(join(root, "new.txt"), "utf8"), "content\n");
+  assert.equal(readText(join(root, "new.txt")), "content\n");
 
   const unborn = mkdtempSync(join(tmpdir(), "jb-git-unborn-shelf-"));
   git(unborn, "init", "-q");
@@ -293,7 +303,7 @@ test("shelves renames and unborn tracked additions completely", async () => {
   await unbornRepository.shelveTrackedPaths(["first.txt"]);
   assert.equal((await unbornRepository.status()).changes.length, 0);
   await unbornRepository.applyPatchFile(unbornPatch);
-  assert.equal(readFileSync(join(unborn, "first.txt"), "utf8"), "first\n");
+  assert.equal(readText(join(unborn, "first.txt")), "first\n");
 });
 
 test("does not allow an option-like reset ref to override the selected mode", async () => {
@@ -309,7 +319,7 @@ test("does not allow an option-like reset ref to override the selected mode", as
   assert.ok(repository);
 
   await assert.rejects(repository.reset("--hard", "soft"));
-  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "valuable work\n");
+  assert.equal(readText(join(root, "file.txt")), "valuable work\n");
 });
 
 test("detects an in-progress merge operation", async () => {
