@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "local",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Humengchao/jb-git.git"
+  },
+  "homepage": "https://github.com/Humengchao/jb-git#readme",
+  "bugs": {
+    "url": "https://github.com/Humengchao/jb-git/issues"
+  },
   "engines": {
     "vscode": "^1.95.0"
   },
