@@ -26,12 +26,13 @@ test("discovers a repository and reads its status", async () => {
   assert.ok(repository);
   assert.equal(repository.info.rootPath, realpathSync(root));
   const status = await repository.status();
-  assert.equal(status.branch.head, "master");
+  const initialBranch = git(root, "branch", "--show-current");
+  assert.equal(status.branch.head, initialBranch);
   assert.deepEqual(status.changes.map((change) => change.path).sort(), ["README.md", "untracked.txt"]);
   assert.equal(status.changes.find((change) => change.path === "README.md")?.unstaged, true);
   assert.equal(status.changes.find((change) => change.path === "untracked.txt")?.kind, "untracked");
   const branches = await repository.branches();
-  assert.equal(branches.find((branch) => branch.name === "master")?.kind, "local");
+  assert.equal(branches.find((branch) => branch.name === initialBranch)?.kind, "local");
 });
 
 test("discovers nested and bare repositories", async () => {
