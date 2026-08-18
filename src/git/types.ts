@@ -76,6 +76,12 @@ export interface GitCommit {
   body: string;
 }
 
+export interface GitLogOptions {
+  order: "date" | "topological";
+  firstParent: boolean;
+  noMerges: boolean;
+}
+
 export interface GitCommitFile {
   status: string;
   path: string;

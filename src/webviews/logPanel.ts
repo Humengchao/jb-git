@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { ChangelistStore } from "../changelists/store";
-import { GitBranch, GitChange, GitCommit, GitCommitFile } from "../git/types";
+import { GitBranch, GitChange, GitCommit, GitCommitFile, GitLogOptions } from "../git/types";
 import { GitTraceEvent } from "../git/runner";
 import { RepositoryManager } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
@@ -11,10 +11,11 @@ import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
 
 type LogMessage =
-  | { type: "ready" }
+  | { type: "ready"; logOptions?: Partial<GitLogOptions> }
   | { type: "selectRepository"; root: string }
   | { type: "selectRef"; ref?: string }
   | { type: "setPathFilter"; path?: string }
+  | { type: "setLogOptions"; options: GitLogOptions }
   | { type: "selectCommit"; hash: string }
   | { type: "checkout"; name: string; kind: GitBranch["kind"] }
   | { type: "newBranch"; hash: string }
@@ -71,6 +72,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private selectedRef?: string;
   private selectedHash?: string;
   private filePath?: string;
+  private logOptions: GitLogOptions = { order: "date", firstParent: false, noMerges: false };
   private requestedTab: ToolTab = "log";
   private currentCommits: GitCommit[] = [];
   private traces: GitTraceEvent[] = [];
@@ -176,8 +178,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
       }
       const commits = this.selectedRef
-        ? await repository.logRef(this.selectedRef, 300, this.filePath)
-        : await repository.log(300, this.filePath);
+        ? await repository.logRef(this.selectedRef, 300, this.filePath, this.logOptions)
+        : await repository.log(300, this.filePath, this.logOptions);
       if (version !== this.updateVersion) return;
       this.currentCommits = commits;
       if (!this.selectedHash || !commits.some((commit) => commit.hash === this.selectedHash)) {
@@ -214,6 +216,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           branch: snapshot.status?.branch.head ?? "detached HEAD",
           selectedRef: this.selectedRef,
           filePath: this.filePath,
+          logOptions: this.logOptions,
           branches: snapshot.branches,
           commits,
           selection,
@@ -239,6 +242,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private async handleMessage(message: LogMessage): Promise<void> {
     try {
       if (message.type === "ready") {
+        this.logOptions = normalizeLogOptions(message.logOptions);
         await this.view?.webview.postMessage({ type: "activateTab", tab: this.requestedTab });
         return void this.update();
       }
@@ -442,6 +446,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         this.selectedHash = undefined;
         return void this.update();
       }
+      if (message.type === "setLogOptions") {
+        this.logOptions = normalizeLogOptions(message.options);
+        this.selectedHash = undefined;
+        return void this.update();
+      }
       if (message.type === "selectCommit") {
         if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
         const commit = this.currentCommits.find((item) => item.hash === message.hash);
@@ -633,6 +642,14 @@ async function requireTrusted(): Promise<boolean> {
   return false;
 }
 
+function normalizeLogOptions(options?: Partial<GitLogOptions>): GitLogOptions {
+  return {
+    order: options?.order === "topological" ? "topological" : "date",
+    firstParent: Boolean(options?.firstParent),
+    noMerges: Boolean(options?.noMerges),
+  };
+}
+
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -683,10 +700,10 @@ const logStyles = String.raw`
   .branch-name { overflow: hidden; text-overflow: ellipsis; }
   .commit-pane { overflow: hidden; display: grid; grid-template-rows: 35px minmax(0, 1fr); }
   .commit-filters { min-width: 0; display: flex; align-items: center; gap: 2px; padding: 4px 5px; overflow: visible; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
-  .commit-search { min-width: 125px; flex: 1 1 230px; height: 27px; padding: 3px 7px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .commit-search { width: 190px; min-width: 88px; max-width: 210px; flex: 0 1 190px; height: 27px; padding: 3px 7px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
   .filter-button { height: 27px; flex: none; padding: 0 7px; border-radius: 3px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
   .filter-button:hover, .filter-button.active { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
-  .sort-button { min-width: 29px; padding: 0 5px; font-size: 15px; }
+  .sort-button { min-width: 31px; padding: 0 6px; font-size: 15px; }
   .filter-popover { position: fixed; z-index: 1000; width: min(360px, calc(100vw - 12px)); padding: 8px; border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 6px; background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 8px 24px rgba(0,0,0,.38); }
   .filter-popover-title { margin: 0 0 6px; color: var(--vscode-descriptionForeground); }
   .filter-popover input { width: 100%; height: 28px; padding: 3px 7px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
@@ -703,6 +720,7 @@ const logStyles = String.raw`
   .commit-row > div { min-width: 0; padding: 0 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .subject-cell { height: 27px; display: flex; align-items: center; gap: 5px; padding-left: 0 !important; }
   canvas { flex: none; width: 72px; height: 27px; }
+  canvas.graph-interactive { cursor: pointer; }
   .refs { display: flex; gap: 3px; flex: none; max-width: 180px; overflow: hidden; }
   .ref { padding: 1px 5px; border-radius: 8px; background: color-mix(in srgb, var(--vscode-charts-blue) 24%, transparent); color: var(--vscode-foreground); font-size: 10px; }
   .subject { overflow: hidden; text-overflow: ellipsis; }
@@ -736,6 +754,7 @@ const logStyles = String.raw`
   .context-menu-item:disabled { opacity: .45; pointer-events: none; }
   .context-menu-icon { width: 17px; text-align: center; color: var(--vscode-descriptionForeground); }
   .context-menu-separator { height: 1px; margin: 5px 3px; background: var(--vscode-menu-separatorBackground, var(--vscode-panel-border)); }
+  .context-menu-heading { padding: 6px 9px 3px; color: var(--vscode-descriptionForeground); font-weight: 600; }
   .empty { padding: 28px 14px; text-align: center; color: var(--vscode-descriptionForeground); }
   .error { margin: 10px; padding: 8px; color: var(--vscode-errorForeground); border: 1px solid var(--vscode-inputValidation-errorBorder); background: var(--vscode-inputValidation-errorBackground); }
   .console-toolbar { display: flex; align-items: center; gap: 5px; padding: 5px 8px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
@@ -814,7 +833,13 @@ const logScript = String.raw`
   let selectedBranchKeys = new Set(uiState.selectedBranchKeys || []);
   let authorFilter = uiState.authorFilter || '';
   let dateFilter = uiState.dateFilter || 'all';
-  let sortAscending = Boolean(uiState.sortAscending);
+  let sortMode = uiState.sortMode === 'topological' ? 'topological' : 'date';
+  let firstParent = Boolean(uiState.firstParent);
+  let noMerges = Boolean(uiState.noMerges);
+  let collapsedGraphSeries = new Set(uiState.collapsedGraphSeries || []);
+  let selectedGraphSeries = uiState.selectedGraphSeries || '';
+  let hoveredGraphSeries = '';
+  let currentGraphFragments = new Map();
   let pendingCommitHash;
   let selectedFilePath;
   let openMenu;
@@ -864,6 +889,7 @@ const logScript = String.raw`
     closeContextMenu();
     const menu = node('div', 'context-menu'); menu.setAttribute('role', 'menu');
     for (const item of items) {
+      if (item.heading) { menu.append(node('div', 'context-menu-heading', item.heading)); continue; }
       if (item.separator) { menu.append(node('div', 'context-menu-separator')); continue; }
       const entry = button('', item.label, () => { closeContextMenu(); item.run(); }, 'context-menu-item');
       entry.disabled = Boolean(item.disabled); entry.setAttribute('role', 'menuitem');
@@ -1246,10 +1272,43 @@ const logScript = String.raw`
     const pathValue = state.filePath ? compactPath(state.filePath) : '';
     const paths = button('', 'Filter by changed path', () => showPathFilterPopover(paths), 'filter-button' + (state.filePath ? ' active' : ''));
     paths.append(node('span', '', 'Paths'), node('span', 'filter-value', pathValue ? ': ' + pathValue : ''), node('span', '', '⌄'));
-    const sort = button(sortAscending ? '↑' : '↓', sortAscending ? 'Oldest commits first' : 'Newest commits first', () => {
-      sortAscending = !sortAscending; saveUiState({ sortAscending }); sort.textContent = sortAscending ? '↑' : '↓'; sort.title = sortAscending ? 'Oldest commits first' : 'Newest commits first'; renderCommitRows();
-    }, 'filter-button sort-button');
+    const sort = button('⇵', 'Graph and sort options', () => showMenuForElement(sort, graphOptionItems()), 'filter-button sort-button' + ((firstParent || noMerges || sortMode === 'topological') ? ' active' : ''));
     bar.append(input, branch, user, date, paths, sort); return bar;
+  }
+
+  function graphOptionItems() {
+    return [
+      { heading: 'Sort' },
+      { icon: sortMode === 'date' ? '✓' : '', label: 'By Commit Date', run: () => setLogOptions({ order: 'date' }) },
+      { icon: sortMode === 'topological' ? '✓' : '', label: 'Topologically', run: () => setLogOptions({ order: 'topological' }) },
+      { separator: true },
+      { heading: 'Options' },
+      { icon: firstParent ? '✓' : '', label: 'First Parent', run: () => setLogOptions({ firstParent: !firstParent }) },
+      { icon: noMerges ? '✓' : '', label: 'No Merges', run: () => setLogOptions({ noMerges: !noMerges }) },
+      { separator: true },
+      { heading: 'Branch Actions' },
+      { icon: '', label: 'Collapse Linear Branches', disabled: !currentGraphFragments.size, run: collapseLinearBranches },
+      { icon: '', label: 'Expand Linear Branches', disabled: !collapsedGraphSeries.size, run: expandLinearBranches },
+    ];
+  }
+
+  function setLogOptions(update) {
+    if (update.order) sortMode = update.order;
+    if (Object.prototype.hasOwnProperty.call(update, 'firstParent')) firstParent = Boolean(update.firstParent);
+    if (Object.prototype.hasOwnProperty.call(update, 'noMerges')) noMerges = Boolean(update.noMerges);
+    collapsedGraphSeries.clear(); selectedGraphSeries = ''; hoveredGraphSeries = '';
+    saveUiState({ sortMode, firstParent, noMerges, collapsedGraphSeries: [], selectedGraphSeries: '' });
+    post('setLogOptions', { options: { order: sortMode, firstParent, noMerges } });
+  }
+
+  function collapseLinearBranches() {
+    collapsedGraphSeries = new Set(currentGraphFragments.keys()); selectedGraphSeries = ''; hoveredGraphSeries = '';
+    saveUiState({ collapsedGraphSeries: [...collapsedGraphSeries], selectedGraphSeries: '' }); renderCommitRows();
+  }
+
+  function expandLinearBranches() {
+    collapsedGraphSeries.clear(); selectedGraphSeries = ''; hoveredGraphSeries = '';
+    saveUiState({ collapsedGraphSeries: [], selectedGraphSeries: '' }); renderCommitRows();
   }
 
   function branchFilterItems() {
@@ -1314,13 +1373,15 @@ const logScript = String.raw`
   function renderCommitRows(existing) {
     const list = existing || document.getElementById('commit-list'); if (!list) return;
     list.replaceChildren();
-    const commits = filteredCommits(); const graph = graphLayout(commits);
+    const model = graphModel(filteredCommits()); const commits = model.commits; const graph = graphLayout(commits, model);
+    currentGraphFragments = model.fragments;
+    for (const id of [...collapsedGraphSeries]) if (!currentGraphFragments.has(id)) collapsedGraphSeries.delete(id);
     if (!commits.length) { list.append(node('div', 'empty', 'No matching commits')); return; }
     commits.forEach((commit, index) => {
       const selected = (pendingCommitHash || state.selection?.commit.hash) === commit.hash;
       const row = node('div', 'commit-row' + (selected ? ' selected' : '')); row.dataset.hash = commit.hash;
       row.tabIndex = 0; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
-      const subject = node('div', 'subject-cell'); const canvas = node('canvas'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(graph[index]); subject.append(canvas);
+      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(graph[index]); canvas.title = 'Click a graph line to collapse or expand its branch series'; attachGraphInteraction(canvas); subject.append(canvas);
       const refs = node('div', 'refs'); for (const ref of (commit.refs || []).slice(0, 2)) refs.append(node('span', 'ref', shortRef(ref))); subject.append(refs, node('span', 'subject', commit.subject || '(no subject)'));
       row.append(subject, node('div', '', commit.author), node('div', 'muted', formatDate(commit.authoredAt)), node('div', 'muted', commit.hash.slice(0, 8)));
       const select = () => {
@@ -1374,10 +1435,6 @@ const logScript = String.raw`
       else cutoff = new Date(now.getTime() - ({ week: 7, month: 30, year: 365 }[dateFilter] || 0) * 86400000);
       commits = commits.filter(commit => new Date(commit.authoredAt) >= cutoff);
     }
-    commits.sort((left, right) => {
-      const result = new Date(right.authoredAt).getTime() - new Date(left.authoredAt).getTime();
-      return sortAscending ? -result : result;
-    });
     return commits;
   }
 
@@ -1517,23 +1574,157 @@ const logScript = String.raw`
     if (persist) saveUiState({ messagePaneHeight: height });
   }
 
-  function graphLayout(commits) {
-    const lanes = []; return commits.map(commit => {
-      let lane = lanes.indexOf(commit.hash); if (lane < 0) { lane = lanes.findIndex(value => !value); if (lane < 0) lane = lanes.length; lanes[lane] = commit.hash; }
-      const before = lanes.map(Boolean); const parents = commit.parents || [];
-      if (parents.length) { lanes[lane] = parents[0]; for (let i = 1; i < parents.length; i++) { if (!lanes.includes(parents[i])) lanes.splice(lane + i, 0, parents[i]); } } else lanes.splice(lane, 1);
-      return { lane, before, after: lanes.map(Boolean), parentLanes: parents.map(parent => lanes.indexOf(parent)) };
+  const graphEdgeKey = (child, parent) => child + '>' + parent;
+
+  function graphModel(commits) {
+    const byHash = new Map(commits.map(commit => [commit.hash, commit]));
+    const parents = new Map(); const children = new Map(commits.map(commit => [commit.hash, []]));
+    for (const commit of commits) {
+      const visibleParents = (commit.parents || []).filter(hash => byHash.has(hash)); parents.set(commit.hash, visibleParents);
+      for (const parent of visibleParents) children.get(parent).push(commit.hash);
+    }
+    const isLinearMiddle = hash => {
+      const commit = byHash.get(hash);
+      return Boolean(commit) && (parents.get(hash) || []).length === 1 && (children.get(hash) || []).length === 1 && !(commit.refs || []).length;
+    };
+    const fragments = new Map(); const seriesByEdge = new Map();
+    for (const commit of commits) {
+      if (isLinearMiddle(commit.hash)) continue;
+      for (const firstParentHash of parents.get(commit.hash) || []) {
+        const edges = []; const middle = []; let childHash = commit.hash; let parentHash = firstParentHash;
+        while (parentHash) {
+          edges.push(graphEdgeKey(childHash, parentHash));
+          if (!isLinearMiddle(parentHash)) break;
+          middle.push(parentHash); childHash = parentHash; parentHash = (parents.get(parentHash) || [])[0];
+        }
+        const bottomHash = parentHash || childHash; const id = graphEdgeKey(commit.hash, bottomHash);
+        for (const edge of edges) seriesByEdge.set(edge, id);
+        if (middle.length >= 2) fragments.set(id, { id, topHash: commit.hash, firstParentHash, bottomHash, middle });
+      }
+    }
+    const hidden = new Set(); const replacements = new Map(); const dottedEdges = new Set();
+    for (const id of collapsedGraphSeries) {
+      const fragment = fragments.get(id); if (!fragment) continue;
+      for (const hash of fragment.middle) hidden.add(hash);
+      replacements.set(graphEdgeKey(fragment.topHash, fragment.firstParentHash), fragment.bottomHash);
+      const replacementEdge = graphEdgeKey(fragment.topHash, fragment.bottomHash);
+      seriesByEdge.set(replacementEdge, id); dottedEdges.add(replacementEdge);
+    }
+    const visibleCommits = commits.filter(commit => !hidden.has(commit.hash)); const visibleHashes = new Set(visibleCommits.map(commit => commit.hash));
+    const displayParents = new Map();
+    for (const commit of visibleCommits) {
+      displayParents.set(commit.hash, (parents.get(commit.hash) || []).map(parent => replacements.get(graphEdgeKey(commit.hash, parent)) || parent).filter(parent => visibleHashes.has(parent)));
+    }
+    return { commits: visibleCommits, parents: displayParents, fragments, seriesByEdge, dottedEdges };
+  }
+
+  function graphLayout(commits, model) {
+    const positions = new Map(commits.map((commit, index) => [commit.hash, index])); const lanes = [];
+    return commits.map((commit, index) => {
+      for (let laneIndex = 0; laneIndex < lanes.length; laneIndex++) {
+        const target = lanes[laneIndex]; const targetPosition = target && positions.get(target.hash);
+        if (target && target.hash !== commit.hash && (targetPosition === undefined || targetPosition < index)) lanes[laneIndex] = null;
+      }
+      let lane = lanes.findIndex(target => target?.hash === commit.hash);
+      const commitParents = model.parents.get(commit.hash) || [];
+      if (lane < 0) {
+        lane = lanes.findIndex(target => !target); if (lane < 0) lane = lanes.length;
+        const firstSeries = commitParents[0] ? model.seriesByEdge.get(graphEdgeKey(commit.hash, commitParents[0])) : commit.hash;
+        lanes[lane] = { hash: commit.hash, seriesId: firstSeries || commit.hash, dotted: false };
+      }
+      const incoming = lanes.map(target => target ? { seriesId: target.seriesId, dotted: target.dotted } : null);
+      const connections = []; const occupied = new Set();
+      commitParents.forEach((parent, parentIndex) => {
+        const edge = graphEdgeKey(commit.hash, parent); const seriesId = model.seriesByEdge.get(edge) || edge; const dotted = model.dottedEdges.has(edge);
+        let targetLane = lanes.findIndex((target, candidate) => candidate !== lane && target?.hash === parent);
+        if (parentIndex === 0 && targetLane < 0) {
+          targetLane = lane; lanes[lane] = { hash: parent, seriesId, dotted };
+        } else {
+          if (targetLane < 0) {
+            targetLane = lanes.findIndex((target, candidate) => candidate !== lane && !target && !occupied.has(candidate));
+            if (targetLane < 0) targetLane = lanes.length;
+            lanes[targetLane] = { hash: parent, seriesId, dotted };
+          }
+          connections.push({ from: lane, to: targetLane, seriesId, dotted });
+          if (parentIndex === 0) lanes[lane] = null;
+        }
+        occupied.add(targetLane);
+      });
+      if (!commitParents.length) lanes[lane] = null;
+      for (let laneIndex = 0; laneIndex < lanes.length; laneIndex++) {
+        const target = lanes[laneIndex]; const targetPosition = target && positions.get(target.hash);
+        if (target && (targetPosition === undefined || targetPosition <= index)) lanes[laneIndex] = null;
+      }
+      while (lanes.length && !lanes[lanes.length - 1]) lanes.pop();
+      const outgoing = lanes.map(target => target ? { seriesId: target.seriesId, dotted: target.dotted } : null);
+      const nodeSeriesId = outgoing[lane]?.seriesId || incoming[lane]?.seriesId || connections[0]?.seriesId || commit.hash;
+      return { lane, incoming, outgoing, connections, nodeSeriesId };
     });
   }
 
+  function graphColor(seriesId) {
+    let hash = 0; for (let index = 0; index < seriesId.length; index++) hash = ((hash << 5) - hash + seriesId.charCodeAt(index)) | 0;
+    return colors[Math.abs(hash) % colors.length];
+  }
+
+  function graphSegments(graph) {
+    const scale = 2; const x = lane => 8 * scale + lane * 12 * scale; const mid = 13.5 * scale; const bottom = 27 * scale; const segments = [];
+    graph.incoming.forEach((line, lane) => { if (line) segments.push({ x1: x(lane), y1: 0, x2: x(lane), y2: mid, ...line }); });
+    graph.outgoing.forEach((line, lane) => { if (line) segments.push({ x1: x(lane), y1: mid, x2: x(lane), y2: bottom, ...line }); });
+    graph.connections.forEach(line => segments.push({ x1: x(line.from), y1: mid, x2: x(line.to), y2: bottom, seriesId: line.seriesId, dotted: line.dotted }));
+    return segments;
+  }
+
   function drawGraphs() {
+    const activeSeries = hoveredGraphSeries || selectedGraphSeries;
     document.querySelectorAll('canvas[data-graph]').forEach(canvas => {
-      const graph = JSON.parse(canvas.dataset.graph); const ctx = canvas.getContext('2d'); const scale = 2; const gap = 12 * scale; const x = index => 8 * scale + index * gap; const mid = 13.5 * scale;
-      ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.lineWidth = 1.5 * scale; ctx.lineCap = 'round';
-      graph.before.forEach((active, lane) => { if (!active) return; ctx.strokeStyle = colors[lane % colors.length]; ctx.beginPath(); ctx.moveTo(x(lane), 0); ctx.lineTo(x(lane), mid); ctx.stroke(); });
-      graph.after.forEach((active, lane) => { if (!active) return; ctx.strokeStyle = colors[lane % colors.length]; ctx.beginPath(); ctx.moveTo(x(lane), mid); ctx.lineTo(x(lane), 54); ctx.stroke(); });
-      graph.parentLanes.forEach(parentLane => { if (parentLane < 0 || parentLane === graph.lane) return; ctx.strokeStyle = colors[parentLane % colors.length]; ctx.beginPath(); ctx.moveTo(x(graph.lane), mid); ctx.lineTo(x(parentLane), 54); ctx.stroke(); });
-      ctx.fillStyle = colors[graph.lane % colors.length]; ctx.beginPath(); ctx.arc(x(graph.lane), mid, 4 * scale, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = getComputedStyle(document.body).backgroundColor; ctx.lineWidth = 1.3 * scale; ctx.stroke();
+      const graph = JSON.parse(canvas.dataset.graph); const ctx = canvas.getContext('2d'); const scale = 2; const x = lane => 8 * scale + lane * 12 * scale; const mid = 13.5 * scale;
+      ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.lineCap = 'round';
+      for (const segment of graphSegments(graph)) {
+        ctx.globalAlpha = activeSeries && segment.seriesId !== activeSeries ? .2 : 1;
+        ctx.lineWidth = (segment.seriesId === activeSeries ? 2.6 : 1.5) * scale; ctx.strokeStyle = graphColor(segment.seriesId);
+        ctx.setLineDash(segment.dotted ? [3 * scale, 3 * scale] : []); ctx.beginPath(); ctx.moveTo(segment.x1, segment.y1); ctx.lineTo(segment.x2, segment.y2); ctx.stroke();
+      }
+      ctx.setLineDash([]); ctx.globalAlpha = activeSeries && graph.nodeSeriesId !== activeSeries ? .25 : 1;
+      ctx.fillStyle = graphColor(graph.nodeSeriesId); ctx.beginPath(); ctx.arc(x(graph.lane), mid, (graph.nodeSeriesId === activeSeries ? 4.8 : 4) * scale, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = getComputedStyle(document.body).backgroundColor; ctx.lineWidth = 1.3 * scale; ctx.stroke(); ctx.globalAlpha = 1;
+    });
+  }
+
+  function graphSeriesAt(canvas, event) {
+    const graph = JSON.parse(canvas.dataset.graph); const bounds = canvas.getBoundingClientRect();
+    const point = { x: (event.clientX - bounds.left) * canvas.width / bounds.width, y: (event.clientY - bounds.top) * canvas.height / bounds.height };
+    let selected = ''; let nearest = 12;
+    for (const segment of graphSegments(graph)) {
+      const distance = pointToSegmentDistance(point.x, point.y, segment.x1, segment.y1, segment.x2, segment.y2);
+      if (distance < nearest) { nearest = distance; selected = segment.seriesId; }
+    }
+    const nodeX = 16 + graph.lane * 24; const nodeDistance = Math.hypot(point.x - nodeX, point.y - 27);
+    if (nodeDistance < nearest) selected = graph.nodeSeriesId;
+    return selected;
+  }
+
+  function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1; const dy = y2 - y1; const length = dx * dx + dy * dy;
+    const ratio = length ? Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / length)) : 0;
+    return Math.hypot(px - (x1 + ratio * dx), py - (y1 + ratio * dy));
+  }
+
+  function attachGraphInteraction(canvas) {
+    canvas.addEventListener('mousemove', event => {
+      const series = graphSeriesAt(canvas, event); canvas.style.cursor = series ? 'pointer' : 'default';
+      if (series !== hoveredGraphSeries) { hoveredGraphSeries = series; drawGraphs(); }
+    });
+    canvas.addEventListener('mouseleave', () => { if (hoveredGraphSeries) { hoveredGraphSeries = ''; drawGraphs(); } });
+    canvas.addEventListener('click', event => {
+      const series = graphSeriesAt(canvas, event); if (!series) return;
+      event.preventDefault(); event.stopPropagation(); selectedGraphSeries = series;
+      if (currentGraphFragments.has(series)) {
+        if (collapsedGraphSeries.has(series)) collapsedGraphSeries.delete(series); else collapsedGraphSeries.add(series);
+        hoveredGraphSeries = ''; saveUiState({ collapsedGraphSeries: [...collapsedGraphSeries], selectedGraphSeries }); renderCommitRows();
+      } else {
+        saveUiState({ selectedGraphSeries }); drawGraphs();
+      }
     });
   }
 
@@ -1552,6 +1743,11 @@ const logScript = String.raw`
   window.addEventListener('message', event => {
     if (event.data.type === 'state') {
       state = event.data.state; pendingCommitHash = undefined;
+      if (state.logOptions) {
+        sortMode = state.logOptions.order === 'topological' ? 'topological' : 'date';
+        firstParent = Boolean(state.logOptions.firstParent); noMerges = Boolean(state.logOptions.noMerges);
+        saveUiState({ sortMode, firstParent, noMerges });
+      }
       const liveBranchKeys = new Set((state.branches || []).map(branchKey));
       selectedBranchKeys = new Set([...selectedBranchKeys].filter(key => liveBranchKeys.has(key)));
       if (!selectedBranchKeys.size && state.selectedRef) {
@@ -1575,5 +1771,5 @@ const logScript = String.raw`
   document.addEventListener('pointerdown', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); });
   document.addEventListener('scroll', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, true);
   document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(); });
-  post('ready'); render();
+  post('ready', { logOptions: { order: sortMode, firstParent, noMerges } }); render();
 `;

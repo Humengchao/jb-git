@@ -9,6 +9,7 @@ import {
   GitCommitOptions,
   GitCommit,
   GitCommitFile,
+  GitLogOptions,
   GitBlameEntry,
   GitDiffHunk,
   GitPullStrategy,
@@ -88,19 +89,27 @@ export class GitRepository {
     return { kind: "none", canContinue: false, canAbort: false };
   }
 
-  public async log(limit = 50, filePath?: string): Promise<GitCommit[]> {
-    return this.readLog(["--all"], limit, filePath);
+  public async log(limit = 50, filePath?: string, options?: Partial<GitLogOptions>): Promise<GitCommit[]> {
+    return this.readLog(["--all"], limit, filePath, options);
   }
 
-  public async logRef(ref: string, limit = 200, filePath?: string): Promise<GitCommit[]> {
+  public async logRef(ref: string, limit = 200, filePath?: string, options?: Partial<GitLogOptions>): Promise<GitCommit[]> {
     const revision = await this.resolveCommit(ref);
-    return this.readLog([revision], limit, filePath);
+    return this.readLog([revision], limit, filePath, options);
   }
 
-  private async readLog(revisions: readonly string[], limit: number, filePath?: string): Promise<GitCommit[]> {
+  private async readLog(
+    revisions: readonly string[],
+    limit: number,
+    filePath?: string,
+    options: Partial<GitLogOptions> = {},
+  ): Promise<GitCommit[]> {
+    const order = options.order === "topological" ? "--topo-order" : "--date-order";
     const output = await this.runner.text([
       "log",
-      "--topo-order",
+      order,
+      ...(options.firstParent ? ["--first-parent"] : []),
+      ...(options.noMerges ? ["--no-merges"] : []),
       `--max-count=${Math.max(1, Math.min(limit, 500))}`,
       "--date=iso-strict",
       "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B%x01",

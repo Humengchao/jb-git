@@ -53,6 +53,36 @@ test("discovers nested and bare repositories", async () => {
   assert.ok(await discoverRepository(bare, new GitRunner()));
 });
 
+test("applies IntelliJ-style Git log graph options in Git", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-log-options-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "history.txt"), "initial\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "initial");
+  const main = git(root, "branch", "--show-current");
+  git(root, "checkout", "-qb", "feature");
+  writeFileSync(join(root, "feature.txt"), "feature\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "feature work");
+  const featureRevision = git(root, "rev-parse", "HEAD");
+  git(root, "checkout", "-q", main);
+  writeFileSync(join(root, "main.txt"), "main\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "main work");
+  git(root, "merge", "--no-ff", "-qm", "merge feature", "feature");
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const firstParent = await repository.logRef("HEAD", 20, undefined, { order: "topological", firstParent: true, noMerges: false });
+  assert.equal(firstParent.some((commit) => commit.hash === featureRevision), false);
+  assert.equal(firstParent.some((commit) => commit.parents.length > 1), true);
+  const noMerges = await repository.logRef("HEAD", 20, undefined, { order: "date", firstParent: false, noMerges: true });
+  assert.equal(noMerges.some((commit) => commit.parents.length > 1), false);
+  assert.equal(noMerges.some((commit) => commit.hash === featureRevision), true);
+});
+
 test("runs commit, branch, and stash operations through Git Core", async () => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-operations-"));
   git(root, "init", "-q");
