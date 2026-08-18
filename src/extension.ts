@@ -5,6 +5,8 @@ import { BranchNode, RepositoryTreeProvider } from "./views/repositoryTree";
 import { ChangeNode, ChangesTreeProvider } from "./views/changesTree";
 import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
 import { CommitNode, HistoryTreeProvider } from "./views/historyTree";
+import { ChangelistChangeNode, ChangelistNode, ChangelistTreeProvider } from "./views/changelistTree";
+import { ChangelistStore } from "./changelists/store";
 import { RepositoryManager } from "./repositoryManager";
 
 function workspacePaths(): string[] {
@@ -42,13 +44,17 @@ async function runWithNotification<T>(title: string, task: () => Promise<T>): Pr
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const runner = new GitRunner(configurationGitPath());
   const manager = new RepositoryManager(runner, workspacePaths);
+  const changelistStore = new ChangelistStore(context.workspaceState);
+  await changelistStore.load();
   const repositories = new RepositoryTreeProvider(manager);
   const changes = new ChangesTreeProvider(manager);
   const diffProvider = new DiffContentProvider();
   const history = new HistoryTreeProvider(manager);
+  const changelists = new ChangelistTreeProvider(manager, changelistStore);
   const repositoryView = vscode.window.createTreeView("jbGit.repositories", { treeDataProvider: repositories, showCollapseAll: true });
   const changesView = vscode.window.createTreeView("jbGit.changes", { treeDataProvider: changes, showCollapseAll: true });
   const historyView = vscode.window.createTreeView("jbGit.history", { treeDataProvider: history, showCollapseAll: true });
+  const changelistsView = vscode.window.createTreeView("jbGit.changelists", { treeDataProvider: changelists, showCollapseAll: true });
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   branchStatus.command = "jbGit.openChanges";
   branchStatus.tooltip = "Open JB Git Local Changes";
@@ -81,12 +87,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     manager,
+    changelistStore,
     repositories,
     changes,
     history,
+    changelists,
     repositoryView,
     changesView,
     historyView,
+    changelistsView,
     diffProvider,
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
@@ -226,6 +235,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       if (!options) return;
       await runWithNotification("Stashing changes", () => manager.stash(first.repository.info.rootPath, message?.trim() || undefined, options.includeUntracked, options.keepIndex));
+    }),
+    vscode.commands.registerCommand("jbGit.createChangelist", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const name = await vscode.window.showInputBox({ prompt: "New Changelist name", placeHolder: "Feature work" });
+      if (!name?.trim()) return;
+      await changelistStore.create(first.repository.info.rootPath, name.trim());
+    }),
+    vscode.commands.registerCommand("jbGit.moveToChangelist", async (node?: ChangelistChangeNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      const lists = changelistStore.lists(node.repositoryRoot).filter((list) => list.id !== node.changelistId);
+      const target = await vscode.window.showQuickPick(lists.map((list) => ({ label: list.name, list })), { placeHolder: "Move change to Changelist" });
+      if (!target) return;
+      await changelistStore.assign(node.repositoryRoot, node.change.path, target.list.id);
+    }),
+    vscode.commands.registerCommand("jbGit.commitChangelist", async (node?: ChangelistNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      const snapshot = manager.snapshot(node.repositoryRoot);
+      if (!snapshot?.status) return;
+      const selected = new Set(snapshot.status.changes
+        .filter((change) => changelistStore.listForFile(node.repositoryRoot, change.path).id === node.changelist.id)
+        .map((change) => change.path));
+      if (selected.size === 0) {
+        await vscode.window.showInformationMessage("This Changelist has no local changes.");
+        return;
+      }
+      const stagedOutside = snapshot.status.changes.some((change) => change.staged && !selected.has(change.path));
+      if (stagedOutside) {
+        await vscode.window.showWarningMessage("Cannot commit this Changelist while unrelated staged changes exist. Commit or unstage them first.");
+        return;
+      }
+      const message = await vscode.window.showInputBox({ prompt: `Commit Changelist '${node.changelist.name}'` });
+      if (!message?.trim()) return;
+      try {
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Staging Changelist '${node.changelist.name}'` },
+          () => manager.stage(node.repositoryRoot, [...selected]),
+        );
+      } catch (error) {
+        await vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      const revision = await runWithNotification("Creating Changelist commit", () => manager.commit(node.repositoryRoot, message.trim()));
+      if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
     }),
     vscode.commands.registerCommand("jbGit.checkoutBranch", async (node?: BranchNode) => {
       if (!(await requireTrustedWorkspace())) return;

@@ -86,6 +86,18 @@
         "title": "JB Git: Stash Changes"
       },
       {
+        "command": "jbGit.createChangelist",
+        "title": "JB Git: Create Changelist"
+      },
+      {
+        "command": "jbGit.moveToChangelist",
+        "title": "JB Git: Move to Changelist"
+      },
+      {
+        "command": "jbGit.commitChangelist",
+        "title": "JB Git: Commit Changelist"
+      },
+      {
         "command": "jbGit.initializeRepository",
         "title": "JB Git: Initialize Repository"
       },
@@ -135,6 +147,11 @@
           "id": "jbGit.history",
           "name": "History",
           "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.changelists",
+          "name": "Changelists",
+          "when": "jbGit.hasWorkspace"
         }
       ]
     },
@@ -142,7 +159,7 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history",
+          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists",
           "group": "navigation@1"
         },
         {
@@ -169,6 +186,16 @@
           "command": "jbGit.showHistory",
           "when": "view == jbGit.history",
           "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.createChangelist",
+          "when": "view == jbGit.changelists",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jbGit.commitChangelist",
+          "when": "view == jbGit.changelists",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -206,6 +233,21 @@
           "command": "jbGit.discardChange",
           "when": "view == jbGit.changes && viewItem == jbGit.change.unstaged",
           "group": "inline@2"
+        },
+        {
+          "command": "jbGit.moveToChangelist",
+          "when": "view == jbGit.changelists && viewItem == jbGit.changelist.change",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.openDiff",
+          "when": "view == jbGit.changelists && viewItem == jbGit.changelist.change",
+          "group": "inline@0"
+        },
+        {
+          "command": "jbGit.commitChangelist",
+          "when": "view == jbGit.changelists && (viewItem == jbGit.changelist || viewItem == jbGit.changelist.active)",
+          "group": "inline@1"
         }
       ]
     },
