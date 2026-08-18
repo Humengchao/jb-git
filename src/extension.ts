@@ -203,8 +203,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { placeHolder: "Clone type" },
       );
       if (!mode) return;
+      const cloneRoot = workspacePaths()[0] ?? ".";
       await runWithNotification(`Cloning ${source.trim()}`, () => manager.clone(source.trim(), destination.trim(), mode.bare));
-      if (!mode.bare) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(path.resolve(destination.trim())), { forceNewWindow: false });
+      if (!mode.bare) await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(path.resolve(cloneRoot, destination.trim())), { forceNewWindow: false });
     }),
     vscode.commands.registerCommand("jbGit.fetch", async () => {
       if (!(await requireTrustedWorkspace())) return;
@@ -650,7 +651,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { placeHolder: "Select a remote to push" },
       ));
       if (!name) return;
-      const branch = first.status?.branch.head;
+      const branch = manager.snapshot(root)?.status?.branch.head;
       if (!branch) return void vscode.window.showInformationMessage("Push requires a checked-out local branch.");
       const mode = await vscode.window.showQuickPick(
         [{ label: "Push", force: false }, { label: "Force with lease", force: true }],

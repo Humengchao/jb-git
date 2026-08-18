@@ -332,12 +332,20 @@ export class GitRepository {
 
   public async submodules(): Promise<GitSubmodule[]> {
     const output = await this.runner.text(["submodule", "status", "--recursive"], { cwd: this.info.rootPath });
-    return output.split(/\r?\n/).filter(Boolean).map((line) => {
-      const match = /^([-+ ])([0-9a-f]+)\s+([^ ]+)(?:\s+\(([^)]+)\))?/.exec(line);
+    const entries = output.split(/\r?\n/).filter(Boolean).map((line) => {
+      const match = /^([-+ ])([0-9a-f]+)\s+(.+?)(?:\s+\([^)]+\))?$/.exec(line);
       return match
-        ? { status: match[1], oid: match[2], path: match[3], url: match[4] }
+        ? { status: match[1], oid: match[2], path: match[3] }
         : { status: "?", oid: "", path: line.trim() };
     });
+    return Promise.all(entries.map(async (entry) => {
+      try {
+        const url = trimOutput(await this.runner.text(["config", "--get", `submodule.${entry.path}.url`], { cwd: this.info.rootPath }));
+        return url ? { ...entry, url } : entry;
+      } catch {
+        return entry;
+      }
+    }));
   }
 
   public async updateSubmodules(init = true, recursive = true, paths: readonly string[] = []): Promise<void> {

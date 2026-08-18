@@ -6,12 +6,14 @@ The implementation is intentionally layered:
 
 - Git Core executes the user's system `git` binary with safe argument arrays.
 - Repository state is parsed from machine-readable Git output and refreshed incrementally.
-- The extension host owns Git operations; the UI is built with VS Code Tree Views and, later, Webviews.
-- Changelists, Shelf, Log Graph, and conflict workflows are added in later milestones.
+- The extension host owns Git operations; the UI is built with VS Code Tree Views and output/diff surfaces.
+- Changelists, Shelf, hunk staging, history, conflict actions, Worktrees, Remotes, Stashes, and Submodules are implemented as independent layers.
 
 ## Current status
 
-The first milestone provides repository discovery, status parsing, a Local Changes tree, branch information, and safe stage/unstage/discard/fetch/checkout/init commands.
+The local MVP now covers repository discovery, porcelain-v2 status, Local Changes with staged/unstaged/untracked/conflict groups, file and hunk stage/unstage, diff, commit/amend/sign-off/no-verify, branches/tags, fetch/pull/push, remotes, stash, shelf, changelists, history/file history, blame, merge/rebase/cherry-pick/revert/reset, continue/abort/skip, conflict ours/theirs/mark-resolved, Worktrees, Submodules, Clone, Sparse Checkout, Patch import, LFS pull, and Bisect.
+
+This is behavior-compatible Git infrastructure, not a claim of complete IntelliJ UI parity. The remaining high-risk work is tracked in `docs/implementation-plan.md`: a full interactive log-graph Webview, three-way conflict editor, interactive rebase editor, multi-root transactional rollback, Git-version capability fallbacks, and release/remote-host hardening.
 
 ## Development
 
@@ -19,6 +21,7 @@ The first milestone provides repository discovery, status parsing, a Local Chang
 npm install
 npm run compile
 npm test
+npm run package
 ```
 
 Press `F5` in VS Code to launch the Extension Development Host.
@@ -26,4 +29,3 @@ Press `F5` in VS Code to launch the Extension Development Host.
 ## Scope and attribution
 
 The feature behavior is informed by the public IntelliJ Community Git/VCS implementation and documentation. This project is an independent TypeScript implementation; it does not copy JetBrains source code, UI assets, or trademarks.
-

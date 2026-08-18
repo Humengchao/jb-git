@@ -26,3 +26,18 @@ The public IntelliJ Community repository is used as a behavior and test-case ref
 
 The implementation is clean-room TypeScript. Any future source reuse requires per-file license review and attribution.
 
+## Implementation checkpoint
+
+The staged local implementation currently reaches the following checkpoint:
+
+| Milestone | Status | Delivered |
+| --- | --- | --- |
+| P0 | Foundation complete | Reference map, risk notes, parser and hunk-operation tests |
+| P1 | Complete for local extension host | Git Core runner, repository discovery, porcelain-v2 status, serialized mutations, operation-state detection |
+| P2 | Complete for MVP workflows | Local Changes, diff, stage/unstage/discard, commit, branch, fetch/pull/push, remotes, clone |
+| P3 | Core complete, UI intentionally compact | Changelists, hunk partial commit, Shelf, Patch import, History, File History, Blame, Stash |
+| P4 | Core workflows complete | Merge/Rebase/Cherry-pick/Revert/Reset, continue/abort/skip, conflict ours/theirs/mark-resolved, Bisect |
+| P5 | Partial | Worktree, Submodule, Sparse Checkout, LFS pull; large-repository tuning and full multi-root transaction semantics remain |
+| P6 | Pending | Git-version fallback matrix, accessibility, remote extension host testing, CI/release/signing |
+
+The current code deliberately stops short of claiming complete IntelliJ parity. The remaining work should be implemented as separate commits: a Webview-backed commit graph and three-way merge editor, interactive rebase sequencing, full multi-root rollback, capability-based command fallbacks, and cross-platform/package verification.

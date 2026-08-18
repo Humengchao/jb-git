@@ -1,4 +1,5 @@
 .vscode
+.gitignore
 node_modules
 src
 test
@@ -7,4 +8,3 @@ coverage
 *.ts
 tsconfig.json
 package-lock.json
-
