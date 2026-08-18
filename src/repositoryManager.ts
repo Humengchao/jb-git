@@ -16,6 +16,7 @@ export class RepositoryManager implements vscode.Disposable {
   private readonly snapshots = new Map<string, RepositorySnapshot>();
   private repositories: GitRepository[] = [];
   private disposed = false;
+  private refreshQueue: Promise<void> = Promise.resolve();
 
   public constructor(
     private readonly runner: GitRunner,
@@ -38,25 +39,29 @@ export class RepositoryManager implements vscode.Disposable {
   }
 
   public async discoverAndRefresh(): Promise<void> {
-    this.repositories = await discoverRepositories(this.workspacePaths(), this.runner);
-    const next = new Map<string, RepositorySnapshot>();
-    const snapshots = await Promise.all(this.repositories.map((repository) => this.readSnapshot(repository)));
-    this.snapshots.clear();
-    for (const snapshot of snapshots) next.set(snapshot.repository.info.rootPath, snapshot);
-    for (const [root, snapshot] of next) this.snapshots.set(root, snapshot);
-    await this.updateContextKeys();
-    this.changeEmitter.fire();
+    await this.enqueueRefresh(async () => {
+      this.repositories = await discoverRepositories(this.workspacePaths(), this.runner);
+      const next = new Map<string, RepositorySnapshot>();
+      const snapshots = await Promise.all(this.repositories.map((repository) => this.readSnapshot(repository)));
+      this.snapshots.clear();
+      for (const snapshot of snapshots) next.set(snapshot.repository.info.rootPath, snapshot);
+      for (const [root, snapshot] of next) this.snapshots.set(root, snapshot);
+      await this.updateContextKeys();
+      this.changeEmitter.fire();
+    });
   }
 
   public async refresh(rootPath?: string): Promise<void> {
-    const targets = rootPath ? this.repositories.filter((repo) => repo.info.rootPath === rootPath) : this.repositories;
-    await Promise.all(
-      targets.map(async (repository) => {
-        this.snapshots.set(repository.info.rootPath, await this.readSnapshot(repository));
-      }),
-    );
-    await this.updateContextKeys();
-    this.changeEmitter.fire();
+    await this.enqueueRefresh(async () => {
+      const targets = rootPath ? this.repositories.filter((repo) => repo.info.rootPath === rootPath) : this.repositories;
+      await Promise.all(
+        targets.map(async (repository) => {
+          this.snapshots.set(repository.info.rootPath, await this.readSnapshot(repository));
+        }),
+      );
+      await this.updateContextKeys();
+      this.changeEmitter.fire();
+    });
   }
 
   public snapshot(rootPath: string): RepositorySnapshot | undefined {
@@ -91,13 +96,13 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).blame(pathSpec, revision);
   }
 
-  public async stageHunk(rootPath: string, pathSpec: string, hunkIndex: number): Promise<void> {
-    await this.requireRepository(rootPath).stageHunk(pathSpec, hunkIndex);
+  public async stageHunk(rootPath: string, pathSpec: string, hunk: GitDiffHunk): Promise<void> {
+    await this.requireRepository(rootPath).stageHunk(pathSpec, hunk);
     await this.refresh(rootPath);
   }
 
-  public async unstageHunk(rootPath: string, pathSpec: string, hunkIndex: number): Promise<void> {
-    await this.requireRepository(rootPath).unstageHunk(pathSpec, hunkIndex);
+  public async unstageHunk(rootPath: string, pathSpec: string, hunk: GitDiffHunk): Promise<void> {
+    await this.requireRepository(rootPath).unstageHunk(pathSpec, hunk);
     await this.refresh(rootPath);
   }
 
@@ -400,6 +405,12 @@ export class RepositoryManager implements vscode.Disposable {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  private enqueueRefresh(operation: () => Promise<void>): Promise<void> {
+    const next = this.refreshQueue.then(operation, operation);
+    this.refreshQueue = next.catch(() => undefined);
+    return next;
   }
 
   private requireRepository(rootPath: string): GitRepository {

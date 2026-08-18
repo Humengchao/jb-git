@@ -96,11 +96,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     updateStatusBar();
   };
 
-  const refreshForPath = async (filePath: string): Promise<void> => {
+  const pendingRefreshRoots = new Set<string>();
+  let refreshTimer: NodeJS.Timeout | undefined;
+  const scheduleRefreshForPath = (filePath: string): void => {
+    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
     const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
-    if (snapshot) await manager.refresh(snapshot.repository.info.rootPath);
-    updateStatusBar();
+    if (!snapshot) return;
+    pendingRefreshRoots.add(snapshot.repository.info.rootPath);
+    if (refreshTimer) clearTimeout(refreshTimer);
+    const delay = vscode.workspace.getConfiguration("jbGit").get<number>("refreshDebounceMs", 250);
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined;
+      const roots = [...pendingRefreshRoots];
+      pendingRefreshRoots.clear();
+      void Promise.all(roots.map((root) => manager.refresh(root))).then(updateStatusBar);
+    }, delay);
   };
+  const gitMetadataWatcher = vscode.workspace.createFileSystemWatcher("**/.git/**");
 
   const pickRepository = async (rootPath?: string) => {
     if (rootPath) return manager.snapshot(rootPath);
@@ -138,14 +150,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     stashesView,
     submodulesView,
     diffProvider,
+    gitMetadataWatcher,
+    { dispose: () => { if (refreshTimer) clearTimeout(refreshTimer); } },
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
     manager.onDidChange(updateStatusBar),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh()),
-    vscode.workspace.onDidSaveTextDocument((document) => void refreshForPath(document.uri.fsPath)),
-    vscode.workspace.onDidCreateFiles((event) => void Promise.all(event.files.map((uri) => refreshForPath(uri.fsPath)))),
-    vscode.workspace.onDidDeleteFiles((event) => void Promise.all(event.files.map((uri) => refreshForPath(uri.fsPath)))),
-    vscode.workspace.onDidRenameFiles((event) => void Promise.all(event.files.flatMap((file) => [file.oldUri, file.newUri]).map((uri) => refreshForPath(uri.fsPath)))),
+    vscode.workspace.onDidSaveTextDocument((document) => scheduleRefreshForPath(document.uri.fsPath)),
+    vscode.workspace.onDidCreateFiles((event) => event.files.forEach((uri) => scheduleRefreshForPath(uri.fsPath))),
+    vscode.workspace.onDidDeleteFiles((event) => event.files.forEach((uri) => scheduleRefreshForPath(uri.fsPath))),
+    vscode.workspace.onDidRenameFiles((event) => event.files.forEach((file) => { scheduleRefreshForPath(file.oldUri.fsPath); scheduleRefreshForPath(file.newUri.fsPath); })),
+    gitMetadataWatcher.onDidChange((uri) => scheduleRefreshForPath(uri.fsPath)),
+    gitMetadataWatcher.onDidCreate((uri) => scheduleRefreshForPath(uri.fsPath)),
+    gitMetadataWatcher.onDidDelete((uri) => scheduleRefreshForPath(uri.fsPath)),
     vscode.commands.registerCommand("jbGit.refresh", refresh),
     vscode.commands.registerCommand("jbGit.openChanges", () => vscode.commands.executeCommand("workbench.view.extension.jbGit")),
     vscode.commands.registerCommand("jbGit.openDiff", async (node?: ChangeNode) => {
@@ -704,11 +721,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.stageHunk", async (node?: HunkNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;
-      await runWithNotification(`Staging hunk in ${node.pathSpec}`, () => manager.stageHunk(node.repositoryRoot, node.pathSpec, node.index));
+      await runWithNotification(`Staging hunk in ${node.pathSpec}`, () => manager.stageHunk(node.repositoryRoot, node.pathSpec, node.hunk));
     }),
     vscode.commands.registerCommand("jbGit.unstageHunk", async (node?: HunkNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;
-      await runWithNotification(`Unstaging hunk in ${node.pathSpec}`, () => manager.unstageHunk(node.repositoryRoot, node.pathSpec, node.index));
+      await runWithNotification(`Unstaging hunk in ${node.pathSpec}`, () => manager.unstageHunk(node.repositoryRoot, node.pathSpec, node.hunk));
     }),
     vscode.commands.registerCommand("jbGit.discardChange", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;

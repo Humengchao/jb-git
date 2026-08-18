@@ -4,13 +4,17 @@ import { RepositoryManager } from "../repositoryManager";
 
 export class DiffContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly contents = new Map<string, string>();
-  private readonly changedEmitter = new vscode.EventEmitter<vscode.Uri>();
+  private sequence = 0;
 
-  public readonly onDidChange = this.changedEmitter.event;
-
-  public register(label: string, content: string): vscode.Uri {
-    const uri = vscode.Uri.parse(`jb-git-diff:${encodeURIComponent(label)}`);
+  public register(repositoryRoot: string, label: string, content: string): vscode.Uri {
+    const id = ++this.sequence;
+    const uri = vscode.Uri.parse(`jb-git-diff:${encodeURIComponent(label)}?repository=${encodeURIComponent(repositoryRoot)}&version=${id}`);
     this.contents.set(uri.toString(), content);
+    while (this.contents.size > 100) {
+      const oldest = this.contents.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.contents.delete(oldest);
+    }
     return uri;
   }
 
@@ -20,7 +24,6 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider, 
 
   public dispose(): void {
     this.contents.clear();
-    this.changedEmitter.dispose();
   }
 }
 
@@ -44,7 +47,7 @@ export async function openChangeDiff(
     repository.fileContent(path, rightRevision),
   ]);
   const label = `${path} (${staged ? "Index" : "Working Tree"})`;
-  const leftUri = provider.register(`${label}:left`, left.toString("utf8"));
-  const rightUri = provider.register(`${label}:right`, right.toString("utf8"));
+  const leftUri = provider.register(node.repositoryRoot, `${label}:left`, left.toString("utf8"));
+  const rightUri = provider.register(node.repositoryRoot, `${label}:right`, right.toString("utf8"));
   await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
 }

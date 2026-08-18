@@ -147,7 +147,7 @@ test("keeps the real index intact when a selected-path commit fails", async () =
   }).join(""));
   const repository = await discoverRepository(root, new GitRunner());
   assert.ok(repository);
-  await repository.stageHunk("file.txt", 0);
+  await repository.stageHunk("file.txt", (await repository.diffHunks("file.txt"))[0]);
   const cachedBefore = git(root, "diff", "--cached");
   writeFileSync(join(root, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
 
@@ -229,13 +229,31 @@ test("stages and unstages individual text diff hunks", async () => {
   assert.ok(repository);
   const hunks = await repository.diffHunks("hunks.txt");
   assert.equal(hunks.length, 2);
-  await repository.stageHunk("hunks.txt", 0);
+  await repository.stageHunk("hunks.txt", hunks[0]);
   assert.equal((await repository.status()).changes[0].staged, true);
   assert.equal((await repository.diffHunks("hunks.txt")).length, 1);
   assert.equal((await repository.diffHunks("hunks.txt", true)).length, 1);
-  await repository.unstageHunk("hunks.txt", 0);
+  await repository.unstageHunk("hunks.txt", (await repository.diffHunks("hunks.txt", true))[0]);
   assert.equal((await repository.diffHunks("hunks.txt", true)).length, 0);
   assert.equal((await repository.diffHunks("hunks.txt")).length, 2);
+});
+
+test("refuses to stage a stale hunk identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-stale-hunk-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), "one\ntwo\nthree\n");
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "file.txt"), "ONE\ntwo\nthree\n");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const staleHunk = (await repository.diffHunks("file.txt"))[0];
+  writeFileSync(join(root, "file.txt"), "DIFFERENT\ntwo\nthree\n");
+
+  await assert.rejects(repository.stageHunk("file.txt", staleHunk), /changed since it was displayed/);
+  assert.equal(git(root, "diff", "--cached"), "");
 });
 
 test("runs and resets a Git bisect session", async () => {

@@ -157,15 +157,15 @@ export class GitRepository {
     return parseUnifiedDiff(output);
   }
 
-  public async stageHunk(pathSpec: string, hunkIndex: number): Promise<void> {
-    await this.applyHunk(pathSpec, hunkIndex, false, false);
+  public async stageHunk(pathSpec: string, expectedHunk: GitDiffHunk): Promise<void> {
+    await this.applyHunk(pathSpec, expectedHunk, false, false);
   }
 
-  public async unstageHunk(pathSpec: string, hunkIndex: number): Promise<void> {
-    await this.applyHunk(pathSpec, hunkIndex, true, true);
+  public async unstageHunk(pathSpec: string, expectedHunk: GitDiffHunk): Promise<void> {
+    await this.applyHunk(pathSpec, expectedHunk, true, true);
   }
 
-  private async applyHunk(pathSpec: string, hunkIndex: number, staged: boolean, reverse: boolean): Promise<void> {
+  private async applyHunk(pathSpec: string, expectedHunk: GitDiffHunk, staged: boolean, reverse: boolean): Promise<void> {
     await this.serial(async () => {
       const output = await this.runner.text([
         "diff",
@@ -177,8 +177,10 @@ export class GitRepository {
         pathSpec,
       ], { cwd: this.info.rootPath });
       const hunks = parseUnifiedDiff(output);
-      const hunk = hunks[hunkIndex];
-      if (!hunk) throw new Error(`Git hunk ${hunkIndex + 1} is no longer available; refresh the changes view.`);
+      const hunk = hunks.find((candidate) => candidate.header === expectedHunk.header
+        && candidate.lines.length === expectedHunk.lines.length
+        && candidate.lines.every((line, index) => line === expectedHunk.lines[index]));
+      if (!hunk) throw new Error("This hunk changed since it was displayed; refresh the changes view and try again.");
       const patch = patchForHunk(output, hunk);
       await this.runner.run(["apply", "--cached", ...(reverse ? ["--reverse"] : []), "--whitespace=nowarn", "-"], {
         cwd: this.info.rootPath,
