@@ -130,6 +130,18 @@
         "title": "JB Git: Skip Operation"
       },
       {
+        "command": "jbGit.createShelf",
+        "title": "JB Git: Create Shelf"
+      },
+      {
+        "command": "jbGit.applyShelf",
+        "title": "JB Git: Apply Shelf"
+      },
+      {
+        "command": "jbGit.deleteShelf",
+        "title": "JB Git: Delete Shelf"
+      },
+      {
         "command": "jbGit.initializeRepository",
         "title": "JB Git: Initialize Repository"
       },
@@ -184,6 +196,11 @@
           "id": "jbGit.changelists",
           "name": "Changelists",
           "when": "jbGit.hasWorkspace"
+        },
+        {
+          "id": "jbGit.shelves",
+          "name": "Shelf",
+          "when": "jbGit.hasWorkspace"
         }
       ]
     },
@@ -191,7 +208,7 @@
       "view/title": [
         {
           "command": "jbGit.refresh",
-          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists",
+          "when": "view == jbGit.repositories || view == jbGit.changes || view == jbGit.history || view == jbGit.changelists || view == jbGit.shelves",
           "group": "navigation@1"
         },
         {
@@ -228,6 +245,11 @@
           "command": "jbGit.commitChangelist",
           "when": "view == jbGit.changelists",
           "group": "navigation@3"
+        },
+        {
+          "command": "jbGit.createShelf",
+          "when": "view == jbGit.shelves",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -280,6 +302,16 @@
           "command": "jbGit.commitChangelist",
           "when": "view == jbGit.changelists && (viewItem == jbGit.changelist || viewItem == jbGit.changelist.active)",
           "group": "inline@1"
+        },
+        {
+          "command": "jbGit.applyShelf",
+          "when": "view == jbGit.shelves && viewItem == jbGit.shelf",
+          "group": "inline@1"
+        },
+        {
+          "command": "jbGit.deleteShelf",
+          "when": "view == jbGit.shelves && viewItem == jbGit.shelf",
+          "group": "inline@2"
         }
       ]
     },

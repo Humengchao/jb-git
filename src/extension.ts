@@ -7,6 +7,8 @@ import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
 import { CommitNode, HistoryTreeProvider } from "./views/historyTree";
 import { ChangelistChangeNode, ChangelistNode, ChangelistTreeProvider } from "./views/changelistTree";
 import { ChangelistStore } from "./changelists/store";
+import { ShelfStore } from "./shelves/store";
+import { ShelfNode, ShelfTreeProvider } from "./views/shelfTree";
 import { RepositoryManager } from "./repositoryManager";
 
 function workspacePaths(): string[] {
@@ -46,15 +48,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const manager = new RepositoryManager(runner, workspacePaths);
   const changelistStore = new ChangelistStore(context.workspaceState);
   await changelistStore.load();
+  const shelfStore = new ShelfStore(context.globalStorageUri.fsPath);
   const repositories = new RepositoryTreeProvider(manager);
   const changes = new ChangesTreeProvider(manager);
   const diffProvider = new DiffContentProvider();
   const history = new HistoryTreeProvider(manager);
   const changelists = new ChangelistTreeProvider(manager, changelistStore);
+  const shelves = new ShelfTreeProvider(manager, shelfStore);
   const repositoryView = vscode.window.createTreeView("jbGit.repositories", { treeDataProvider: repositories, showCollapseAll: true });
   const changesView = vscode.window.createTreeView("jbGit.changes", { treeDataProvider: changes, showCollapseAll: true });
   const historyView = vscode.window.createTreeView("jbGit.history", { treeDataProvider: history, showCollapseAll: true });
   const changelistsView = vscode.window.createTreeView("jbGit.changelists", { treeDataProvider: changelists, showCollapseAll: true });
+  const shelvesView = vscode.window.createTreeView("jbGit.shelves", { treeDataProvider: shelves, showCollapseAll: true });
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   branchStatus.command = "jbGit.openChanges";
   branchStatus.tooltip = "Open JB Git Local Changes";
@@ -88,14 +93,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     manager,
     changelistStore,
+    shelfStore,
     repositories,
     changes,
     history,
     changelists,
+    shelves,
     repositoryView,
     changesView,
     historyView,
     changelistsView,
+    shelvesView,
     diffProvider,
     vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
     branchStatus,
@@ -364,6 +372,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       const revision = await runWithNotification("Creating Changelist commit", () => manager.commit(node.repositoryRoot, message.trim()));
       if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
+    }),
+    vscode.commands.registerCommand("jbGit.createShelf", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first?.status) return;
+      const paths = first.status.changes.filter((change) => change.kind !== "untracked" && change.kind !== "ignored").map((change) => change.path);
+      if (paths.length === 0) return void vscode.window.showInformationMessage("There are no tracked changes to shelf.");
+      const name = await vscode.window.showInputBox({ prompt: "Shelf name", value: "Shelf" });
+      if (!name?.trim()) return;
+      await runWithNotification(`Creating shelf '${name.trim()}'`, () => shelfStore.create(first.repository, name.trim(), paths));
+    }),
+    vscode.commands.registerCommand("jbGit.applyShelf", async (node?: ShelfNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      const snapshot = manager.snapshot(node.repositoryRoot);
+      if (!snapshot) return;
+      await runWithNotification(`Applying shelf '${node.entry.name}'`, async () => {
+        await shelfStore.apply(snapshot.repository, node.entry);
+        await manager.refresh(node.repositoryRoot);
+      });
+    }),
+    vscode.commands.registerCommand("jbGit.deleteShelf", async (node?: ShelfNode) => {
+      if (!(await requireTrustedWorkspace()) || !node) return;
+      const answer = await vscode.window.showWarningMessage(`Delete shelf '${node.entry.name}'?`, { modal: true }, "Delete");
+      if (answer !== "Delete") return;
+      await shelfStore.remove(node.repositoryRoot, node.entry);
     }),
     vscode.commands.registerCommand("jbGit.checkoutBranch", async (node?: BranchNode) => {
       if (!(await requireTrustedWorkspace())) return;

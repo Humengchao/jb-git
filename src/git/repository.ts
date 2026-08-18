@@ -96,6 +96,14 @@ export class GitRepository {
     return this.runner.text(["show", "--format=fuller", "--stat", "--patch", "--decorate=short", hash], { cwd: this.info.rootPath });
   }
 
+  public async patch(paths: readonly string[]): Promise<string> {
+    return this.runner.text(["diff", "--binary", "--no-ext-diff", "HEAD", "--", ...paths], { cwd: this.info.rootPath });
+  }
+
+  public async applyPatchFile(patchFile: string): Promise<void> {
+    await this.serial(() => this.runner.run(["apply", "--3way", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath }));
+  }
+
   public async branches(signal?: AbortSignal): Promise<GitBranch[]> {
     const output = await this.runner.text(
       [

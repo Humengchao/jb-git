@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -69,6 +69,13 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.match(stashes[0].message, /temporary work/);
   await repository.applyStash(stashes[0].ref);
   assert.equal((await repository.status()).changes.find((change) => change.path === "file.txt")?.unstaged, true);
+  const patch = await repository.patch(["file.txt"]);
+  assert.match(patch, /diff --git/);
+  const patchFile = join(root, "shelf.patch");
+  writeFileSync(patchFile, patch);
+  git(root, "restore", "file.txt");
+  await repository.applyPatchFile(patchFile);
+  assert.equal(readFileSync(join(root, "file.txt"), "utf8"), "stashed\n");
 });
 
 test("detects an in-progress merge operation", async () => {
