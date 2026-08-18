@@ -98,6 +98,38 @@
         "title": "JB Git: Commit Changelist"
       },
       {
+        "command": "jbGit.merge",
+        "title": "JB Git: Merge Ref"
+      },
+      {
+        "command": "jbGit.rebase",
+        "title": "JB Git: Rebase onto Ref"
+      },
+      {
+        "command": "jbGit.cherryPick",
+        "title": "JB Git: Cherry-pick Commit"
+      },
+      {
+        "command": "jbGit.revert",
+        "title": "JB Git: Revert Commit"
+      },
+      {
+        "command": "jbGit.reset",
+        "title": "JB Git: Reset to Ref"
+      },
+      {
+        "command": "jbGit.continueOperation",
+        "title": "JB Git: Continue Operation"
+      },
+      {
+        "command": "jbGit.abortOperation",
+        "title": "JB Git: Abort Operation"
+      },
+      {
+        "command": "jbGit.skipOperation",
+        "title": "JB Git: Skip Operation"
+      },
+      {
         "command": "jbGit.initializeRepository",
         "title": "JB Git: Initialize Repository"
       },

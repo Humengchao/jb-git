@@ -189,6 +189,90 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       await runWithNotification("Pushing Git commits", () => manager.push(first.repository.info.rootPath, mode.force));
     }),
+    vscode.commands.registerCommand("jbGit.merge", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const current = first.status?.branch.head;
+      const ref = await vscode.window.showQuickPick(
+        first.branches.filter((branch) => (branch.kind === "local" || branch.kind === "remote") && branch.name !== current).map((branch) => branch.name),
+        { placeHolder: "Select a branch or ref to merge" },
+      );
+      if (!ref) return;
+      await runWithNotification(`Merging ${ref}`, () => manager.merge(first.repository.info.rootPath, ref));
+    }),
+    vscode.commands.registerCommand("jbGit.rebase", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const current = first.status?.branch.head;
+      const ref = await vscode.window.showQuickPick(
+        first.branches.filter((branch) => (branch.kind === "local" || branch.kind === "remote") && branch.name !== current).map((branch) => branch.name),
+        { placeHolder: "Select a branch or ref to rebase onto" },
+      );
+      if (!ref) return;
+      await runWithNotification(`Rebasing onto ${ref}`, () => manager.rebase(first.repository.info.rootPath, ref));
+    }),
+    vscode.commands.registerCommand("jbGit.cherryPick", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const hash = await vscode.window.showInputBox({ prompt: "Commit hash or ref to cherry-pick" });
+      if (!hash?.trim()) return;
+      await runWithNotification(`Cherry-picking ${hash.trim()}`, () => manager.cherryPick(first.repository.info.rootPath, hash.trim()));
+    }),
+    vscode.commands.registerCommand("jbGit.revert", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const hash = await vscode.window.showInputBox({ prompt: "Commit hash or ref to revert" });
+      if (!hash?.trim()) return;
+      const answer = await vscode.window.showWarningMessage(`Revert ${hash.trim()}?`, { modal: true }, "Revert");
+      if (answer !== "Revert") return;
+      await runWithNotification(`Reverting ${hash.trim()}`, () => manager.revert(first.repository.info.rootPath, hash.trim()));
+    }),
+    vscode.commands.registerCommand("jbGit.reset", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      if (!first) return;
+      const ref = await vscode.window.showInputBox({ prompt: "Revision to reset to", value: "HEAD" });
+      if (!ref?.trim()) return;
+      const mode = await vscode.window.showQuickPick(
+        [
+          { label: "Soft", value: "soft" as const, description: "Keep index and working tree" },
+          { label: "Mixed", value: "mixed" as const, description: "Keep working tree, reset index" },
+          { label: "Hard", value: "hard" as const, description: "Discard tracked working tree changes" },
+        ],
+        { placeHolder: "Choose reset mode" },
+      );
+      if (!mode) return;
+      const answer = await vscode.window.showWarningMessage(`Reset ${mode.label.toLowerCase()} to ${ref.trim()}?`, { modal: true }, "Reset");
+      if (answer !== "Reset") return;
+      await runWithNotification(`Resetting to ${ref.trim()}`, () => manager.reset(first.repository.info.rootPath, ref.trim(), mode.value));
+    }),
+    vscode.commands.registerCommand("jbGit.continueOperation", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      const kind = first?.operation.kind;
+      if (!first || !kind || kind === "none" || kind === "bisect" || kind === "sequencer") return;
+      await runWithNotification(`Continuing ${kind}`, () => manager.continueOperation(first.repository.info.rootPath, kind));
+    }),
+    vscode.commands.registerCommand("jbGit.abortOperation", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      const kind = first?.operation.kind;
+      if (!first || !kind || kind === "none" || kind === "bisect" || kind === "sequencer") return;
+      const answer = await vscode.window.showWarningMessage(`Abort ${kind}?`, { modal: true }, "Abort");
+      if (answer !== "Abort") return;
+      await runWithNotification(`Aborting ${kind}`, () => manager.abortOperation(first.repository.info.rootPath, kind));
+    }),
+    vscode.commands.registerCommand("jbGit.skipOperation", async () => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = manager.all[0];
+      const kind = first?.operation.kind;
+      if (!first || (kind !== "rebase" && kind !== "cherry-pick")) return;
+      await runWithNotification(`Skipping ${kind}`, () => manager.skipOperation(first.repository.info.rootPath, kind));
+    }),
     vscode.commands.registerCommand("jbGit.createBranch", async () => {
       if (!(await requireTrustedWorkspace())) return;
       const first = manager.all[0];

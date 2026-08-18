@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { discoverRepositories, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
-import { GitBranch, GitCommitOptions, GitOperationState, GitPullStrategy, GitStashEntry, GitStatusSnapshot } from "./git/types";
+import { GitBranch, GitCommitOptions, GitOperationKind, GitOperationState, GitPullStrategy, GitStashEntry, GitStatusSnapshot } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -99,13 +99,77 @@ export class RepositoryManager implements vscode.Disposable {
   }
 
   public async pull(rootPath: string, strategy: GitPullStrategy): Promise<void> {
-    await this.requireRepository(rootPath).pull(strategy);
-    await this.refresh(rootPath);
+    try {
+      await this.requireRepository(rootPath).pull(strategy);
+    } finally {
+      await this.refresh(rootPath);
+    }
   }
 
   public async push(rootPath: string, forceWithLease = false): Promise<void> {
     await this.requireRepository(rootPath).push(forceWithLease);
     await this.refresh(rootPath);
+  }
+
+  public async merge(rootPath: string, ref: string): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).merge(ref);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async rebase(rootPath: string, ref: string): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).rebase(ref);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async cherryPick(rootPath: string, hash: string): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).cherryPick(hash);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async revert(rootPath: string, hash: string): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).revert(hash);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async reset(rootPath: string, ref: string, mode: "soft" | "mixed" | "hard"): Promise<void> {
+    await this.requireRepository(rootPath).reset(ref, mode);
+    await this.refresh(rootPath);
+  }
+
+  public async continueOperation(rootPath: string, kind: Exclude<GitOperationKind, "none" | "bisect" | "sequencer">): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).continueOperation(kind);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async abortOperation(rootPath: string, kind: Exclude<GitOperationKind, "none" | "bisect" | "sequencer">): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).abortOperation(kind);
+    } finally {
+      await this.refresh(rootPath);
+    }
+  }
+
+  public async skipOperation(rootPath: string, kind: "rebase" | "cherry-pick"): Promise<void> {
+    try {
+      await this.requireRepository(rootPath).skipOperation(kind);
+    } finally {
+      await this.refresh(rootPath);
+    }
   }
 
   public async commit(rootPath: string, message: string, options?: GitCommitOptions): Promise<string> {

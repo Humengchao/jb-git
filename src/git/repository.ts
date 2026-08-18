@@ -156,6 +156,40 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : [])], { cwd: this.info.rootPath }));
   }
 
+  public async merge(ref: string): Promise<void> {
+    await this.serial(() => this.runner.run(["merge", ref], { cwd: this.info.rootPath }));
+  }
+
+  public async rebase(ref: string): Promise<void> {
+    await this.serial(() => this.runner.run(["rebase", ref], { cwd: this.info.rootPath }));
+  }
+
+  public async cherryPick(hash: string): Promise<void> {
+    await this.serial(() => this.runner.run(["cherry-pick", hash], { cwd: this.info.rootPath }));
+  }
+
+  public async revert(hash: string): Promise<void> {
+    await this.serial(() => this.runner.run(["revert", "--no-edit", hash], { cwd: this.info.rootPath }));
+  }
+
+  public async reset(ref: string, mode: "soft" | "mixed" | "hard"): Promise<void> {
+    await this.serial(() => this.runner.run(["reset", `--${mode}`, ref], { cwd: this.info.rootPath }));
+  }
+
+  public async continueOperation(kind: Exclude<import("./types").GitOperationKind, "none" | "bisect" | "sequencer">): Promise<void> {
+    const command = kind === "merge" ? "merge" : kind === "rebase" ? "rebase" : kind === "cherry-pick" ? "cherry-pick" : "revert";
+    await this.serial(() => this.runner.run([command, "--continue"], { cwd: this.info.rootPath }));
+  }
+
+  public async abortOperation(kind: Exclude<import("./types").GitOperationKind, "none" | "bisect" | "sequencer">): Promise<void> {
+    const command = kind === "merge" ? "merge" : kind === "rebase" ? "rebase" : kind === "cherry-pick" ? "cherry-pick" : "revert";
+    await this.serial(() => this.runner.run([command, "--abort"], { cwd: this.info.rootPath }));
+  }
+
+  public async skipOperation(kind: "rebase" | "cherry-pick"): Promise<void> {
+    await this.serial(() => this.runner.run([kind, "--skip"], { cwd: this.info.rootPath }));
+  }
+
   public async commit(message: string, options: GitCommitOptions = {}): Promise<string> {
     return this.serial(async () => {
       const args = ["commit", "--file=-"];
