@@ -19,7 +19,7 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
   public constructor(private readonly diffProvider: DiffContentProvider) {}
 
   public async open(repository: GitRepository, left: GitBranch, right: GitBranch): Promise<void> {
-    const files = await repository.diffFiles(left.name, right.name);
+    const files = await repository.diffFiles(left.oid, right.oid);
     const initialColumn = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
     const panel = vscode.window.createWebviewPanel(
       "jbGit.branchComparison",
