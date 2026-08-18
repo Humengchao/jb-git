@@ -25,7 +25,7 @@ export class ChangeNode extends vscode.TreeItem {
     public readonly change: GitChange,
     public readonly mode: ChangeViewMode = change.staged ? "staged" : "unstaged",
   ) {
-    super(change.path, vscode.TreeItemCollapsibleState.Collapsed);
+    super(change.path, change.conflicted || change.kind === "untracked" ? vscode.TreeItemCollapsibleState.None : vscode.TreeItemCollapsibleState.Collapsed);
     this.resourceUri = vscode.Uri.file(path.join(repositoryRoot, change.path));
     this.description = change.originalPath ? `← ${change.originalPath}` : change.kind;
     this.tooltip = `${change.indexStatus}${change.workTreeStatus} · ${change.path}`;

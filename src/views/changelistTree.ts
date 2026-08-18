@@ -32,6 +32,7 @@ export class ChangelistChangeNode extends ChangeNode {
     public readonly changelistId: string,
   ) {
     super(repositoryRoot, change);
+    this.collapsibleState = vscode.TreeItemCollapsibleState.None;
     this.contextValue = "jbGit.changelist.change";
   }
 }

@@ -40,13 +40,9 @@ export class RepositoryManager implements vscode.Disposable {
   public async discoverAndRefresh(): Promise<void> {
     this.repositories = await discoverRepositories(this.workspacePaths(), this.runner);
     const next = new Map<string, RepositorySnapshot>();
-    await Promise.all(
-      this.repositories.map(async (repository) => {
-        const snapshot = await this.readSnapshot(repository);
-        next.set(repository.info.rootPath, snapshot);
-      }),
-    );
+    const snapshots = await Promise.all(this.repositories.map((repository) => this.readSnapshot(repository)));
     this.snapshots.clear();
+    for (const snapshot of snapshots) next.set(snapshot.repository.info.rootPath, snapshot);
     for (const [root, snapshot] of next) this.snapshots.set(root, snapshot);
     await this.updateContextKeys();
     this.changeEmitter.fire();
