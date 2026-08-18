@@ -8,7 +8,7 @@ The implementation is intentionally layered:
 
 - Git Core executes the user's system `git` binary with safe argument arrays.
 - Repository state is parsed from machine-readable Git output and refreshed incrementally.
-- The extension host owns Git operations; the UI uses IntelliJ-inspired Commit and Git Log Webviews plus VS Code diff surfaces.
+- The extension host owns Git operations; the UI uses one IntelliJ-inspired Git Webview contributed to VS Code's bottom Panel plus native diff surfaces.
 - Changelists, Shelf, hunk staging, history, conflict actions, Worktrees, Remotes, Stashes, and Submodules are implemented as independent layers.
 - CI validates core behavior on Windows, macOS, and Linux, plus Extension Host activation on VS Code 1.95 and stable.
 
@@ -16,7 +16,7 @@ The implementation is intentionally layered:
 
 The local MVP now covers repository discovery, porcelain-v2 status, a Changelist-based Commit tool window, file and hunk stage/unstage, diff, selected-file commit/amend/sign-off/no-verify, Commit and Push, branches/tags, fetch/pull/push, remotes, stash, shelf, history/file history, blame, merge/rebase/cherry-pick/revert/reset, continue/abort/skip, conflict ours/theirs/mark-resolved, Worktrees, Submodules, Clone, Sparse Checkout, Patch import, LFS pull, and Bisect.
 
-The UI is organized around the same main workflow boundaries as IntelliJ IDEA: a narrow Commit tool window, a wide Git Log with Branches / Commits / Changed Files / Details panes, a branch widget, and an operations popup. This is still an independent VS Code implementation rather than pixel-for-pixel IntelliJ UI parity. Remaining high-risk work is tracked in `docs/implementation-plan.md`: a three-way conflict editor, interactive rebase editor, multi-root transactional rollback, Git-version capability fallbacks, and release/remote-host hardening.
+The UI now lives in a single bottom `Git` tool window, rather than an Activity Bar sidebar or editor tab. Its `Log`, `Console`, `Local Changes`, and `Shelf` tabs follow IntelliJ IDEA's workflow boundaries; Log uses Branches / Commits / Changed Files / Details panes, while Local Changes combines Changelists and the commit form. VS Code still renders its own native Panel chrome. Remaining high-risk work is tracked in `docs/implementation-plan.md`: a three-way conflict editor, interactive rebase editor, multi-root transactional rollback, Git-version capability fallbacks, and release/remote-host hardening.
 
 ## Development
 

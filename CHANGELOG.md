@@ -2,9 +2,10 @@
 
 ## 0.1.0-alpha.4
 
-- Replace nine fragmented Tree Views with a cohesive IntelliJ-inspired Commit tool window.
-- Add Changelist-grouped file selection, inline change actions, commit options, Commit and Push, and a Shelf tab.
-- Add a wide Git tool window with branch filters, a colored commit graph, commit search, changed files, details, and commit actions.
+- Replace nine fragmented Tree Views and the Activity Bar view with one IntelliJ-inspired bottom Git tool window.
+- Unify Log, Console, Local Changes, and Shelf as tabs inside the bottom Panel instead of opening a sidebar or editor tab.
+- Add Changelist-grouped file selection, inline change actions, commit options, Commit and Push, and Shelf workflows.
+- Add a three-pane Log with branch filters, a colored commit graph, commit search, changed files, details, and commit actions.
 - Add a credential-redacted Git Console, VCS-style branch popup, Git operations popup, and one-key Extension Host launch configuration.
 
 ## 0.1.0-alpha.3
