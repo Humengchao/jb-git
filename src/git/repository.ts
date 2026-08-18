@@ -126,6 +126,19 @@ export class GitRepository {
     ], { cwd: this.info.rootPath });
   }
 
+  public async compareRefHistory(leftRef: string, rightRef: string): Promise<string> {
+    const [left, right] = await Promise.all([this.resolveCommit(leftRef), this.resolveCommit(rightRef)]);
+    return this.runner.text(
+      ["log", "--left-right", "--graph", "--decorate=short", "--oneline", `${left}...${right}`],
+      { cwd: this.info.rootPath },
+    );
+  }
+
+  public async diffRefs(leftRef: string, rightRef: string): Promise<string> {
+    const [left, right] = await Promise.all([this.resolveCommit(leftRef), this.resolveCommit(rightRef)]);
+    return this.runner.text(["diff", left, right], { cwd: this.info.rootPath });
+  }
+
   public async commitFiles(hash: string): Promise<GitCommitFile[]> {
     const revision = await this.resolveCommit(hash);
     const output = await this.runner.text(
