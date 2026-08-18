@@ -63,6 +63,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private selectedRef?: string;
   private selectedHash?: string;
   private filePath?: string;
+  private requestedTab: ToolTab = "log";
   private currentCommits: GitCommit[] = [];
   private traces: GitTraceEvent[] = [];
   private readonly selectedPaths = new Map<string, Set<string>>();
@@ -95,6 +96,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
 
   public async open(root?: string, filePath?: string, tab: ToolTab = "log"): Promise<void> {
     if (root && this.manager.snapshot(root)) this.selectedRoot = root;
+    this.requestedTab = tab;
     this.filePath = filePath;
     this.selectedRef = undefined;
     this.selectedHash = undefined;
@@ -224,7 +226,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
 
   private async handleMessage(message: LogMessage): Promise<void> {
     try {
-      if (message.type === "ready") return void this.update();
+      if (message.type === "ready") {
+        await this.view?.webview.postMessage({ type: "activateTab", tab: this.requestedTab });
+        return void this.update();
+      }
       if (message.type === "clearConsole") {
         this.traces = [];
         return void this.update();
