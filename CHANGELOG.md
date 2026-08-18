@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-alpha.4
+
+- Replace nine fragmented Tree Views with a cohesive IntelliJ-inspired Commit tool window.
+- Add Changelist-grouped file selection, inline change actions, commit options, Commit and Push, and a Shelf tab.
+- Add a wide Git tool window with branch filters, a colored commit graph, commit search, changed files, details, and commit actions.
+- Add a credential-redacted Git Console, VCS-style branch popup, Git operations popup, and one-key Extension Host launch configuration.
+
 ## 0.1.0-alpha.3
 
 - Harden reset refs, credential redaction, rename-aware Changelist commits, and Shelf transactions.

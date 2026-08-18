@@ -8,6 +8,15 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 
 ## 主要功能
 
+### IDEA 风格工作区
+
+- 活动栏只提供一个统一的 Commit 工具窗口，不再把功能拆成多个零散树视图。
+- Commit 工具窗口包含 Changelist、文件勾选、提交消息、Amend、Sign-off、跳过 Hooks、Commit 和 Commit and Push。
+- Git Log 使用宽屏三栏布局：左侧 Branches、中间提交图和提交表、右侧 Changed Files 与 Commit Details。
+- Git Log 支持搜索、按分支过滤、彩色提交拓扑、Cherry-pick、Revert、从提交创建分支和 Reset。
+- 状态栏分支入口提供类似 VCS Widget 的分支弹窗，更多菜单提供集中式 Git Operations Popup。
+- Git Console 记录 Git 命令、耗时与输出，并在显示前隐藏 URL、令牌和认证信息。
+
 ### 本地更改
 
 - 按已暂存、未暂存、未跟踪和冲突状态分组显示文件。
@@ -65,7 +74,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - 使用 `git status --porcelain=v2` 等机器可读格式解析仓库状态。
 - 仓库修改操作按仓库串行执行，降低并发写入 Index 的风险。
 - VS Code Extension Host 负责命令、状态刷新和资源生命周期。
-- 界面使用 VS Code Tree View、Diff Editor、Output Channel 和 Status Bar 实现。
+- 界面使用自定义 Commit/Git Log Webview、VS Code Diff Editor、Output Channel 和 Status Bar 实现。
 - Changelist、Shelf、History、Remote、Stash、Worktree 和 Submodule 分为独立模块。
 
 ## 安装
@@ -130,13 +139,13 @@ npm run package
 
 ## 当前范围
 
-当前版本提供可工作的 IDEA 风格 Git 基础设施，但不代表已经达到完整的 IntelliJ IDEA 界面对等。
+当前版本已经按 IntelliJ IDEA 的主要工作流重新组织为 Commit 工具窗口、Git Log、Branches 弹窗和 Git Operations Popup，但不代表逐像素复制 IntelliJ IDEA。
 
 仍在规划中的主要能力包括：
 
-- 完整的交互式提交日志图。
 - 三方冲突合并编辑器。
 - Interactive Rebase、Squash 和 Fixup 编辑器。
+- 超大仓库日志的分页、索引和图谱性能优化。
 - 完整的多仓库事务回滚。
 - 面向不同 Git 版本的能力检测与降级策略。
 - SSH、WSL、Dev Container 和远程 Extension Host 的完整验证。
@@ -151,7 +160,8 @@ src/
 ├── git/                 Git 命令、状态解析、补丁与类型
 ├── changelists/         Changelist 持久化与归属管理
 ├── shelves/             Shelf 补丁与元数据管理
-├── views/               VS Code Tree View 和 Diff Provider
+├── views/               Diff Provider 与兼容节点
+├── webviews/            Commit 工具窗口、Git Log 和 Git Console
 ├── repositoryManager.ts 仓库发现、刷新与操作编排
 └── extension.ts         扩展激活、命令和 UI 生命周期
 

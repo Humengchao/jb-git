@@ -8,15 +8,15 @@ The implementation is intentionally layered:
 
 - Git Core executes the user's system `git` binary with safe argument arrays.
 - Repository state is parsed from machine-readable Git output and refreshed incrementally.
-- The extension host owns Git operations; the UI is built with VS Code Tree Views and output/diff surfaces.
+- The extension host owns Git operations; the UI uses IntelliJ-inspired Commit and Git Log Webviews plus VS Code diff surfaces.
 - Changelists, Shelf, hunk staging, history, conflict actions, Worktrees, Remotes, Stashes, and Submodules are implemented as independent layers.
 - CI validates core behavior on Windows, macOS, and Linux, plus Extension Host activation on VS Code 1.95 and stable.
 
 ## Current status
 
-The local MVP now covers repository discovery, porcelain-v2 status, Local Changes with staged/unstaged/untracked/conflict groups, file and hunk stage/unstage, diff, commit/amend/sign-off/no-verify, branches/tags, fetch/pull/push, remotes, stash, shelf, changelists, history/file history, blame, merge/rebase/cherry-pick/revert/reset, continue/abort/skip, conflict ours/theirs/mark-resolved, Worktrees, Submodules, Clone, Sparse Checkout, Patch import, LFS pull, and Bisect.
+The local MVP now covers repository discovery, porcelain-v2 status, a Changelist-based Commit tool window, file and hunk stage/unstage, diff, selected-file commit/amend/sign-off/no-verify, Commit and Push, branches/tags, fetch/pull/push, remotes, stash, shelf, history/file history, blame, merge/rebase/cherry-pick/revert/reset, continue/abort/skip, conflict ours/theirs/mark-resolved, Worktrees, Submodules, Clone, Sparse Checkout, Patch import, LFS pull, and Bisect.
 
-This is behavior-compatible Git infrastructure, not a claim of complete IntelliJ UI parity. The remaining high-risk work is tracked in `docs/implementation-plan.md`: a full interactive log-graph Webview, three-way conflict editor, interactive rebase editor, multi-root transactional rollback, Git-version capability fallbacks, and release/remote-host hardening.
+The UI is organized around the same main workflow boundaries as IntelliJ IDEA: a narrow Commit tool window, a wide Git Log with Branches / Commits / Changed Files / Details panes, a branch widget, and an operations popup. This is still an independent VS Code implementation rather than pixel-for-pixel IntelliJ UI parity. Remaining high-risk work is tracked in `docs/implementation-plan.md`: a three-way conflict editor, interactive rebase editor, multi-root transactional rollback, Git-version capability fallbacks, and release/remote-host hardening.
 
 ## Development
 
