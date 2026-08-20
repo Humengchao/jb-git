@@ -214,6 +214,31 @@ test("discard restores both staged and working tree changes", async () => {
   assert.equal(git(root, "status", "--porcelain"), "");
 });
 
+test("pushes a new branch and records its upstream", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-push-upstream-"));
+  const remote = mkdtempSync(join(tmpdir(), "jb-git-push-remote-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  git(remote, "init", "--bare", "-q");
+  writeFileSync(join(root, "file.txt"), "content\n");
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "initial");
+  git(root, "remote", "add", "origin", remote);
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  await repository.push();
+  assert.equal(git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"), `origin/${git(root, "branch", "--show-current")}`);
+});
+
+test("does not turn an invalid revision into an empty diff", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-invalid-revision-"));
+  git(root, "init", "-q");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  await assert.rejects(repository.fileContent("missing.txt", "not-a-revision"), /not-a-revision/);
+});
+
 test("shelves tracked changes and restores them as unstaged work", async () => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-shelf-"));
   git(root, "init", "-q");

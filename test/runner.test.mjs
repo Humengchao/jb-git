@@ -40,3 +40,23 @@ test("does not let a Git console listener break command execution", async () => 
   const output = await runner.text(["-e", "process.stdout.write('ok')"], { cwd: process.cwd() });
   assert.equal(output, "ok");
 });
+
+test("bounds captured process output", async () => {
+  const runner = new GitRunner(process.execPath);
+  await assert.rejects(
+    runner.text(["-e", "process.stdout.write('x'.repeat(100000))"], { cwd: process.cwd(), maxOutputBytes: 1024 }),
+    /output exceeded the 1024-byte safety limit/,
+  );
+});
+
+test("waits for an aborted child to close and emits one trace", async () => {
+  const runner = new GitRunner(process.execPath);
+  const controller = new AbortController();
+  const traces = [];
+  runner.onDidRun((event) => traces.push(event));
+  const running = runner.text(["-e", "setInterval(() => {}, 1000)"], { cwd: process.cwd(), signal: controller.signal });
+  setTimeout(() => controller.abort(), 30);
+  await assert.rejects(running, /Git command aborted/);
+  assert.equal(traces.length, 1);
+  assert.equal(traces[0].exitCode, null);
+});

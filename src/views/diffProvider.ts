@@ -5,6 +5,9 @@ import { RepositoryManager } from "../repositoryManager";
 export class DiffContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly contents = new Map<string, string>();
   private sequence = 0;
+  private readonly closeRegistration = vscode.workspace.onDidCloseTextDocument((document) => {
+    if (document.uri.scheme === "jb-git-diff") this.contents.delete(document.uri.toString());
+  });
 
   public register(repositoryRoot: string, label: string, content: string): vscode.Uri {
     const id = ++this.sequence;
@@ -34,7 +37,8 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider, 
   private remember(uri: vscode.Uri, content: string): void {
     this.contents.set(uri.toString(), content);
     while (this.contents.size > 100) {
-      const oldest = this.contents.keys().next().value as string | undefined;
+      const open = new Set(vscode.workspace.textDocuments.map((document) => document.uri.toString()));
+      const oldest = [...this.contents.keys()].find((key) => !open.has(key));
       if (!oldest) break;
       this.contents.delete(oldest);
     }
@@ -45,6 +49,7 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider, 
   }
 
   public dispose(): void {
+    this.closeRegistration.dispose();
     this.contents.clear();
   }
 }
@@ -68,8 +73,16 @@ export async function openChangeDiff(
     repository.fileContent(oldPath, leftRevision),
     repository.fileContent(path, rightRevision),
   ]);
+  if (isBinaryContent(left) || isBinaryContent(right)) {
+    await vscode.window.showInformationMessage(`${path} is binary and cannot be shown in the text diff editor.`);
+    return;
+  }
   const label = `${path} (${staged ? "Index" : "Working Tree"})`;
-  const leftUri = provider.register(node.repositoryRoot, `${label}:left`, left.toString("utf8"));
-  const rightUri = provider.register(node.repositoryRoot, `${label}:right`, right.toString("utf8"));
+  const leftUri = provider.registerFile(node.repositoryRoot, `${label}:left`, oldPath, left.toString("utf8"));
+  const rightUri = provider.registerFile(node.repositoryRoot, `${label}:right`, path, right.toString("utf8"));
   await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
+}
+
+export function isBinaryContent(content: Buffer): boolean {
+  return content.includes(0);
 }

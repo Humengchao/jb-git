@@ -523,7 +523,21 @@ export class GitRepository {
   }
 
   public async push(forceWithLease = false, signal?: AbortSignal): Promise<void> {
-    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : [])], { cwd: this.info.rootPath, signal }));
+    await this.serial(async () => {
+      const status = await this.status(signal);
+      if (!status.branch.upstream && status.branch.head) {
+        const remotes = await this.remotes();
+        const remote = remotes.find((item) => item.name === "origin") ?? (remotes.length === 1 ? remotes[0] : undefined);
+        if (!remote) {
+          throw new Error(remotes.length
+            ? "This branch has no upstream. Use 'JB Git: Push Remote' to select one."
+            : "This repository has no remote. Add a remote before pushing.");
+        }
+        await this.runner.run(["push", "--set-upstream", ...(forceWithLease ? ["--force-with-lease"] : []), remote.name, status.branch.head], { cwd: this.info.rootPath, signal });
+        return;
+      }
+      await this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : [])], { cwd: this.info.rootPath, signal });
+    });
   }
 
   public async merge(ref: string): Promise<void> {
@@ -702,7 +716,7 @@ export class GitRepository {
       const result = await this.runner.run(["show", objectSpec], { cwd: this.info.rootPath });
       return result.stdout;
     } catch (error) {
-      if (error instanceof GitCommandError) return Buffer.alloc(0);
+      if (error instanceof GitCommandError && /(?:does not exist|exists on disk, but not in|path .* not in|invalid object name ['\"]?(?:HEAD|INDEX))/i.test(error.stderr)) return Buffer.alloc(0);
       throw error;
     }
   }

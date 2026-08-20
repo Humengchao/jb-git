@@ -5,6 +5,8 @@ export interface GitRunOptions {
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   input?: string | Buffer;
+  /** Maximum combined stdout/stderr retained in memory. Defaults to 64 MiB. */
+  maxOutputBytes?: number;
 }
 
 export interface GitResult {
@@ -59,7 +61,7 @@ export class GitCommandError extends Error {
     const safeArgs = redactGitArgs(args);
     const stderr = redactGitText(result.stderr?.toString("utf8") ?? "");
     const stdout = redactGitText(result.stdout?.toString("utf8") ?? "");
-    const detail = stderr.trim() || stdout.trim() || "Git command failed";
+    const detail = cause instanceof Error ? cause.message : stderr.trim() || stdout.trim() || "Git command failed";
     super(`git ${safeArgs.join(" ")}: ${detail}`);
     this.name = "GitCommandError";
     this.exitCode = result.exitCode ?? null;
@@ -88,6 +90,8 @@ export class GitRunner {
       const startedAt = new Date();
       const started = Date.now();
       let settled = false;
+      let terminationError: Error | undefined;
+      let forceKillTimer: NodeJS.Timeout | undefined;
       const child = spawn(this.gitPath, [...args], {
         cwd: options.cwd,
         env: { ...process.env, ...options.env },
@@ -96,15 +100,35 @@ export class GitRunner {
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
+      let outputBytes = 0;
+      const maximumOutput = options.maxOutputBytes ?? 64 * 1024 * 1024;
 
       const finish = (callback: () => void): void => {
         if (settled) return;
         settled = true;
+        if (forceKillTimer) clearTimeout(forceKillTimer);
+        options.signal?.removeEventListener("abort", abort);
         callback();
       };
 
-      child.stdout.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
-      child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+      const terminate = (error: Error): void => {
+        if (terminationError) return;
+        terminationError = error;
+        child.kill("SIGTERM");
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+        forceKillTimer.unref();
+      };
+      const remember = (target: Buffer[], chunk: Buffer): void => {
+        const copy = Buffer.from(chunk);
+        outputBytes += copy.length;
+        if (outputBytes > maximumOutput) {
+          terminate(new Error(`Git command output exceeded the ${maximumOutput}-byte safety limit`));
+          return;
+        }
+        target.push(copy);
+      };
+      child.stdout.on("data", (chunk: Buffer) => remember(stdout, chunk));
+      child.stderr.on("data", (chunk: Buffer) => remember(stderr, chunk));
       child.on("error", (error) => {
         finish(() => {
           this.emitTrace(args, options.cwd, startedAt, started, null, "", error.message);
@@ -118,8 +142,11 @@ export class GitRunner {
           exitCode: exitCode ?? -1,
         };
         finish(() => {
-          this.emitTrace(args, options.cwd, startedAt, started, result.exitCode, result.stdout.toString("utf8"), result.stderr.toString("utf8"));
-          if (result.exitCode === 0) {
+          const terminationMessage = terminationError?.message ?? "";
+          this.emitTrace(args, options.cwd, startedAt, started, terminationError ? null : result.exitCode, result.stdout.toString("utf8"), terminationMessage || result.stderr.toString("utf8"));
+          if (terminationError) {
+            reject(new GitCommandError(args, result, terminationError));
+          } else if (result.exitCode === 0) {
             resolve(result);
           } else {
             reject(new GitCommandError(args, result));
@@ -128,11 +155,7 @@ export class GitRunner {
       });
 
       const abort = (): void => {
-        child.kill();
-        finish(() => {
-          this.emitTrace(args, options.cwd, startedAt, started, null, "", "Git command aborted");
-          reject(new GitCommandError(args, {}, new Error("Git command aborted")));
-        });
+        terminate(new Error("Git command aborted"));
       };
       if (options.signal) {
         if (options.signal.aborted) {
@@ -140,9 +163,11 @@ export class GitRunner {
           return;
         }
         options.signal.addEventListener("abort", abort, { once: true });
-        child.once("close", () => options.signal?.removeEventListener("abort", abort));
       }
 
+      child.stdin.on("error", () => {
+        // A terminating child can close stdin before a pending write finishes.
+      });
       if (options.input !== undefined) {
         child.stdin.end(options.input);
       } else {

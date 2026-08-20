@@ -6,7 +6,7 @@ import { GitTraceEvent } from "../git/runner";
 import { RepositoryManager } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
 import { ChangeNode } from "../views/changesTree";
-import { DiffContentProvider } from "../views/diffProvider";
+import { DiffContentProvider, isBinaryContent } from "../views/diffProvider";
 import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
 import { validateGitRefName, validatePathInput } from "../inputValidation";
@@ -247,7 +247,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const commit = commits.find((item) => item.hash === this.selectedHash);
         if (commit) selection = { commit, files: await this.manager.commitFiles(repository.info.rootPath, commit.hash) };
         if (version !== this.updateVersion) return;
-        logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: commits.length >= this.logLimit };
+        logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: this.logLimit < 5_000 && commits.length >= this.logLimit };
       }
       const lists = this.changelists.lists(root).map((list) => ({
         id: list.id,
@@ -422,15 +422,17 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
               snapshot.repository.fileContent(file.path, commit.hash),
               snapshot.repository.fileContent(file.path),
             ]);
+            if (isBinaryContent(left) || isBinaryContent(right)) return void vscode.window.showInformationMessage(`${file.path} is binary and cannot be shown in the text diff editor.`);
             const label = `${file.path} (${commit.hash.slice(0, 8)} ↔ Local)`;
-            const leftUri = this.diffProvider.register(root, `${label}:commit`, left.toString("utf8"));
-            const rightUri = this.diffProvider.register(root, `${label}:local`, right.toString("utf8"));
+            const leftUri = this.diffProvider.registerFile(root, `${label}:commit`, file.path, left.toString("utf8"));
+            const rightUri = this.diffProvider.registerFile(root, `${label}:local`, file.path, right.toString("utf8"));
             await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
             return;
           }
           if (message.action === "openRepositoryFile") {
             const content = await snapshot.repository.fileContent(file.path, commit.hash);
-            const uri = this.diffProvider.register(root, `${file.path}@${commit.hash.slice(0, 8)}`, content.toString("utf8"));
+            if (isBinaryContent(content)) return void vscode.window.showInformationMessage(`${file.path} is binary and cannot be opened as text.`);
+            const uri = this.diffProvider.registerFile(root, `${file.path}@${commit.hash.slice(0, 8)}`, file.path, content.toString("utf8"));
             const document = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
             return;
@@ -714,8 +716,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       file.status.startsWith("D") ? Promise.resolve(Buffer.alloc(0)) : repository.fileContent(file.path, commit.hash),
     ]);
     const label = `${file.path} (${commit.hash.slice(0, 8)})`;
-    const leftUri = this.diffProvider.register(root, `${label}:parent`, left.toString("utf8"));
-    const rightUri = this.diffProvider.register(root, `${label}:commit`, right.toString("utf8"));
+    if (isBinaryContent(left) || isBinaryContent(right)) return void vscode.window.showInformationMessage(`${file.path} is binary and cannot be shown in the text diff editor.`);
+    const leftUri = this.diffProvider.registerFile(root, `${label}:parent`, oldPath, left.toString("utf8"));
+    const rightUri = this.diffProvider.registerFile(root, `${label}:commit`, file.path, right.toString("utf8"));
     await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
   }
 }
@@ -973,6 +976,11 @@ const logScript = String.raw`
   let deferredState;
   let consoleFilter = uiState.consoleFilter || 'operations';
   let consolePaused = Boolean(uiState.consolePaused);
+  let virtualCommits = [];
+  let virtualGraph = [];
+  let virtualRenderFrame;
+  const commitRowHeight = 27;
+  const virtualThreshold = 500;
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
   const zh = document.documentElement.lang.toLowerCase().startsWith('zh') ? {
     'Log': '日志', 'Git Log': 'Git 日志', 'Console': '控制台', 'Git Console': 'Git 控制台',
@@ -1126,7 +1134,7 @@ const logScript = String.raw`
   function blocksStateRender() {
     const active = document.activeElement;
     return Boolean(openMenu || document.querySelector('.dragging, .splitter.active') ||
-      (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)));
+      (active && active.tagName === 'SELECT'));
   }
 
   function applyIncomingState(next) {
@@ -1608,7 +1616,12 @@ const logScript = String.raw`
     pane.append(commitFilterBar());
     const head = node('div', 'table-head'); head.append(node('span', '', 'Commit'), node('span', '', 'Author'), node('span', '', 'Date'), node('span', '', 'Hash'));
     const scroll = node('div', 'commit-scroll'); scroll.id = 'commit-scroll';
-    const list = node('div', 'commit-list'); list.id = 'commit-list'; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Git commits'); scroll.append(head, list); pane.append(scroll); renderCommitRows(list); return pane;
+    const list = node('div', 'commit-list'); list.id = 'commit-list'; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Git commits');
+    scroll.addEventListener('scroll', () => {
+      if (virtualCommits.length <= virtualThreshold || virtualRenderFrame) return;
+      virtualRenderFrame = requestAnimationFrame(() => { virtualRenderFrame = undefined; renderCommitWindow(list); });
+    });
+    scroll.append(head, list); pane.append(scroll); renderCommitRows(list); return pane;
   }
 
   function filterButton(label, value, title, active, items) {
@@ -1731,8 +1744,8 @@ const logScript = String.raw`
 
   function renderCommitRows(existing) {
     const list = existing || document.getElementById('commit-list'); if (!list) return;
-    list.replaceChildren();
     const model = graphModel(filteredCommits()); const commits = model.commits; const graph = graphLayout(commits, model);
+    virtualCommits = commits; virtualGraph = graph;
     currentGraphFragments = model.fragments;
     for (const id of [...collapsedGraphSeries]) if (!currentGraphFragments.has(id)) collapsedGraphSeries.delete(id);
     const currentHash = pendingCommitHash || state.selection?.commit?.hash;
@@ -1741,16 +1754,34 @@ const logScript = String.raw`
     }
     if (!commits.length) {
       pendingCommitHash = undefined;
+      list.replaceChildren();
       list.append(node('div', 'empty', 'No match in the ' + String(state.logLimit || (state.commits || []).length) + ' loaded commits.'));
       if (state.hasMoreCommits) list.append(button('Load 300 more commits', 'Load older history', () => post('loadMore'), 'load-more'));
       return;
     }
-    commits.forEach((commit, index) => {
+    renderCommitWindow(list);
+  }
+
+  function renderCommitWindow(existing) {
+    const list = existing || document.getElementById('commit-list'); if (!list || !virtualCommits.length) return;
+    const scroll = list.parentElement;
+    const virtual = virtualCommits.length > virtualThreshold;
+    const visibleHeight = Math.max(270, scroll?.clientHeight || 600);
+    const first = virtual ? Math.max(0, Math.floor(Math.max(0, (scroll?.scrollTop || 0) - commitRowHeight) / commitRowHeight) - 18) : 0;
+    const last = virtual ? Math.min(virtualCommits.length, first + Math.ceil(visibleHeight / commitRowHeight) + 36) : virtualCommits.length;
+    const currentHash = pendingCommitHash || state.selection?.commit?.hash;
+    list.replaceChildren();
+    if (first) {
+      const spacer = node('div', 'virtual-spacer'); spacer.style.height = String(first * commitRowHeight) + 'px'; spacer.setAttribute('role', 'presentation'); list.append(spacer);
+    }
+    for (let index = first; index < last; index += 1) {
+      const commit = virtualCommits[index];
       const selected = (pendingCommitHash || state.selection?.commit.hash) === commit.hash;
       const row = node('div', 'commit-row' + (selected ? ' selected' : '')); row.dataset.hash = commit.hash;
+      row.dataset.index = String(index); row.setAttribute('aria-posinset', String(index + 1)); row.setAttribute('aria-setsize', String(virtualCommits.length));
       row.tabIndex = selected || (!currentHash && index === 0) ? 0 : -1; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
       row.setAttribute('aria-label', (commit.subject || 'No subject') + ', ' + commit.author + ', ' + formatDate(commit.authoredAt) + ', ' + commit.hash.slice(0, 8));
-      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(graph[index]); canvas.title = 'Click a graph line to select or collapse its series'; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(graph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
+      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(virtualGraph[index]); canvas.title = 'Click a graph line to select or collapse its series'; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
       const refs = node('div', 'refs'); for (const ref of (commit.refs || []).slice(0, 2)) refs.append(node('span', 'ref', shortRef(ref)));
       if ((commit.refs || []).length > 2) { const more = node('span', 'ref', '+' + String(commit.refs.length - 2)); more.title = commit.refs.slice(2).map(shortRef).join('\n'); refs.append(more); }
       subject.append(refs, node('span', 'subject', commit.subject || '(no subject)'));
@@ -1788,21 +1819,36 @@ const logScript = String.raw`
         ];
       });
       list.append(row);
-    });
+    }
+    if (last < virtualCommits.length) {
+      const spacer = node('div', 'virtual-spacer'); spacer.style.height = String((virtualCommits.length - last) * commitRowHeight) + 'px'; spacer.setAttribute('role', 'presentation'); list.append(spacer);
+    }
     if (state.hasMoreCommits) list.append(button('Load 300 more commits', 'Load older history', () => post('loadMore'), 'load-more'));
     requestAnimationFrame(drawGraphs);
   }
 
   function navigateCommitRows(event, row) {
-    const rows = [...document.querySelectorAll('.commit-row')]; const current = rows.indexOf(row); let next = current;
-    if (event.key === 'ArrowDown') next = Math.min(rows.length - 1, current + 1);
+    const current = Number(row.dataset.index); let next = current;
+    if (event.key === 'ArrowDown') next = Math.min(virtualCommits.length - 1, current + 1);
     else if (event.key === 'ArrowUp') next = Math.max(0, current - 1);
     else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = rows.length - 1;
-    else if (event.key === 'PageDown') next = Math.min(rows.length - 1, current + 10);
+    else if (event.key === 'End') next = virtualCommits.length - 1;
+    else if (event.key === 'PageDown') next = Math.min(virtualCommits.length - 1, current + 10);
     else if (event.key === 'PageUp') next = Math.max(0, current - 10);
     else return;
-    event.preventDefault(); rows[next]?.click(); rows[next]?.focus(); rows[next]?.scrollIntoView({ block: 'nearest' });
+    event.preventDefault(); selectVirtualCommit(next, true);
+  }
+
+  function selectVirtualCommit(index, focus = false) {
+    const commit = virtualCommits[index]; if (!commit) return;
+    pendingCommitHash = commit.hash; post('selectCommit', { hash: commit.hash });
+    const scroll = document.getElementById('commit-scroll');
+    const top = commitRowHeight + index * commitRowHeight;
+    if (scroll && (top < scroll.scrollTop + commitRowHeight || top + commitRowHeight > scroll.scrollTop + scroll.clientHeight)) {
+      scroll.scrollTop = Math.max(0, top - Math.floor(scroll.clientHeight / 2));
+    }
+    renderCommitWindow();
+    if (focus) requestAnimationFrame(() => document.querySelector('.commit-row[data-hash="' + CSS.escape(commit.hash) + '"]')?.focus({ preventScroll: true }));
   }
 
   function refreshDetailsForFilter() {
@@ -1811,7 +1857,8 @@ const logScript = String.raw`
 
   function selectCommitByHash(hash) {
     const row = document.querySelector('.commit-row[data-hash="' + CSS.escape(hash) + '"]');
-    if (row) { row.click(); row.scrollIntoView({ block: 'nearest' }); }
+    if (row) { row.click(); row.scrollIntoView({ block: 'nearest' }); return; }
+    const index = virtualCommits.findIndex(commit => commit.hash === hash); if (index >= 0) selectVirtualCommit(index, true);
   }
 
   function filteredCommits() {

@@ -92,6 +92,13 @@ test("keeps filtered selection, details, and progressively loaded history consis
   assert.match(scriptMatch[1], /Load 300 more commits/);
 });
 
+test("virtualizes large commit lists and stops offering history past the hard cap", () => {
+  assert.ok(scriptMatch);
+  assert.match(scriptMatch[1], /virtualThreshold = 500/);
+  assert.match(scriptMatch[1], /renderCommitWindow/);
+  assert.match(source, /this\.logLimit < 5_000 && commits\.length >= this\.logLimit/);
+});
+
 test("provides safe local-change commits and repository-scoped drafts", () => {
   assert.ok(scriptMatch);
   assert.match(source, /listId\?: string/);
