@@ -189,7 +189,8 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   await repository.applyStash(stashes[0].ref);
   assert.equal((await repository.status()).changes.find((change) => change.path === "file.txt")?.unstaged, true);
   const patch = await repository.patch(["file.txt"]);
-  assert.match(patch, /diff --git/);
+  assert.ok(Buffer.isBuffer(patch), "shelf patches stay raw bytes to survive non-UTF-8 content");
+  assert.match(patch.toString("utf8"), /diff --git/);
   const patchFile = join(root, "shelf.patch");
   writeFileSync(patchFile, patch);
   git(root, "restore", "file.txt");

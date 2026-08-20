@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Stage/unstage exactly the selected hunk: a patch built for a later hunk no longer silently includes every earlier hunk.
+- Keep hunk staging working in CRLF files and preserve their line endings in the index.
+- Store shelf patches as raw bytes so non-UTF-8 (e.g. GBK) file content survives shelving, and skip conflicted files instead of silently resolving a merge to HEAD.
+- Replace the sandbox-blocked window.confirm() in the merge editor with host-side confirmation dialogs, restoring Accept Left, Accept Right, and Cancel.
+- Show first-parent changed files for merge commits in commit details.
+- Parse remotes whose URLs contain spaces, and treat option-like revision input (e.g. --abort) as a revision rather than a Git flag.
+- Refresh repository state even when a Git operation fails, cap the auto-refresh debounce delay, and stop re-decoding huge Git output for the console trace.
+- Disable Git terminal credential prompts, drop optional index locks, and ignore repository-targeting GIT_* variables inherited from hook environments.
+- Fix commit-option checkboxes overwriting each other's saved state, duplicate merge/comparison panels from rapid double-clicks, and extension-host tests failing in Electron-spawned terminals.
+
 ## 0.1.3
 
 - Route active files to the deepest matching nested repository and keep lightweight startup discovery from flooding the system with Git commands.

@@ -51,6 +51,33 @@ export function redactGitArgs(args: readonly string[]): string[] {
   });
 }
 
+/** Bytes of process output decoded for a trace preview before redaction. */
+const TRACE_PREVIEW_BYTES = 16_000;
+
+/** Decodes only a small prefix for tracing so multi-megabyte output never runs through the redaction regexes. */
+function tracePreview(output: Buffer | string): string {
+  const truncated = output.length > TRACE_PREVIEW_BYTES;
+  let text = Buffer.isBuffer(output) ? output.subarray(0, TRACE_PREVIEW_BYTES).toString("utf8") : output.slice(0, TRACE_PREVIEW_BYTES);
+  // A credential straddling the cut would evade the redaction patterns, so
+  // the tail of a truncated preview is dropped as well.
+  if (truncated) text = text.slice(0, -200);
+  return redactGitText(text).slice(0, 8_000);
+}
+
+/**
+ * Environment for a spawned Git process. Repo-targeting variables that a
+ * hook-launched editor may have inherited are stripped so commands act on the
+ * requested cwd, and interactive credential prompts are disabled because no
+ * terminal is attached. Explicit overrides always win.
+ */
+function gitProcessEnv(overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", ...overrides };
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"]) {
+    if (overrides?.[name] === undefined) delete env[name];
+  }
+  return env;
+}
+
 export class GitCommandError extends Error {
   public readonly exitCode: number | null;
   public readonly stderr: string;
@@ -94,7 +121,7 @@ export class GitRunner {
       let forceKillTimer: NodeJS.Timeout | undefined;
       const child = spawn(this.gitPath, [...args], {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
+        env: gitProcessEnv(options.env),
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
@@ -143,7 +170,7 @@ export class GitRunner {
         };
         finish(() => {
           const terminationMessage = terminationError?.message ?? "";
-          this.emitTrace(args, options.cwd, startedAt, started, terminationError ? null : result.exitCode, result.stdout.toString("utf8"), terminationMessage || result.stderr.toString("utf8"));
+          this.emitTrace(args, options.cwd, startedAt, started, terminationError ? null : result.exitCode, result.stdout, terminationMessage || result.stderr);
           if (terminationError) {
             reject(new GitCommandError(args, result, terminationError));
           } else if (result.exitCode === 0) {
@@ -187,16 +214,17 @@ export class GitRunner {
 
   private emitTrace(
     args: readonly string[], cwd: string, startedAt: Date, started: number,
-    exitCode: number | null, stdout: string, stderr: string,
+    exitCode: number | null, stdout: Buffer | string, stderr: Buffer | string,
   ): void {
+    if (this.traceListeners.size === 0) return;
     const event: GitTraceEvent = {
       cwd,
       args: redactGitArgs(args),
       startedAt: startedAt.toISOString(),
       durationMs: Date.now() - started,
       exitCode,
-      stdout: redactGitText(stdout).slice(0, 8_000),
-      stderr: redactGitText(stderr).slice(0, 8_000),
+      stdout: tracePreview(stdout),
+      stderr: tracePreview(stderr),
     };
     for (const listener of this.traceListeners) {
       try {

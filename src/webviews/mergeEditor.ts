@@ -10,7 +10,16 @@ type MergeEditorMessage =
   | { type: "ready" }
   | { type: "apply"; result: string; deleted?: boolean }
   | { type: "dirty"; result: string; deleted?: boolean }
-  | { type: "cancel" };
+  | { type: "cancel" }
+  | { type: "confirm"; action: string };
+
+// The webview sandbox has no allow-modals, so window.confirm() silently
+// returns false there; confirmations must round-trip through the host.
+const CONFIRM_PROMPTS = new Map<string, { message: string; button: string }>([
+  ["acceptLeft", { message: "Replace the complete result with the left version?", button: "Replace" }],
+  ["acceptRight", { message: "Replace the complete result with the right version?", button: "Replace" }],
+  ["cancel", { message: "Discard the unapplied merge result?", button: "Discard" }],
+]);
 
 interface MergeEditorLabels {
   ours: string;
@@ -38,6 +47,7 @@ const MERGE_DRAFT_TTL_MS = 14 * 24 * 60 * 60 * 1_000;
 /** IntelliJ-inspired three-pane editor for a single unmerged text file. */
 export class MergeConflictEditor implements vscode.Disposable {
   private readonly panels = new Map<string, vscode.WebviewPanel>();
+  private readonly pendingOpens = new Set<string>();
   private readonly drafts: Record<string, MergeDraft>;
   private draftSaveTimer?: NodeJS.Timeout;
   private disposed = false;
@@ -59,7 +69,18 @@ export class MergeConflictEditor implements vscode.Disposable {
       existing.reveal(vscode.ViewColumn.Active, false);
       return true;
     }
+    // A second open for the same file while versions are still loading would
+    // create a duplicate panel.
+    if (this.pendingOpens.has(key)) return true;
+    this.pendingOpens.add(key);
+    try {
+      return await this.openPanel(key, rootPath, pathSpec);
+    } finally {
+      this.pendingOpens.delete(key);
+    }
+  }
 
+  private async openPanel(key: string, rootPath: string, pathSpec: string): Promise<boolean> {
     const versions = await this.manager.conflictVersions(rootPath, pathSpec);
     if (versions.binary) return false;
     const fingerprint = conflictFingerprint(versions);
@@ -106,7 +127,7 @@ export class MergeConflictEditor implements vscode.Disposable {
     const disposeRegistration = panel.onDidDispose(() => {
       disposeRegistration.dispose();
       messageRegistration?.dispose();
-      this.panels.delete(key);
+      if (this.panels.get(key) === panel) this.panels.delete(key);
       if (dirty && !allowDispose && !this.disposed) {
         void vscode.window.showInformationMessage(
           `The unapplied merge result for ${pathSpec} was saved as a draft.`,
@@ -146,6 +167,13 @@ export class MergeConflictEditor implements vscode.Disposable {
         delete this.drafts[key];
         await this.saveDrafts();
         panel.dispose();
+        return;
+      }
+      if (message.type === "confirm") {
+        const prompt = CONFIRM_PROMPTS.get(message.action);
+        if (!prompt) return;
+        const answer = await vscode.window.showWarningMessage(prompt.message, { modal: true }, prompt.button);
+        if (answer === prompt.button) await panel.webview.postMessage({ type: "confirmed", action: message.action });
         return;
       }
       if (message.type !== "apply" || typeof message.result !== "string") return;
@@ -524,19 +552,18 @@ const mergeScript = String.raw`
   document.getElementById('take-left').addEventListener('click', () => chooseCurrent('ours'));
   document.getElementById('take-both').addEventListener('click', () => chooseCurrent('both'));
   document.getElementById('take-right').addEventListener('click', () => chooseCurrent('theirs'));
-  document.getElementById('accept-left').addEventListener('click', () => {
-    if (!window.confirm('Replace the complete result with the left version?')) return;
-    result.value = left.value; resultDeleted = !window.mergeVersions.oursExists; saveDraft(); updateControls(false);
-  });
-  document.getElementById('accept-right').addEventListener('click', () => {
-    if (!window.confirm('Replace the complete result with the right version?')) return;
-    result.value = right.value; resultDeleted = !window.mergeVersions.theirsExists; saveDraft(); updateControls(false);
-  });
+  // window.confirm() is disabled in the webview sandbox; confirmations are
+  // delegated to the host, which answers with a 'confirmed' message.
+  document.getElementById('accept-left').addEventListener('click', () => vscode.postMessage({ type: 'confirm', action: 'acceptLeft' }));
+  document.getElementById('accept-right').addEventListener('click', () => vscode.postMessage({ type: 'confirm', action: 'acceptRight' }));
   document.getElementById('reset').addEventListener('click', () => { result.value = initialResult; resultDeleted = initialResultDeleted; currentConflict = 0; saveDraft(); updateControls(true); });
   document.getElementById('cancel').addEventListener('click', () => {
-    if ((result.value === initialResult && resultDeleted === initialResultDeleted) || window.confirm('Discard the unapplied merge result?')) {
-      if (draftTimer) clearTimeout(draftTimer); vscode.postMessage({ type: 'cancel' });
+    if (result.value === initialResult && resultDeleted === initialResultDeleted) {
+      if (draftTimer) clearTimeout(draftTimer);
+      vscode.postMessage({ type: 'cancel' });
+      return;
     }
+    vscode.postMessage({ type: 'confirm', action: 'cancel' });
   });
   apply.addEventListener('click', () => {
     if (conflicts.length || applying) return;
@@ -606,6 +633,17 @@ const mergeScript = String.raw`
       if (message.restoredDraft) {
         counter.className = 'counter';
         counter.textContent = conflicts.length ? counter.textContent + ' · draft restored' : 'Draft restored · ready to apply';
+      }
+      return;
+    }
+    if (message.type === 'confirmed') {
+      if (message.action === 'acceptLeft') {
+        result.value = left.value; resultDeleted = !window.mergeVersions.oursExists; saveDraft(); updateControls(false);
+      } else if (message.action === 'acceptRight') {
+        result.value = right.value; resultDeleted = !window.mergeVersions.theirsExists; saveDraft(); updateControls(false);
+      } else if (message.action === 'cancel') {
+        if (draftTimer) clearTimeout(draftTimer);
+        vscode.postMessage({ type: 'cancel' });
       }
       return;
     }

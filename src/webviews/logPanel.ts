@@ -638,9 +638,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (message.type === "createShelf") {
-        const paths = changes
-          .filter((change) => selected.has(change.path) && change.kind !== "untracked" && change.kind !== "ignored")
+        const eligible = changes.filter((change) => selected.has(change.path) && change.kind !== "untracked" && change.kind !== "ignored");
+        // Shelving a conflicted path would reset its unmerged index entry to
+        // HEAD, silently "resolving" the merge with the other side discarded.
+        const conflicted = eligible.filter((change) => change.conflicted);
+        const paths = eligible
+          .filter((change) => !change.conflicted)
           .flatMap((change) => [change.path, ...(change.originalPath ? [change.originalPath] : [])]);
+        if (conflicted.length) {
+          void vscode.window.showWarningMessage(`Skipped ${conflicted.length} conflicted file(s): resolve merge conflicts before shelving them.`);
+        }
         if (!paths.length) return void vscode.window.showInformationMessage("Select at least one tracked change to shelf.");
         const name = await vscode.window.showInputBox({ title: "Shelve Changes", prompt: "Shelf name", value: "Shelf" });
         if (name?.trim()) {
@@ -1400,9 +1407,15 @@ const logScript = String.raw`
   }
 
   function checkboxOption(text, key, root) {
-    const options = { ...(uiState.commitOptions || {}) }; const repositoryOptions = { ...(options[root] || {}) };
-    const label = node('label'); const input = node('input'); input.type = 'checkbox'; input.checked = Boolean(repositoryOptions[key]);
-    input.addEventListener('change', () => { repositoryOptions[key] = input.checked; options[root] = repositoryOptions; saveUiState({ commitOptions: options }); });
+    const persisted = (uiState.commitOptions || {})[root] || {};
+    const label = node('label'); const input = node('input'); input.type = 'checkbox'; input.checked = Boolean(persisted[key]);
+    input.addEventListener('change', () => {
+      // Merge over the live uiState: a render-time snapshot would overwrite
+      // whatever the other checkboxes saved since this one was created.
+      const options = { ...(uiState.commitOptions || {}) };
+      options[root] = { ...(options[root] || {}), [key]: input.checked };
+      saveUiState({ commitOptions: options });
+    });
     label.append(input, node('span', '', text)); return { label, input };
   }
 

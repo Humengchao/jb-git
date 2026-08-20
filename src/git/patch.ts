@@ -4,7 +4,9 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$/;
 
 /** Parses the hunk records from a unified text diff. */
 export function parseUnifiedDiff(output: string): GitDiffHunk[] {
-  const lines = output.replace(/\r\n/g, "\n").split("\n");
+  // Split on LF only: a trailing CR is file content (CRLF repositories) and
+  // must survive into the rebuilt patch, or `git apply` rejects the hunk.
+  const lines = output.split("\n");
   const hunks: GitDiffHunk[] = [];
   let current: GitDiffHunk | undefined;
   for (let index = 0; index < lines.length; index += 1) {
@@ -31,10 +33,12 @@ export function parseUnifiedDiff(output: string): GitDiffHunk[] {
 
 /** Rebuilds a standalone patch containing exactly one hunk from a one-file diff. */
 export function patchForHunk(output: string, hunk: GitDiffHunk): string {
-  const normalized = output.replace(/\r\n/g, "\n");
-  const lines = normalized.split("\n");
+  const lines = output.split("\n");
   const headerIndex = lines.indexOf(hunk.header);
   if (headerIndex < 0) throw new Error("The selected Git hunk is no longer present; refresh the changes view.");
-  const fileHeader = lines.slice(0, headerIndex).join("\n");
+  // The file header ends at the FIRST hunk of the diff; the selected hunk may
+  // be a later one, and slicing up to it would smuggle in every earlier hunk.
+  const firstHunkIndex = lines.findIndex((line) => HUNK_HEADER.test(line));
+  const fileHeader = lines.slice(0, firstHunkIndex).join("\n");
   return `${fileHeader}\n${hunk.header}\n${hunk.lines.join("\n")}\n`;
 }

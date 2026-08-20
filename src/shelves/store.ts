@@ -49,7 +49,7 @@ export class ShelfStore implements vscode.Disposable {
 
   public async create(repository: GitRepository, name: string, paths: readonly string[]): Promise<ShelfEntry> {
     const patch = await repository.patch(paths);
-    if (!patch.trim()) throw new Error("There are no tracked changes to shelf.");
+    if (patch.length === 0) throw new Error("There are no tracked changes to shelf.");
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const directory = this.repositoryDirectory(repository.info.rootPath);
     await mkdir(directory, { recursive: true });
@@ -63,7 +63,8 @@ export class ShelfStore implements vscode.Disposable {
       patchFile,
       paths: [...paths],
     };
-    await writeFile(patchFile, patch, "utf8");
+    // Raw bytes: the patch may contain non-UTF-8 file content.
+    await writeFile(patchFile, patch);
     await writeFile(metadataFile, JSON.stringify(entry, null, 2), "utf8");
     // Persist first: if cleanup fails, the patch remains recoverable and the
     // working copy is never modified without a saved shelf.

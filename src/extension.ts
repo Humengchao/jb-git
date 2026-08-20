@@ -117,11 +117,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const pendingRefreshRoots = new Set<string>();
   let pendingDiscovery = false;
   let refreshTimer: NodeJS.Timeout | undefined;
+  let refreshDeadline: number | undefined;
   const scheduleRefresh = (): void => {
     if (refreshTimer) clearTimeout(refreshTimer);
     const delay = vscode.workspace.getConfiguration("jbGit").get<number>("refreshDebounceMs", 600);
+    // A steady event stream (auto-save while typing) must not defer the
+    // refresh forever, so the debounce is capped by a hard deadline.
+    refreshDeadline ??= Date.now() + Math.max(delay * 4, 2_000);
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined;
+      refreshDeadline = undefined;
       const roots = [...pendingRefreshRoots];
       const discover = pendingDiscovery;
       pendingRefreshRoots.clear();
@@ -130,7 +135,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         ? manager.discoverAndRefresh()
         : Promise.all(roots.map((root) => manager.refresh(root))).then(() => undefined);
       void operation.then(updateStatusBar, (error) => vscode.window.showErrorMessage(formatGitError(error)));
-    }, delay);
+    }, Math.max(0, Math.min(delay, refreshDeadline - Date.now())));
   };
   const scheduleRefreshRoot = (rootPath: string): void => {
     if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
@@ -260,6 +265,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!pendingRefreshRoots.size && !pendingDiscovery && refreshTimer) {
         clearTimeout(refreshTimer);
         refreshTimer = undefined;
+        refreshDeadline = undefined;
       }
       for (const snapshot of manager.all) {
         if (snapshot.status) {
@@ -749,9 +755,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(rootPath);
       if (!first?.status) return;
-      const paths = [...new Set(first.status.changes
-        .filter((change) => change.kind !== "untracked" && change.kind !== "ignored")
+      const eligible = first.status.changes.filter((change) => change.kind !== "untracked" && change.kind !== "ignored");
+      // Shelving a conflicted path would reset its unmerged index entry to
+      // HEAD, silently "resolving" the merge with the other side discarded.
+      const conflicted = eligible.filter((change) => change.conflicted);
+      const paths = [...new Set(eligible
+        .filter((change) => !change.conflicted)
         .flatMap((change) => [change.path, ...(change.originalPath ? [change.originalPath] : [])]))];
+      if (conflicted.length) {
+        void vscode.window.showWarningMessage(`Skipped ${conflicted.length} conflicted file(s): resolve merge conflicts before shelving them.`);
+      }
       if (paths.length === 0) return void vscode.window.showInformationMessage("There are no tracked changes to shelf.");
       const name = await vscode.window.showInputBox({ prompt: "Shelf name", value: "Shelf" });
       if (!name?.trim()) return;

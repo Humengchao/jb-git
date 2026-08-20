@@ -17,6 +17,7 @@ interface ComparisonSession {
 
 export class BranchComparisonWorkspace implements vscode.Disposable {
   private readonly sessions = new Map<string, ComparisonSession>();
+  private readonly pendingOpens = new Set<string>();
 
   public constructor(private readonly diffProvider: DiffContentProvider) {}
 
@@ -27,6 +28,18 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
       existing.panel.reveal(existing.panel.viewColumn, false);
       return;
     }
+    // A second open for the same comparison while the diff is still loading
+    // would create a duplicate panel.
+    if (this.pendingOpens.has(key)) return;
+    this.pendingOpens.add(key);
+    try {
+      await this.openPanel(key, repository, left, right);
+    } finally {
+      this.pendingOpens.delete(key);
+    }
+  }
+
+  private async openPanel(key: string, repository: GitRepository, left: GitBranch, right: GitBranch): Promise<void> {
     const files = await repository.diffFiles(left.oid, right.oid);
     const initialColumn = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
     const panel = vscode.window.createWebviewPanel(
@@ -98,7 +111,7 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
       }),
       panel.onDidDispose(() => {
         for (const disposable of session.disposables) disposable.dispose();
-        this.sessions.delete(key);
+        if (this.sessions.get(key) === session) this.sessions.delete(key);
       }),
     );
   }

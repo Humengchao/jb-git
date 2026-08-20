@@ -187,11 +187,23 @@ export class GitRepository {
 
   public async commitFiles(hash: string): Promise<GitCommitFile[]> {
     const revision = await this.resolveCommit(hash);
-    const output = await this.runner.text(
-      ["diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-M", "-z", revision],
-      { cwd: this.info.rootPath },
-    );
-    return parseNameStatus(output);
+    try {
+      // Diffing against the first parent also covers merge commits, which a
+      // plain `diff-tree <commit>` lists as empty; IntelliJ shows first-parent.
+      const output = await this.runner.text(
+        ["diff", "--no-ext-diff", "--name-status", "-z", "-M", `${revision}^`, revision, "--"],
+        { cwd: this.info.rootPath },
+      );
+      return parseNameStatus(output);
+    } catch (error) {
+      if (!(error instanceof GitCommandError)) throw error;
+      // A root commit has no first parent.
+      const output = await this.runner.text(
+        ["diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-M", "-z", revision],
+        { cwd: this.info.rootPath },
+      );
+      return parseNameStatus(output);
+    }
   }
 
   public async blame(pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
@@ -231,9 +243,11 @@ export class GitRepository {
     return entries;
   }
 
-  public async patch(paths: readonly string[]): Promise<string> {
+  /** Returns raw patch bytes: shelf content may be in any encoding, and a UTF-8 round-trip would corrupt it. */
+  public async patch(paths: readonly string[]): Promise<Buffer> {
     const base = (await this.currentRevision()) ?? await this.emptyTree();
-    return this.runner.text(["diff", "--binary", "--no-ext-diff", base, "--", ...paths], { cwd: this.info.rootPath });
+    const result = await this.runner.run(["diff", "--binary", "--no-ext-diff", base, "--", ...paths], { cwd: this.info.rootPath });
+    return result.stdout;
   }
 
   public async diffHunks(pathSpec: string, staged = false): Promise<GitDiffHunk[]> {
@@ -348,7 +362,9 @@ export class GitRepository {
     const output = await this.runner.text(["remote", "-v"], { cwd: this.info.rootPath });
     const byName = new Map<string, GitRemote>();
     for (const line of output.split(/\r?\n/).filter(Boolean)) {
-      const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(line.trim());
+      // `git remote -v` separates name and URL with a tab; the URL itself may
+      // contain spaces (local paths), so splitting on whitespace drops remotes.
+      const match = /^([^\t]+)\t(.+) \((fetch|push)\)$/.exec(line);
       if (!match) continue;
       const [, name, url, kind] = match;
       const existing = byName.get(name) ?? { name, fetchUrl: url, pushUrl: url };
@@ -380,7 +396,10 @@ export class GitRepository {
   }
 
   public async createTag(name: string, ref = "HEAD"): Promise<void> {
-    await this.serial(() => this.runner.run(["tag", name, ref], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      const revision = await this.resolveCommit(ref);
+      await this.runner.run(["tag", "--end-of-options", name, revision], { cwd: this.info.rootPath });
+    });
   }
 
   public async deleteTag(name: string): Promise<void> {
@@ -424,7 +443,7 @@ export class GitRepository {
   public async addWorktree(worktreePath: string, ref?: string, newBranch?: string): Promise<void> {
     const args = ["worktree", "add"];
     if (newBranch) args.push("-b", newBranch);
-    args.push(worktreePath);
+    args.push("--end-of-options", worktreePath);
     if (ref) args.push(ref);
     await this.serial(() => this.runner.run(args, { cwd: this.info.rootPath }));
   }
@@ -608,11 +627,11 @@ export class GitRepository {
   }
 
   public async cherryPick(hash: string): Promise<void> {
-    await this.serial(() => this.runner.run(["cherry-pick", hash], { cwd: this.info.rootPath }));
+    await this.serial(() => this.runner.run(["cherry-pick", "--end-of-options", hash], { cwd: this.info.rootPath }));
   }
 
   public async revert(hash: string): Promise<void> {
-    await this.serial(() => this.runner.run(["revert", "--no-edit", hash], { cwd: this.info.rootPath }));
+    await this.serial(() => this.runner.run(["revert", "--no-edit", "--end-of-options", hash], { cwd: this.info.rootPath }));
   }
 
   public async reset(ref: string, mode: "soft" | "mixed" | "hard"): Promise<void> {
@@ -647,15 +666,26 @@ export class GitRepository {
   }
 
   public async bisectStart(bad: string, good: string): Promise<void> {
-    await this.serial(() => this.runner.run(["bisect", "start", bad, good], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      // `git bisect` has its own option parser, so free-form input is pinned
+      // to resolved commit hashes instead of `--end-of-options`.
+      const [badRevision, goodRevision] = await Promise.all([this.resolveCommit(bad), this.resolveCommit(good)]);
+      await this.runner.run(["bisect", "start", badRevision, goodRevision], { cwd: this.info.rootPath });
+    });
   }
 
   public async bisectGood(ref = "HEAD"): Promise<void> {
-    await this.serial(() => this.runner.run(["bisect", "good", ref], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      const revision = await this.resolveCommit(ref);
+      await this.runner.run(["bisect", "good", revision], { cwd: this.info.rootPath });
+    });
   }
 
   public async bisectBad(ref = "HEAD"): Promise<void> {
-    await this.serial(() => this.runner.run(["bisect", "bad", ref], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      const revision = await this.resolveCommit(ref);
+      await this.runner.run(["bisect", "bad", revision], { cwd: this.info.rootPath });
+    });
   }
 
   public async bisectSkip(): Promise<void> {
