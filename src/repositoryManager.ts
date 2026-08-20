@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { discoverRepositories, discoverRepository, GitRepository } from "./git/repository";
 import { GitRunner } from "./git/runner";
-import { GitBlameEntry, GitBranch, GitCommitFile, GitCommitOptions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
+import { GitBlameEntry, GitBranch, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -141,6 +141,15 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async resolveConflict(rootPath: string, pathSpec: string, side: "ours" | "theirs"): Promise<void> {
     await this.requireRepository(rootPath).resolveConflict(pathSpec, side);
+    await this.refresh(rootPath);
+  }
+
+  public async conflictVersions(rootPath: string, pathSpec: string): Promise<GitConflictVersions> {
+    return this.requireRepository(rootPath).conflictVersions(pathSpec);
+  }
+
+  public async applyConflictResult(rootPath: string, pathSpec: string, content: string, deleted = false): Promise<void> {
+    await this.requireRepository(rootPath).applyConflictResult(pathSpec, content, deleted);
     await this.refresh(rootPath);
   }
 

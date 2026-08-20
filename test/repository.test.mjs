@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -351,9 +351,52 @@ test("detects an in-progress merge operation", async () => {
   assert.equal(operation.kind, "merge");
   assert.equal(operation.canContinue, true);
   assert.equal(operation.canAbort, true);
-  await repository.resolveConflict("conflict.txt", "ours");
-  await repository.markResolved(["conflict.txt"]);
+  const versions = await repository.conflictVersions("conflict.txt");
+  assert.equal(versions.base, "base\n");
+  assert.equal(versions.baseExists, true);
+  assert.equal(versions.ours, "main\n");
+  assert.equal(versions.oursExists, true);
+  assert.equal(versions.theirs, "feature\n");
+  assert.equal(versions.theirsExists, true);
+  assert.equal(versions.resultExists, true);
+  assert.match(versions.result, /^<<<<<<< HEAD$/m);
+  assert.match(versions.result, /^=======$/m);
+  assert.match(versions.result, /^>>>>>>> feature$/m);
+  assert.equal(versions.binary, false);
+  await repository.applyConflictResult("conflict.txt", "main\nfeature\n");
   assert.equal((await repository.status()).changes.find((change) => change.path === "conflict.txt")?.conflicted ?? false, false);
+  assert.equal(readText(join(root, "conflict.txt")), "main\nfeature\n");
+  assert.equal((await repository.fileContent("conflict.txt", "INDEX")).toString("utf8"), "main\nfeature\n");
+  git(root, "merge", "--abort");
+});
+
+test("represents an absent conflict side and can resolve the file as deleted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-delete-conflict-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "delete-me.txt"), "base\n");
+  git(root, "add", "delete-me.txt");
+  git(root, "commit", "-qm", "base");
+  const defaultBranch = git(root, "branch", "--show-current");
+  git(root, "switch", "-q", "-c", "delete-file");
+  git(root, "rm", "-q", "delete-me.txt");
+  git(root, "commit", "-qm", "delete file");
+  git(root, "switch", "-q", defaultBranch);
+  writeFileSync(join(root, "delete-me.txt"), "modified\n");
+  git(root, "commit", "-qam", "modify file");
+  assert.throws(() => git(root, "merge", "delete-file"));
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const versions = await repository.conflictVersions("delete-me.txt");
+  assert.equal(versions.oursExists, true);
+  assert.equal(versions.ours, "modified\n");
+  assert.equal(versions.theirsExists, false);
+  assert.equal(versions.theirs, "");
+  await repository.applyConflictResult("delete-me.txt", "", true);
+  assert.equal(existsSync(join(root, "delete-me.txt")), false);
+  assert.equal((await repository.status()).changes.some((change) => change.path === "delete-me.txt" && change.conflicted), false);
   git(root, "merge", "--abort");
 });
 

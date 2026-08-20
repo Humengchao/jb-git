@@ -30,6 +30,19 @@ export interface GitChange {
   conflicted: boolean;
 }
 
+export interface GitConflictVersions {
+  path: string;
+  base: string;
+  baseExists: boolean;
+  ours: string;
+  oursExists: boolean;
+  theirs: string;
+  theirsExists: boolean;
+  result: string;
+  resultExists: boolean;
+  binary: boolean;
+}
+
 export interface GitStatusSnapshot {
   branch: GitBranchStatus;
   changes: GitChange[];

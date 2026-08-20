@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { access, mkdtemp, opendir, readFile, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, opendir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
@@ -9,6 +9,7 @@ import {
   GitCommitOptions,
   GitCommit,
   GitCommitFile,
+  GitConflictVersions,
   GitLogOptions,
   GitBlameEntry,
   GitDiffHunk,
@@ -465,6 +466,37 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["checkout", `--${side}`, "--", pathSpec], { cwd: this.info.rootPath }));
   }
 
+  public async conflictVersions(pathSpec: string): Promise<GitConflictVersions> {
+    await this.assertConflictedPath(pathSpec);
+    const [base, ours, theirs, result] = await Promise.all([
+      this.conflictStage(pathSpec, 1),
+      this.conflictStage(pathSpec, 2),
+      this.conflictStage(pathSpec, 3),
+      this.conflictWorkingTree(pathSpec),
+    ]);
+    return {
+      path: pathSpec,
+      base: base?.toString("utf8") ?? "",
+      baseExists: base !== null,
+      ours: ours?.toString("utf8") ?? "",
+      oursExists: ours !== null,
+      theirs: theirs?.toString("utf8") ?? "",
+      theirsExists: theirs !== null,
+      result: result?.toString("utf8") ?? "",
+      resultExists: result !== null,
+      binary: [base, ours, theirs, result].some((content) => content?.includes(0) ?? false),
+    };
+  }
+
+  public async applyConflictResult(pathSpec: string, content: string, deleted = false): Promise<void> {
+    await this.serial(async () => {
+      await this.assertConflictedPath(pathSpec);
+      if (deleted) await rm(this.worktreePath(pathSpec), { force: true });
+      else await writeFile(this.worktreePath(pathSpec), content, "utf8");
+      await this.runner.run(["add", "--", pathSpec], { cwd: this.info.rootPath });
+    });
+  }
+
   public async markResolved(paths: readonly string[]): Promise<void> {
     await this.stage(paths);
   }
@@ -695,6 +727,38 @@ export class GitRepository {
       if (error instanceof GitCommandError) return null;
       throw error;
     }
+  }
+
+  private async assertConflictedPath(pathSpec: string): Promise<void> {
+    const change = (await this.status()).changes.find((candidate) => candidate.path === pathSpec);
+    if (!change?.conflicted) throw new Error(`${pathSpec} is no longer an unresolved conflict.`);
+  }
+
+  private async conflictStage(pathSpec: string, stage: 1 | 2 | 3): Promise<Buffer | null> {
+    try {
+      return (await this.runner.run(["show", `:${stage}:${pathSpec}`], { cwd: this.info.rootPath })).stdout;
+    } catch (error) {
+      // A stage is legitimately absent for add/delete and rename conflicts.
+      if (error instanceof GitCommandError) return null;
+      throw error;
+    }
+  }
+
+  private async conflictWorkingTree(pathSpec: string): Promise<Buffer | null> {
+    try {
+      return await readFile(this.worktreePath(pathSpec));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  private worktreePath(pathSpec: string): string {
+    if (!pathSpec || path.isAbsolute(pathSpec)) throw new Error("Conflict path must be relative to the repository.");
+    const resolved = path.resolve(this.info.rootPath, pathSpec);
+    const relative = path.relative(this.info.rootPath, resolved);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Conflict path is outside the repository.");
+    return resolved;
   }
 
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
