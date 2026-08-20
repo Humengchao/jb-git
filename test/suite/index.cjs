@@ -7,7 +7,7 @@ const path = require("node:path");
 const vscode = require("vscode");
 
 async function run() {
-  const extension = vscode.extensions.getExtension("local.jb-git");
+  const extension = vscode.extensions.getExtension("hmc.jb-git");
   assert.ok(extension, "the development extension should be discoverable");
   await extension.activate();
   assert.equal(extension.isActive, true, "the extension should activate without throwing");

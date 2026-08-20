@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.4
+
+- Change the Marketplace publisher identity from the local development placeholder to `hmc` and prepare a distinct installable release for publishing.
 
 - Fix the branch filter never returning to "All": tool-window state fields that reset to undefined (selected ref, path filter, error text, empty flag) are now sent explicitly, so the merging webview no longer keeps stale values.
 - Merge deferred state patches instead of overwriting them, and stop discarding commits that arrive together with a repository switch; both previously left the log stuck on stale data with Refresh unable to recover.
