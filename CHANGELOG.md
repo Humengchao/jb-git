@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3
+
+- Route active files to the deepest matching nested repository and keep lightweight startup discovery from flooding the system with Git commands.
+- Make rollback, operation-state, first-push, runner cancellation, large-output, binary diff, and invalid-revision behavior safer and more predictable.
+- Add guided Worktree, Remote, Stash, and Submodule management flows and make context-sensitive commands usable from the Command Palette.
+- Virtualize large histories, move author/date filtering into Git, cap history loading, and keep filter and context menus stable during background refreshes.
+- Match the commit graph to real visible topology, keep graph lanes interactive, and improve narrow-window and independently resizable three-column layouts.
+- Improve the three-pane merge editor with bounded draft persistence, syntax highlighting, smarter scroll alignment, responsive panes, and clearer Chinese labels.
+- Preserve newly added files when rolling back staged changes, restore staged renames completely, and support unstaging before the first commit.
+
 ## 0.1.2
 
 - Debounce repository refreshes, narrow Git metadata watchers, cache stable snapshots, and stop loading Log data while another tool-window tab is active.
