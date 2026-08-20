@@ -7,7 +7,7 @@ const scriptMatch = source.match(/const mergeScript = String\.raw`([\s\S]*?)`;\r
 
 function conflictParser() {
   assert.ok(scriptMatch);
-  const parserSource = scriptMatch[1].match(/(function marker\([\s\S]*?\n  })\r?\n\r?\n  function numbersFor/);
+  const parserSource = scriptMatch[1].match(/(function marker\([\s\S]*?\n  })\r?\n\r?\n  function lineCount/);
   assert.ok(parserSource);
   return new Function(`${parserSource[1]}; return parseConflicts;`)();
 }
@@ -31,6 +31,11 @@ test("provides editable three-pane conflict controls and a staged Apply flow", (
   assert.match(source, /changed outside this editor/);
   assert.match(scriptMatch[1], /type: 'dirty'/);
   assert.match(scriptMatch[1], /sourceLineHeight/);
+  assert.match(scriptMatch[1], /updateHighlight/);
+  assert.match(scriptMatch[1], /alignmentAnchors/);
+  assert.match(scriptMatch[1], /setTimeout\(send, 300\)/);
+  assert.match(source, /MAX_MERGE_DRAFT_BYTES/);
+  assert.match(source, /MAX_MERGE_DRAFTS/);
 });
 
 test("parses ordinary and diff3 conflict markers without including marker lines", () => {

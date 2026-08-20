@@ -59,6 +59,13 @@ test("supports persistent horizontal resizing for all three Git log columns", ()
   assert.match(scriptMatch[1], /aria-valuemax/);
 });
 
+test("collapses secondary panes instead of overflowing a narrow panel", () => {
+  assert.ok(scriptMatch);
+  assert.match(scriptMatch[1], /workspace\.classList\.toggle\('compact', compact\)/);
+  assert.match(source, /\.workspace\.compact > \.branches/);
+  assert.match(source, /\.workspace\.tiny/);
+});
+
 test("supports modifier-click branch selection and multi-branch actions", () => {
   assert.ok(scriptMatch);
   assert.match(scriptMatch[1], /event\.metaKey \|\| event\.ctrlKey/);
@@ -81,6 +88,8 @@ test("provides real branch, user, date, path, and ordering filters", () => {
   assert.match(scriptMatch[1], /First Parent/);
   assert.match(scriptMatch[1], /No Merges/);
   assert.match(scriptMatch[1], /setLogOptions/);
+  assert.match(scriptMatch[1], /author: authorFilter/);
+  assert.match(scriptMatch[1], /since: dateCutoff/);
 });
 
 test("keeps filtered selection, details, and progressively loaded history consistent", () => {

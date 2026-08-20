@@ -99,6 +99,9 @@ test("applies IntelliJ-style Git log graph options in Git", async () => {
   const noMerges = await repository.logRef("HEAD", 20, undefined, { order: "date", firstParent: false, noMerges: true });
   assert.equal(noMerges.some((commit) => commit.parents.length > 1), false);
   assert.equal(noMerges.some((commit) => commit.hash === featureRevision), true);
+  const byAuthor = await repository.logRef("HEAD", 20, undefined, { order: "date", firstParent: false, noMerges: false, author: "JB Git Test", since: "2000-01-01T00:00:00.000Z" });
+  assert.ok(byAuthor.length > 0);
+  assert.ok(byAuthor.every((commit) => commit.author === "JB Git Test"));
 });
 
 test("runs commit, branch, and stash operations through Git Core", async () => {

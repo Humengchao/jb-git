@@ -118,6 +118,8 @@ export class GitRepository {
       order,
       ...(options.firstParent ? ["--first-parent"] : []),
       ...(options.noMerges ? ["--no-merges"] : []),
+      ...(options.author ? [`--author=${options.author}`] : []),
+      ...(options.since ? [`--since=${options.since}`] : []),
       `--max-count=${Math.max(1, Math.min(limit, 5_000))}`,
       "--date=iso-strict",
       "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B%x01",

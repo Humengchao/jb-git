@@ -31,6 +31,9 @@ interface PersistedMergeDrafts {
 }
 
 const MERGE_DRAFTS_KEY = "jbGit.mergeDrafts";
+const MAX_MERGE_DRAFT_BYTES = 2 * 1024 * 1024;
+const MAX_MERGE_DRAFTS = 12;
+const MERGE_DRAFT_TTL_MS = 14 * 24 * 60 * 60 * 1_000;
 
 /** IntelliJ-inspired three-pane editor for a single unmerged text file. */
 export class MergeConflictEditor implements vscode.Disposable {
@@ -41,7 +44,11 @@ export class MergeConflictEditor implements vscode.Disposable {
 
   public constructor(private readonly manager: RepositoryManager, private readonly workspaceState: vscode.Memento) {
     const persisted = workspaceState.get<PersistedMergeDrafts>(MERGE_DRAFTS_KEY);
-    this.drafts = persisted?.version === 1 ? { ...persisted.drafts } : {};
+    const cutoff = Date.now() - MERGE_DRAFT_TTL_MS;
+    this.drafts = Object.fromEntries(Object.entries(persisted?.version === 1 ? persisted.drafts : {})
+      .filter(([, draft]) => draft.updatedAt >= cutoff && Buffer.byteLength(draft.result, "utf8") <= MAX_MERGE_DRAFT_BYTES)
+      .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+      .slice(0, MAX_MERGE_DRAFTS));
   }
 
   /** Returns false for binary conflicts, which must use a whole-file fallback. */
@@ -117,11 +124,18 @@ export class MergeConflictEditor implements vscode.Disposable {
           labels,
           title,
           restoredDraft: Boolean(restoredDraft),
+          language: path.extname(pathSpec).slice(1).toLowerCase() || path.basename(pathSpec).toLowerCase(),
         });
         return;
       }
       if (message.type === "dirty" && typeof message.result === "string") {
         dirty = true;
+        if (Buffer.byteLength(message.result, "utf8") > MAX_MERGE_DRAFT_BYTES) {
+          delete this.drafts[key];
+          this.scheduleSaveDrafts();
+          await panel.webview.postMessage({ type: "draftWarning", message: "This result is too large for draft recovery. Apply it before closing the editor." });
+          return;
+        }
         this.drafts[key] = { fingerprint, result: message.result, deleted: message.deleted === true, updatedAt: Date.now() };
         this.scheduleSaveDrafts();
         return;
@@ -170,6 +184,9 @@ export class MergeConflictEditor implements vscode.Disposable {
   }
 
   private async saveDrafts(): Promise<void> {
+    const retained = Object.entries(this.drafts).sort((left, right) => right[1].updatedAt - left[1].updatedAt).slice(0, MAX_MERGE_DRAFTS);
+    for (const key of Object.keys(this.drafts)) delete this.drafts[key];
+    Object.assign(this.drafts, Object.fromEntries(retained));
     await this.workspaceState.update(MERGE_DRAFTS_KEY, { version: 1, drafts: this.drafts } satisfies PersistedMergeDrafts);
   }
 
@@ -213,10 +230,20 @@ const mergeStyles = String.raw`
   .splitter:hover, .splitter.active { background: var(--vscode-sash-hoverBorder); }
   .code-shell { display: grid; grid-template-columns: 48px minmax(0, 1fr); min-height: 0; overflow: hidden; }
   .line-numbers { margin: 0; padding: 10px 8px 30px 4px; overflow: hidden; user-select: none; text-align: right; color: var(--vscode-editorLineNumber-foreground); background: var(--vscode-editorGutter-background); font: var(--vscode-editor-font-size, 13px) / var(--vscode-editor-line-height, 20px) var(--vscode-editor-font-family, monospace); }
-  textarea { width: 100%; height: 100%; margin: 0; padding: 10px 12px 30px; border: 0; outline: 0; resize: none; overflow: auto; white-space: pre; tab-size: var(--vscode-editor-tab-size, 4); color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); caret-color: var(--vscode-editorCursor-foreground); font: var(--vscode-editor-font-size, 13px) / var(--vscode-editor-line-height, 20px) var(--vscode-editor-font-family, monospace); }
+  .editor-stack { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--vscode-editor-background); }
+  .syntax-layer, textarea { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 10px 12px 30px; border: 0; outline: 0; overflow: auto; white-space: pre; tab-size: var(--vscode-editor-tab-size, 4); font: var(--vscode-editor-font-size, 13px) / var(--vscode-editor-line-height, 20px) var(--vscode-editor-font-family, monospace); }
+  .syntax-layer { pointer-events: none; min-width: max-content; min-height: max-content; color: var(--vscode-editor-foreground); background: transparent; overflow: visible; }
+  textarea { resize: none; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); caret-color: var(--vscode-editorCursor-foreground); }
+  textarea.syntax-enabled { color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
   textarea[readonly] { color: var(--vscode-editor-foreground); }
+  textarea[readonly].syntax-enabled { color: transparent; -webkit-text-fill-color: transparent; }
   textarea:focus { box-shadow: inset 0 0 0 1px var(--vscode-focusBorder); }
   textarea::selection { background: var(--vscode-editor-selectionBackground); }
+  .token-comment { color: var(--vscode-symbolIcon-colorForeground, #6a9955); }
+  .token-string { color: var(--vscode-debugTokenExpression-string, #ce9178); }
+  .token-number { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
+  .token-keyword { color: var(--vscode-symbolIcon-keywordForeground, #c586c0); }
+  .token-conflict { color: var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 14%, transparent); }
   .footer-group { display: flex; align-items: center; gap: 8px; }
   .hint { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 850px) { .non-conflicting, .hint { display: none; } .toolbar button { padding-left: 7px; padding-right: 7px; } }
@@ -226,6 +253,18 @@ const mergeStyles = String.raw`
 const mergeScript = String.raw`
   const vscode = acquireVsCodeApi();
   const app = document.getElementById('app');
+  const useChinese = document.documentElement.lang.toLowerCase().startsWith('zh');
+  const mergeZh = {
+    'Previous conflict': '上一个冲突', 'Next conflict': '下一个冲突',
+    '✓ Non-conflicting changes are already applied': '✓ 非冲突更改已自动应用',
+    '← Left': '← 左侧', 'Both': '两者都保留', 'Right →': '右侧 →', 'Reset': '重置',
+    'Loading conflict…': '正在加载冲突…', 'Current branch': '当前分支', 'Result': '结果',
+    'Incoming changes': '传入更改', 'Accept Left': '接受左侧', 'Accept Right': '接受右侧',
+    'Edit the center pane or resolve each conflict with the toolbar.': '编辑中间结果，或使用工具栏逐个解决冲突。',
+    'Cancel': '取消', 'Apply': '应用', 'No unresolved conflicts': '没有未解决的冲突',
+    'Resolved as deleted': '已解决为删除', 'Applying merge result…': '正在应用合并结果…',
+  };
+  const mt = value => useChinese ? (mergeZh[value] || value) : value;
   app.innerHTML = [
     '<div class="merge-root">',
       '<div class="toolbar">',
@@ -244,17 +283,17 @@ const mergeScript = String.raw`
       '<div id="workspace" class="workspace">',
         '<section id="left-pane" class="pane">',
           '<div id="left-title" class="pane-title">Current branch</div>',
-          '<div class="code-shell"><pre id="left-lines" class="line-numbers" aria-hidden="true"></pre><textarea id="left" readonly spellcheck="false" aria-label="Current branch version"></textarea></div>',
+          '<div class="code-shell"><pre id="left-lines" class="line-numbers" aria-hidden="true"></pre><div class="editor-stack"><pre id="left-highlight" class="syntax-layer" aria-hidden="true"></pre><textarea id="left" readonly spellcheck="false" aria-label="Current branch version"></textarea></div></div>',
         '</section>',
         '<div class="splitter" role="separator" aria-orientation="vertical" tabindex="0"></div>',
         '<section id="result-pane" class="pane result">',
           '<div id="result-title" class="pane-title">Result</div>',
-          '<div class="code-shell"><pre id="result-lines" class="line-numbers" aria-hidden="true"></pre><textarea id="result" spellcheck="false" aria-label="Editable merge result"></textarea></div>',
+          '<div class="code-shell"><pre id="result-lines" class="line-numbers" aria-hidden="true"></pre><div class="editor-stack"><pre id="result-highlight" class="syntax-layer" aria-hidden="true"></pre><textarea id="result" spellcheck="false" aria-label="Editable merge result"></textarea></div></div>',
         '</section>',
         '<div class="splitter" role="separator" aria-orientation="vertical" tabindex="0"></div>',
         '<section id="right-pane" class="pane">',
           '<div id="right-title" class="pane-title">Incoming changes</div>',
-          '<div class="code-shell"><pre id="right-lines" class="line-numbers" aria-hidden="true"></pre><textarea id="right" readonly spellcheck="false" aria-label="Incoming version"></textarea></div>',
+          '<div class="code-shell"><pre id="right-lines" class="line-numbers" aria-hidden="true"></pre><div class="editor-stack"><pre id="right-highlight" class="syntax-layer" aria-hidden="true"></pre><textarea id="right" readonly spellcheck="false" aria-label="Incoming version"></textarea></div></div>',
         '</section>',
       '</div>',
       '<div class="footer">',
@@ -267,6 +306,13 @@ const mergeScript = String.raw`
       '</div>',
     '</div>',
   ].join('');
+  if (useChinese) {
+    for (const element of app.querySelectorAll('button, .non-conflicting, .hint, .counter, .pane-title')) {
+      element.textContent = mt(element.textContent);
+      if (element.title) element.title = mt(element.title);
+      if (element.getAttribute('aria-label')) element.setAttribute('aria-label', mt(element.getAttribute('aria-label')));
+    }
+  }
 
   const left = document.getElementById('left');
   const result = document.getElementById('result');
@@ -277,6 +323,7 @@ const mergeScript = String.raw`
   const wholeFileButtons = ['accept-left', 'accept-right', 'reset'].map((id) => document.getElementById(id));
   const editors = [left, result, right];
   const gutters = [document.getElementById('left-lines'), document.getElementById('result-lines'), document.getElementById('right-lines')];
+  const highlights = [document.getElementById('left-highlight'), document.getElementById('result-highlight'), document.getElementById('right-highlight')];
   let initialResult = '';
   let initialResultDeleted = false;
   let resultDeleted = false;
@@ -286,6 +333,10 @@ const mergeScript = String.raw`
   let loaded = false;
   let synchronizing = false;
   let updateFrame;
+  let draftTimer;
+  let language = '';
+  let lastLineCounts = [0, 0, 0];
+  let alignmentCache = new Map();
 
   function marker(pattern, text, from) {
     pattern.lastIndex = from;
@@ -314,16 +365,78 @@ const mergeScript = String.raw`
     return entries;
   }
 
-  function numbersFor(value) {
-    const count = Math.max(1, value.split(/\r\n|\r|\n/).length);
-    return Array.from({ length: count }, (_, index) => String(index + 1)).join('\n');
+  function lineCount(value) {
+    let count = 1;
+    for (let index = 0; index < value.length; index += 1) if (value.charCodeAt(index) === 10) count += 1;
+    return count;
   }
 
   function updateNumbers() {
-    gutters[0].textContent = numbersFor(left.value);
-    gutters[1].textContent = numbersFor(result.value);
-    gutters[2].textContent = numbersFor(right.value);
-    gutters.forEach((gutter, index) => { gutter.scrollTop = editors[index].scrollTop; });
+    editors.forEach((editor, index) => {
+      const count = lineCount(editor.value);
+      if (count !== lastLineCounts[index]) {
+        let numbers = '';
+        for (let line = 1; line <= count; line += 1) numbers += (line === 1 ? '' : '\n') + String(line);
+        gutters[index].textContent = numbers;
+        lastLineCounts[index] = count;
+      }
+      gutters[index].scrollTop = editor.scrollTop;
+    });
+  }
+
+  const keywords = new Set(('abstract as async await break case catch class const continue default delete do else enum export extends false finally for from function get if implements import in instanceof interface let namespace new null of package private protected public readonly return set static struct super switch this throw true try type typeof undefined var void while with yield').split(' '));
+
+  function tokenClass(token) {
+    if (/^(?:<{7,}|={7,}|>{7,})/.test(token)) return 'token-conflict';
+    if (/^(?:\/\/|\/\*)/.test(token)) return 'token-comment';
+    if (/^#/.test(token)) return ['py', 'python', 'sh', 'bash', 'zsh', 'rb', 'ruby', 'yaml', 'yml', 'toml'].includes(language) ? 'token-comment' : '';
+    if (/^["']/.test(token)) return 'token-string';
+    if (/^\d/.test(token)) return 'token-number';
+    return keywords.has(token) ? 'token-keyword' : '';
+  }
+
+  function updateHighlight(index) {
+    const editor = editors[index]; const target = highlights[index];
+    if (editor.value.length > 1000000) {
+      editor.classList.remove('syntax-enabled'); target.replaceChildren(); return;
+    }
+    const pattern = /^(?:<{7,}|={7,}|>{7,})[^\r\n]*|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|#[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*\b/gm;
+    const fragment = document.createDocumentFragment(); let cursor = 0; let match;
+    while ((match = pattern.exec(editor.value))) {
+      if (match.index > cursor) fragment.append(document.createTextNode(editor.value.slice(cursor, match.index)));
+      const className = tokenClass(match[0]);
+      if (className) { const span = document.createElement('span'); span.className = className; span.textContent = match[0]; fragment.append(span); }
+      else fragment.append(document.createTextNode(match[0]));
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < editor.value.length) fragment.append(document.createTextNode(editor.value.slice(cursor)));
+    target.replaceChildren(fragment); editor.classList.add('syntax-enabled');
+    target.style.transform = 'translate(' + String(-editor.scrollLeft) + 'px,' + String(-editor.scrollTop) + 'px)';
+  }
+
+  function alignmentAnchors(source, target) {
+    const key = source + '>' + target;
+    if (alignmentCache.has(key)) return alignmentCache.get(key);
+    const sourceLines = editors[source].value.split(/\r?\n/); const targetLines = editors[target].value.split(/\r?\n/);
+    const sourcePositions = new Map(); const targetPositions = new Map();
+    sourceLines.forEach((line, index) => sourcePositions.set(line, sourcePositions.has(line) ? -1 : index));
+    targetLines.forEach((line, index) => targetPositions.set(line, targetPositions.has(line) ? -1 : index));
+    const anchors = [[-1, -1]]; let lastTarget = -1;
+    sourceLines.forEach((line, sourceLine) => {
+      const targetLine = targetPositions.get(line);
+      if (sourcePositions.get(line) === sourceLine && typeof targetLine === 'number' && targetLine > lastTarget) {
+        anchors.push([sourceLine, targetLine]); lastTarget = targetLine;
+      }
+    });
+    anchors.push([sourceLines.length, targetLines.length]); alignmentCache.set(key, anchors); return anchors;
+  }
+
+  function alignedLine(source, target, line) {
+    const anchors = alignmentAnchors(source, target);
+    let upper = 1; while (upper < anchors.length && anchors[upper][0] < line) upper += 1;
+    const before = anchors[Math.max(0, upper - 1)]; const after = anchors[Math.min(anchors.length - 1, upper)];
+    const span = Math.max(1, after[0] - before[0]); const ratio = Math.max(0, Math.min(1, (line - before[0]) / span));
+    return before[1] + (after[1] - before[1]) * ratio;
   }
 
   function updateControls(selectCurrent) {
@@ -335,9 +448,9 @@ const mergeScript = String.raw`
     apply.disabled = !loaded || conflicts.length !== 0 || applying;
     counter.className = 'counter' + (conflicts.length === 0 ? ' resolved' : '');
     counter.textContent = conflicts.length === 0
-      ? (resultDeleted ? 'Resolved as deleted' : 'No unresolved conflicts')
-      : String(currentConflict + 1) + ' of ' + String(conflicts.length) + ' conflicts';
-    updateNumbers();
+      ? mt(resultDeleted ? 'Resolved as deleted' : 'No unresolved conflicts')
+      : useChinese ? '第 ' + String(currentConflict + 1) + ' 个，共 ' + String(conflicts.length) + ' 个冲突' : String(currentConflict + 1) + ' of ' + String(conflicts.length) + ' conflicts';
+    updateNumbers(); editors.forEach((_editor, index) => updateHighlight(index));
     if (selectCurrent && conflicts.length) {
       const selected = conflicts[currentConflict];
       result.focus();
@@ -354,8 +467,10 @@ const mergeScript = String.raw`
     updateFrame = requestAnimationFrame(() => { updateFrame = undefined; updateControls(selectCurrent); });
   }
 
-  function saveDraft() {
-    vscode.postMessage({ type: 'dirty', result: result.value, deleted: resultDeleted });
+  function saveDraft(immediate = false) {
+    if (draftTimer) clearTimeout(draftTimer);
+    const send = () => { draftTimer = undefined; vscode.postMessage({ type: 'dirty', result: result.value, deleted: resultDeleted }); };
+    if (immediate) send(); else draftTimer = setTimeout(send, 300);
   }
 
   function chooseCurrent(side) {
@@ -374,6 +489,7 @@ const mergeScript = String.raw`
   function syncFrom(source) {
     const sourceIndex = editors.indexOf(source);
     gutters[sourceIndex].scrollTop = source.scrollTop;
+    highlights[sourceIndex].style.transform = 'translate(' + String(-source.scrollLeft) + 'px,' + String(-source.scrollTop) + 'px)';
     if (synchronizing) return;
     synchronizing = true;
     const sourceLineHeight = Number.parseFloat(getComputedStyle(source).lineHeight) || 20;
@@ -381,14 +497,16 @@ const mergeScript = String.raw`
     editors.forEach((editor, index) => {
       if (editor === source) return;
       const targetLineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 20;
-      editor.scrollTop = topLine * targetLineHeight;
+      editor.scrollTop = alignedLine(sourceIndex, index, topLine) * targetLineHeight;
+      editor.scrollLeft = source.scrollLeft;
       gutters[index].scrollTop = editor.scrollTop;
+      highlights[index].style.transform = 'translate(' + String(-editor.scrollLeft) + 'px,' + String(-editor.scrollTop) + 'px)';
     });
     requestAnimationFrame(() => { synchronizing = false; });
   }
 
   editors.forEach((editor) => editor.addEventListener('scroll', () => syncFrom(editor)));
-  result.addEventListener('input', () => { resultDeleted = false; saveDraft(); scheduleUpdate(false); });
+  result.addEventListener('input', () => { resultDeleted = false; alignmentCache.clear(); saveDraft(); scheduleUpdate(false); });
   result.addEventListener('click', () => {
     const index = conflicts.findIndex((entry) => result.selectionStart >= entry.start && result.selectionStart <= entry.end);
     if (index >= 0) { currentConflict = index; updateControls(false); }
@@ -416,13 +534,16 @@ const mergeScript = String.raw`
   });
   document.getElementById('reset').addEventListener('click', () => { result.value = initialResult; resultDeleted = initialResultDeleted; currentConflict = 0; saveDraft(); updateControls(true); });
   document.getElementById('cancel').addEventListener('click', () => {
-    if ((result.value === initialResult && resultDeleted === initialResultDeleted) || window.confirm('Discard the unapplied merge result?')) vscode.postMessage({ type: 'cancel' });
+    if ((result.value === initialResult && resultDeleted === initialResultDeleted) || window.confirm('Discard the unapplied merge result?')) {
+      if (draftTimer) clearTimeout(draftTimer); vscode.postMessage({ type: 'cancel' });
+    }
   });
   apply.addEventListener('click', () => {
     if (conflicts.length || applying) return;
+    if (draftTimer) clearTimeout(draftTimer);
     applying = true;
     updateControls(false);
-    counter.textContent = 'Applying merge result…';
+    counter.textContent = mt('Applying merge result…');
     vscode.postMessage({ type: 'apply', result: result.value, deleted: resultDeleted });
   });
   document.addEventListener('keydown', (event) => {
@@ -432,7 +553,7 @@ const mergeScript = String.raw`
     }
   });
   window.addEventListener('beforeunload', () => {
-    if (loaded && (result.value !== initialResult || resultDeleted !== initialResultDeleted)) vscode.postMessage({ type: 'dirty', result: result.value, deleted: resultDeleted });
+    if (loaded && (result.value !== initialResult || resultDeleted !== initialResultDeleted)) saveDraft(true);
   });
 
   document.querySelectorAll('.splitter').forEach((splitter) => {
@@ -468,6 +589,7 @@ const mergeScript = String.raw`
     const message = event.data;
     if (message.type === 'load') {
       loaded = true;
+      language = message.language || '';
       window.mergeVersions = message.versions;
       left.value = message.versions.ours;
       right.value = message.versions.theirs;
@@ -479,6 +601,7 @@ const mergeScript = String.raw`
       document.getElementById('result-title').textContent = message.labels.result;
       document.getElementById('right-title').textContent = message.labels.theirs + (message.versions.theirsExists ? '' : ' (deleted)');
       currentConflict = 0;
+      alignmentCache.clear();
       updateControls(true);
       if (message.restoredDraft) {
         counter.className = 'counter';
@@ -491,6 +614,9 @@ const mergeScript = String.raw`
       updateControls(false);
       counter.className = 'counter error';
       counter.textContent = message.message || 'Could not apply the merge result';
+    }
+    if (message.type === 'draftWarning') {
+      counter.className = 'counter error'; counter.textContent = message.message;
     }
   });
 

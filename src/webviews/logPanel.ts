@@ -320,6 +320,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (this.manager.snapshot(message.root)) this.selectedRoot = message.root;
         this.selectedRef = undefined;
         this.selectedHash = undefined;
+        this.filePath = undefined;
+        this.logOptions = { ...this.logOptions, author: undefined, since: undefined };
         this.logLimit = 300;
         return void this.update();
       }
@@ -739,10 +741,14 @@ async function requireTrusted(): Promise<boolean> {
 }
 
 function normalizeLogOptions(options?: Partial<GitLogOptions>): GitLogOptions {
+  const author = typeof options?.author === "string" && options.author.length <= 512 && !/[\r\n\0]/.test(options.author) ? options.author : undefined;
+  const since = typeof options?.since === "string" && Number.isFinite(Date.parse(options.since)) ? new Date(options.since).toISOString() : undefined;
   return {
     order: options?.order === "topological" ? "topological" : "date",
     firstParent: Boolean(options?.firstParent),
     noMerges: Boolean(options?.noMerges),
+    author,
+    since,
   };
 }
 
@@ -782,7 +788,7 @@ const logStyles = String.raw`
   button { border: 0; background: transparent; cursor: pointer; }
   button:focus-visible, select:focus-visible, input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .root { height: 100%; display: grid; grid-template-rows: 34px 38px minmax(0, 1fr); }
-  .tool-tabs { display: flex; align-items: end; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background); }
+  .tool-tabs { display: flex; align-items: end; gap: 2px; padding: 0 8px; overflow-x: auto; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background); }
   .tool-tab { height: 33px; padding: 0 12px; border-bottom: 2px solid transparent; color: var(--vscode-descriptionForeground); }
   .tool-tab.active { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder); }
   .toolbar { display: flex; align-items: center; gap: 5px; padding: 5px 7px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
@@ -794,6 +800,10 @@ const logStyles = String.raw`
   .spacer { flex: 1; }
   .branch-label { color: var(--vscode-descriptionForeground); }
   .workspace { --branch-width: 185px; --details-width: 300px; min-width: 0; min-height: 0; display: grid; grid-template-columns: var(--branch-width) 9px minmax(260px, 1fr) 9px var(--details-width); overflow: hidden; }
+  .workspace.compact { grid-template-columns: minmax(260px, 1fr) 9px var(--details-width); }
+  .workspace.compact > .branches, .workspace.compact > .column-splitter[data-side="branch"] { display: none; }
+  .workspace.tiny { grid-template-columns: minmax(260px, 1fr); }
+  .workspace.tiny > .column-splitter[data-side="details"], .workspace.tiny > .details { display: none; }
   .pane { min-width: 0; min-height: 0; overflow: auto; }
   .column-splitter { position: relative; min-width: 9px; cursor: col-resize; background: transparent; outline: none; touch-action: none; }
   .column-splitter::before { content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: var(--vscode-panel-border); }
@@ -942,7 +952,7 @@ const logStyles = String.raw`
     .detail-meta { grid-template-columns: 44px 1fr; font-size: 11px; }
   }
   @media (max-width: 760px) { .filter-button .filter-value { display: none; } }
-  @media (max-width: 650px) { .workspace { overflow-x: auto; } }
+  @media (max-width: 650px) { .toolbar, .changes-toolbar { overflow-x: auto; } }
   @media (max-width: 760px) { .commit-options { gap: 5px; font-size: 11px; } }
   @media (max-width: 520px) {
     .changes-workspace { --commit-height: 220px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(150px, 1fr) 9px var(--commit-height); }
@@ -961,6 +971,7 @@ const logScript = String.raw`
   let activeToolTab = uiState.activeToolTab || 'log';
   let selectedBranchKeys = new Set(uiState.selectedBranchKeys || []);
   let authorFilter = uiState.authorFilter || '';
+  let knownAuthors = new Set(uiState.knownAuthors || []);
   let dateFilter = uiState.dateFilter || 'all';
   let sortMode = uiState.sortMode === 'topological' ? 'topological' : 'date';
   let firstParent = Boolean(uiState.firstParent);
@@ -1003,6 +1014,16 @@ const logScript = String.raw`
     'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
     'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
     'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
+    'Continue': '继续', 'Skip': '跳过', 'Abort': '中止', 'Reset': '重置',
+    'Copy Branch Name': '复制分支名', 'Compare Branches': '比较分支', 'Show Files Diff': '显示文件差异',
+    'Delete Selected Branches…': '删除所选分支…', 'Show Diff with Working Tree': '与工作区比较',
+    'Checkout Revision…': '检出此修订…', 'Reset Current Branch to Here…': '将当前分支重置到这里…',
+    'Revert Commit': '还原提交', 'New Tag…': '新建标签…', 'Go to Child Commit': '转到子提交',
+    'Go to Parent Commit': '转到父提交', 'Move to Changelist…': '移动到更改列表…',
+    'Open Repository Version': '打开仓库版本', 'Get from Revision…': '从修订获取…',
+    'History Up to Here': '查看截至此处的历史', 'Load 300 more commits': '再加载 300 条提交',
+    'Show commits affecting this path': '显示影响此路径的提交', 'Apply': '应用',
+    'Changed Files': '已更改文件', 'Hash': '哈希', 'staged': '已暂存',
     'No matching commits': '没有匹配的提交', 'Loading commit details…': '正在加载提交详情…',
     'Select a commit to view details': '选择一个提交以查看详情',
     'No commit matches the current filters': '没有提交符合当前筛选条件',
@@ -1140,6 +1161,8 @@ const logScript = String.raw`
   function applyIncomingState(next) {
     const previousRoot = state.selectedRoot;
     state = { ...state, ...next }; pendingCommitHash = undefined;
+    for (const commit of next.commits || []) if (commit.author) knownAuthors.add(commit.author);
+    saveUiState({ knownAuthors: [...knownAuthors].slice(-500) });
     if (previousRoot && state.selectedRoot && previousRoot !== state.selectedRoot) {
       search = ''; authorFilter = ''; dateFilter = 'all'; selectedFilePath = undefined;
       state.commits = []; state.selection = null;
@@ -1504,13 +1527,14 @@ const logScript = String.raw`
   }
 
   function setColumnWidths(workspace, requestedLeft, requestedRight, persist) {
-    const compact = false;
     const total = workspace.clientWidth || window.innerWidth;
+    const compact = total < 650; const tiny = total < 470;
+    workspace.classList.toggle('compact', compact); workspace.classList.toggle('tiny', tiny);
     const leftMinimum = 125; const rightMinimum = 190; const centerMinimum = 260; const gutters = compact ? 9 : 18;
     const maximumSides = Math.max(leftMinimum + rightMinimum, total - gutters - centerMinimum);
     let left = Math.max(leftMinimum, requestedLeft || 185);
     let right = Math.max(rightMinimum, requestedRight || 300);
-    if (compact) left = Math.min(left, Math.max(leftMinimum, total - gutters - centerMinimum));
+    if (compact) right = Math.min(right, Math.max(rightMinimum, total - gutters - centerMinimum));
     else {
       if (left + right > maximumSides) {
         const overflow = left + right - maximumSides;
@@ -1667,9 +1691,10 @@ const logScript = String.raw`
     if (update.order) sortMode = update.order;
     if (Object.prototype.hasOwnProperty.call(update, 'firstParent')) firstParent = Boolean(update.firstParent);
     if (Object.prototype.hasOwnProperty.call(update, 'noMerges')) noMerges = Boolean(update.noMerges);
+    if (Object.prototype.hasOwnProperty.call(update, 'author')) authorFilter = update.author || '';
     collapsedGraphSeries.clear(); selectedGraphSeries = ''; hoveredGraphSeries = '';
     saveUiState({ sortMode, firstParent, noMerges, collapsedGraphSeries: [], selectedGraphSeries: '' });
-    post('setLogOptions', { options: { order: sortMode, firstParent, noMerges } });
+    post('setLogOptions', { options: { order: sortMode, firstParent, noMerges, author: authorFilter || undefined, since: dateCutoff(dateFilter) } });
   }
 
   function collapseLinearBranches() {
@@ -1698,7 +1723,7 @@ const logScript = String.raw`
   }
 
   function userFilterItems() {
-    const authors = [...new Set((state.commits || []).map(commit => commit.author).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+    const authors = [...new Set([...knownAuthors, ...(state.commits || []).map(commit => commit.author).filter(Boolean)])].sort((left, right) => left.localeCompare(right));
     return [
       { icon: authorFilter ? '' : '✓', label: 'All Users', run: () => setAuthorFilter('') },
       { separator: true },
@@ -1707,14 +1732,21 @@ const logScript = String.raw`
   }
 
   function setAuthorFilter(author) {
-    authorFilter = author; saveUiState({ authorFilter }); render();
+    authorFilter = author; saveUiState({ authorFilter }); render(); setLogOptions({ author });
+  }
+
+  function dateCutoff(value) {
+    if (value === 'all') return undefined;
+    const now = new Date();
+    if (value === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    return new Date(now.getTime() - ({ week: 7, month: 30, year: 365 }[value] || 0) * 86400000).toISOString();
   }
 
   function dateFilterItems() {
     return [
       ['all', 'All Dates'], ['today', 'Today'], ['week', 'Last 7 Days'], ['month', 'Last 30 Days'], ['year', 'Last Year'],
     ].map(([value, label]) => ({ icon: dateFilter === value ? '✓' : '', label, run: () => {
-      dateFilter = value; saveUiState({ dateFilter }); render();
+      dateFilter = value; saveUiState({ dateFilter }); render(); setLogOptions({ since: dateCutoff(value) });
     } }));
   }
 
@@ -2231,5 +2263,5 @@ const logScript = String.raw`
   document.addEventListener('touchmove', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
   document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(true); });
   document.addEventListener('focusout', () => setTimeout(flushDeferredState, 0));
-  post('ready', { activeTab: activeToolTab, logOptions: { order: sortMode, firstParent, noMerges } }); render();
+  post('ready', { activeTab: activeToolTab, logOptions: { order: sortMode, firstParent, noMerges, author: authorFilter || undefined, since: dateCutoff(dateFilter) } }); render();
 `;

@@ -93,6 +93,8 @@ export interface GitLogOptions {
   order: "date" | "topological";
   firstParent: boolean;
   noMerges: boolean;
+  author?: string;
+  since?: string;
 }
 
 export interface GitCommitFile {
