@@ -26,7 +26,7 @@ test("wires context menus for branches, commits, and changed files", () => {
 
 test("keeps context menus and filter popovers open across background state renders", () => {
   assert.ok(scriptMatch);
-  const renderSource = scriptMatch[1].match(/function render\(\) \{([\s\S]*?)\n  }\n\n  function repositorySelect/);
+  const renderSource = scriptMatch[1].match(/function render\(\) \{([\s\S]*?)\r?\n  }\r?\n\r?\n  function repositorySelect/);
   assert.ok(renderSource);
   assert.doesNotMatch(renderSource[1], /closeContextMenu/);
   assert.doesNotMatch(scriptMatch[1], /addEventListener\('scroll'.*closeContextMenu/);
