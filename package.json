@@ -2,7 +2,7 @@
   "name": "jb-git",
   "displayName": "JB Git",
   "description": "An IntelliJ IDEA-inspired Git workspace for Visual Studio Code.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "local",
   "license": "Apache-2.0",
   "repository": {

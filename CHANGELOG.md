@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Stabilize context menus and filter popovers during background repository refreshes.
+- Scope commit graph lanes to visible branch and tag refs instead of internal Git refs.
+- Remove the obsolete five-button action strip from commit details.
+- Add an IntelliJ-inspired three-pane merge conflict editor and improve branch comparison diffs.
+- Keep release metadata and VSIX installation documentation aligned through an automated version test.
+
 ## 0.1.0-alpha.4
 
 - Replace nine fragmented Tree Views and the Activity Bar view with one IntelliJ-inspired bottom Git tool window.

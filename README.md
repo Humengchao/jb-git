@@ -29,6 +29,10 @@ npm run package
 
 Press `F5` in VS Code to launch the Extension Development Host.
 
+## Versioning
+
+Every installable update receives a new semantic version and produces a newly named VSIX instead of replacing an earlier package. Patch releases are used for fixes, minor releases for substantial new functionality, and major releases for incompatible changes. Automated tests keep the manifest, lockfile, changelog, and installation documentation aligned.
+
 ## Scope and attribution
 
 The feature behavior is informed by the public IntelliJ Community Git/VCS implementation and documentation. This project is an independent TypeScript implementation; it does not copy JetBrains source code, UI assets, or trademarks.
