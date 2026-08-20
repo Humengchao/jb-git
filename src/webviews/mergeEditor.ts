@@ -199,7 +199,7 @@ export class MergeConflictEditor implements vscode.Disposable {
         await panel.webview.postMessage({ type: "applyFailed", message: detail });
       }
     });
-    panel.webview.html = webviewDocument(panel.webview, title, mergeStyles, mergeScript);
+    panel.webview.html = webviewDocument(title, mergeStyles, mergeScript);
     return true;
   }
 

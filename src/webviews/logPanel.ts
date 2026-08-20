@@ -3,9 +3,9 @@ import * as vscode from "vscode";
 import { ChangelistStore } from "../changelists/store";
 import { GitBranch, GitChange, GitCommit, GitCommitFile, GitLogOptions } from "../git/types";
 import { GitTraceEvent } from "../git/runner";
-import { RepositoryManager } from "../repositoryManager";
+import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
-import { ChangeNode } from "../views/changesTree";
+import { ChangeNode } from "../views/nodes";
 import { DiffContentProvider, isBinaryContent } from "../views/diffProvider";
 import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
@@ -96,6 +96,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private updateVersion = 0;
   private logLimit = 300;
   private updateTimer?: NodeJS.Timeout;
+  private logCache?: { fingerprint: string; commits: GitCommit[] };
+  private selectionCache?: { key: string; files: LogSelection["files"] };
+  private lastSentBranchesKey?: string;
+  private lastSentTracesKey?: string;
+  private lastSentLogKey?: string;
   private readonly branchComparisons: BranchComparisonWorkspace;
   private readonly disposables: vscode.Disposable[] = [];
   private didRequestNestedDiscovery = false;
@@ -126,7 +131,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   public resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
-    view.webview.html = webviewDocument(view.webview, "Git", logStyles, logScript);
+    view.webview.html = webviewDocument("Git", logStyles, logScript);
     this.disposables.push(
       view.webview.onDidReceiveMessage((message: LogMessage) => void this.handleMessage(message)),
       view.onDidChangeVisibility(() => { if (view.visible) this.scheduleUpdate(0); }),
@@ -162,6 +167,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     if (this.traces.length > 200) this.traces = this.traces.slice(-200);
     if (this.view?.visible && this.requestedTab === "console") {
       void this.view.webview.postMessage({ type: "trace", trace });
+      // The incremental channel just delivered this; a full resend is only
+      // needed for traces accumulated while another tab was active.
+      this.lastSentTracesKey = this.tracesFingerprint();
     }
   }
 
@@ -207,6 +215,21 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     void this.workspaceState.update(SELECTION_STORAGE_KEY, { version: 1, repositories } satisfies PersistedSelectionState);
   }
 
+  /** Cheap identity of the selected repository's refs; when it is unchanged, `git log` output cannot have changed either. */
+  private refsFingerprint(snapshot: RepositorySnapshot): string {
+    let hash = 0;
+    for (const branch of snapshot.branches) {
+      const text = `${branch.name}\0${branch.oid}\0${branch.upstream ?? ""}\0${branch.tracking ?? ""}\0${branch.kind}`;
+      for (let index = 0; index < text.length; index += 1) hash = (hash * 31 + text.charCodeAt(index)) | 0;
+    }
+    return `${snapshot.repository.info.rootPath}\0${snapshot.branches.length}\0${hash}`;
+  }
+
+  private tracesFingerprint(): string {
+    const last = this.traces[this.traces.length - 1];
+    return `${this.traces.length}\0${last?.startedAt ?? ""}\0${last?.durationMs ?? ""}\0${last?.exitCode ?? ""}`;
+  }
+
   private async update(): Promise<void> {
     const view = this.view;
     const webview = view?.webview;
@@ -227,27 +250,56 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       const root = repository.info.rootPath;
       const changes = snapshot.status?.changes ?? [];
       const selected = this.syncSelection(root, changes);
-      let shelfEntries: ShelfEntry[] = [];
-      try {
-        shelfEntries = await this.shelves.list(root);
-      } catch (error) {
-        if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
+      // The shelf list comes from disk; only the shelf tab renders it, and the
+      // webview keeps its previous value when the field is omitted.
+      let shelfEntries: ShelfEntry[] | undefined;
+      if (this.requestedTab === "shelf") {
+        try {
+          shelfEntries = await this.shelves.list(root);
+          if (version !== this.updateVersion) return;
+        } catch (error) {
+          if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
+        }
       }
+      const refsKey = this.refsFingerprint(snapshot);
       let selection: LogSelection | undefined;
       let logState: Record<string, unknown> = {};
+      let logKey: string | undefined;
       if (this.requestedTab === "log") {
-        const commits = this.selectedRef
-          ? await repository.logRef(this.selectedRef, this.logLimit, this.filePath, this.logOptions)
-          : await repository.log(this.logLimit, this.filePath, this.logOptions);
-        if (version !== this.updateVersion) return;
+        // Everything `git log` depends on is part of this fingerprint, so a
+        // working-tree-only refresh (stage/unstage/save) reuses the cache.
+        const fingerprint = JSON.stringify([
+          refsKey, snapshot.status?.branch.oid ?? null,
+          this.selectedRef ?? null, this.logLimit, this.filePath ?? null, this.logOptions,
+        ]);
+        let commits: GitCommit[];
+        if (this.logCache?.fingerprint === fingerprint) {
+          commits = this.logCache.commits;
+        } else {
+          commits = this.selectedRef
+            ? await repository.logRef(this.selectedRef, this.logLimit, this.filePath, this.logOptions)
+            : await repository.log(this.logLimit, this.filePath, this.logOptions);
+          if (version !== this.updateVersion) return;
+          this.logCache = { fingerprint, commits };
+        }
         this.currentCommits = commits;
         if (!this.selectedHash || !commits.some((commit) => commit.hash === this.selectedHash)) {
           this.selectedHash = commits[0]?.hash;
         }
         const commit = commits.find((item) => item.hash === this.selectedHash);
-        if (commit) selection = { commit, files: await this.manager.commitFiles(repository.info.rootPath, commit.hash) };
-        if (version !== this.updateVersion) return;
-        logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: this.logLimit < 5_000 && commits.length >= this.logLimit };
+        if (commit) {
+          const selectionKey = `${fingerprint}\0${commit.hash}`;
+          if (this.selectionCache?.key !== selectionKey) {
+            const files = await this.manager.commitFiles(root, commit.hash);
+            if (version !== this.updateVersion) return;
+            this.selectionCache = { key: selectionKey, files };
+          }
+          selection = { commit, files: this.selectionCache.files };
+        }
+        logKey = `${fingerprint}\0${this.selectedHash ?? ""}`;
+        if (this.lastSentLogKey !== logKey) {
+          logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: this.logLimit < 5_000 && commits.length >= this.logLimit };
+        }
       }
       const lists = this.changelists.lists(root).map((list) => ({
         id: list.id,
@@ -268,6 +320,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             status: statusLabel(change),
           })),
       }));
+      // Omitted fields keep their previous value in the webview, which merges
+      // incoming state; large arrays are resent only when their identity moved.
+      const tracesKey = this.tracesFingerprint();
+      const includeTraces = this.requestedTab === "console" && this.lastSentTracesKey !== tracesKey;
+      if (version !== this.updateVersion) return;
       await webview.postMessage({
         type: "state",
         state: {
@@ -277,22 +334,27 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           selectedRef: this.selectedRef,
           filePath: this.filePath,
           logOptions: this.logOptions,
-          branches: snapshot.branches,
+          ...(this.lastSentBranchesKey === refsKey ? {} : { branches: snapshot.branches }),
           ...logState,
           operation: snapshot.operation,
           error: snapshot.error,
-          traces: this.traces,
+          ...(includeTraces ? { traces: this.traces } : {}),
           lists,
           totalChanges: changes.length,
           selectedCount: selected.size,
-          shelves: shelfEntries.map((entry) => ({
-            id: entry.id,
-            name: entry.name,
-            createdAt: entry.createdAt,
-            paths: entry.paths,
-          })),
+          ...(shelfEntries ? {
+            shelves: shelfEntries.map((entry) => ({
+              id: entry.id,
+              name: entry.name,
+              createdAt: entry.createdAt,
+              paths: entry.paths,
+            })),
+          } : {}),
         },
       });
+      this.lastSentBranchesKey = refsKey;
+      if (includeTraces) this.lastSentTracesKey = tracesKey;
+      if (logKey !== undefined) this.lastSentLogKey = logKey;
     } catch (error) {
       if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
     }
@@ -303,6 +365,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "ready") {
         this.logOptions = normalizeLogOptions(message.logOptions);
         if (isToolTab(message.activeTab)) this.requestedTab = message.activeTab;
+        // A reloaded webview starts empty, so nothing counts as already sent.
+        this.lastSentBranchesKey = undefined;
+        this.lastSentTracesKey = undefined;
+        this.lastSentLogKey = undefined;
         await this.view?.webview.postMessage({ type: "activateTab", tab: this.requestedTab });
         return void this.update();
       }
@@ -313,6 +379,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "clearConsole") {
         this.traces = [];
+        this.lastSentTracesKey = this.tracesFingerprint();
         await this.view?.webview.postMessage({ type: "consoleCleared" });
         return;
       }
@@ -345,7 +412,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
               return;
             }
             const content = await snapshot.repository.compareRefHistory(left.name, right.name);
-            await showDiffText(`${left.name} ↔ ${right.name}`, content);
+            await showDiffText(content);
             return;
           }
           if (message.action === "deleteBranches") {
@@ -374,7 +441,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           if (message.action === "showRefDiff") {
             const diff = await snapshot.repository.diffAgainstWorkingTree(branch.name);
-            await showDiffText(`${branch.name} ↔ Working Tree`, diff);
+            await showDiffText(diff);
             return;
           }
           if (!(await requireTrusted())) return;
@@ -470,7 +537,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           return;
         }
         if (message.action === "compareWithLocal") {
-          await showDiffText(`${commit.hash.slice(0, 8)} ↔ Working Tree`, await snapshot.repository.diffAgainstWorkingTree(commit.hash));
+          await showDiffText(await snapshot.repository.diffAgainstWorkingTree(commit.hash));
           return;
         }
         if (!(await requireTrusted())) return;
@@ -776,7 +843,7 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function showDiffText(title: string, content: string): Promise<void> {
+async function showDiffText(content: string): Promise<void> {
   const document = await vscode.workspace.openTextDocument({ content, language: "diff" });
   await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
 }

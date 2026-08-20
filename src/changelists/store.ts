@@ -46,9 +46,13 @@ export class ChangelistStore implements vscode.Disposable {
 
   public listForFile(repositoryRoot: string, filePath: string): Changelist {
     const repository = this.ensure(repositoryRoot);
-    // Files without an explicit assignment remain in the default list. This avoids
-    // silently moving existing changes when the user creates a new active list.
-    return repository.lists.find((list) => list.files.includes(filePath)) ?? repository.lists[0];
+    // A file the user never assigned belongs to the active list, matching the
+    // IntelliJ model where new changes join the active changelist. Existing
+    // changes cannot be captured retroactively because reconcile() records
+    // every live path explicitly before the active list can change.
+    return repository.lists.find((list) => list.files.includes(filePath))
+      ?? repository.lists.find((list) => list.id === repository.activeId)
+      ?? repository.lists[0];
   }
 
   public async create(repositoryRoot: string, name: string): Promise<Changelist> {
@@ -95,7 +99,15 @@ export class ChangelistStore implements vscode.Disposable {
     await this.save(repositoryRoot);
   }
 
-  /** Migrates rename assignments and removes paths that no longer have changes. */
+  /** Upper bound on remembered assignments per repository; stale entries are dropped beyond it. */
+  private static readonly MAX_ASSIGNMENTS = 4000;
+
+  /**
+   * Migrates rename assignments and records every new change in the active
+   * list. Assignments whose paths currently have no change are kept: the
+   * change may only be parked in a stash or on another branch, and IntelliJ
+   * restores its grouping when it reappears.
+   */
   public async reconcile(repositoryRoot: string, changes: readonly GitChange[]): Promise<void> {
     const repository = this.ensure(repositoryRoot);
     let modified = false;
@@ -108,12 +120,33 @@ export class ChangelistStore implements vscode.Disposable {
         modified = true;
       }
     }
+
+    const assigned = new Set(repository.lists.flatMap((list) => list.files));
+    const active = repository.lists.find((list) => list.id === repository.activeId) ?? repository.lists[0];
+    for (const change of changes) {
+      if (assigned.has(change.path)) continue;
+      active.files.push(change.path);
+      assigned.add(change.path);
+      modified = true;
+    }
+
     const livePaths = new Set(changes.map((change) => change.path));
-    for (const list of repository.lists) {
-      const reconciled = list.files.filter((file) => livePaths.has(file));
-      if (reconciled.length !== list.files.length) {
-        list.files = reconciled;
-        modified = true;
+    let total = repository.lists.reduce((count, list) => count + list.files.length, 0);
+    if (total > ChangelistStore.MAX_ASSIGNMENTS) {
+      // The oldest entries sit at the front of each list; only assignments
+      // without a live change may be dropped.
+      for (const list of repository.lists) {
+        if (total <= ChangelistStore.MAX_ASSIGNMENTS) break;
+        const retained: string[] = [];
+        for (const file of list.files) {
+          if (total > ChangelistStore.MAX_ASSIGNMENTS && !livePaths.has(file)) {
+            total -= 1;
+            modified = true;
+            continue;
+          }
+          retained.push(file);
+        }
+        list.files = retained;
       }
     }
     if (modified) await this.save(repositoryRoot);

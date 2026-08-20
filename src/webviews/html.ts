@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 
-export function webviewDocument(webview: vscode.Webview, title: string, styles: string, script: string): string {
+export function webviewDocument(title: string, styles: string, script: string): string {
   const nonce = randomBytes(18).toString("base64");
   return `<!doctype html>
 <html lang="${escapeHtml(vscode.env.language || "en")}">

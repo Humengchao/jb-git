@@ -1,18 +1,13 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GitCommandError, GitRunner, redactGitText } from "./git/runner";
-import { BranchNode, RepositoryNode } from "./views/repositoryTree";
-import { ChangeNode, HunkNode } from "./views/changesTree";
 import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
-import { CommitNode } from "./views/historyTree";
-import { ChangelistChangeNode, ChangelistNode } from "./views/changelistTree";
+import {
+  BranchNode, ChangeNode, ChangelistChangeNode, ChangelistNode, HunkNode,
+  RemoteNode, RepositoryNode, ShelfNode, StashNode, SubmoduleNode, WorktreeNode,
+} from "./views/nodes";
 import { ChangelistStore } from "./changelists/store";
 import { ShelfStore } from "./shelves/store";
-import { ShelfNode } from "./views/shelfTree";
-import { WorktreeNode } from "./views/worktreeTree";
-import { RemoteNode } from "./views/remoteTree";
-import { StashNode } from "./views/stashTree";
-import { SubmoduleNode } from "./views/submoduleTree";
 import { RepositoryManager } from "./repositoryManager";
 import { IntelliJGitToolWindowProvider } from "./webviews/logPanel";
 import { MergeConflictEditor } from "./webviews/mergeEditor";
@@ -380,14 +375,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!snapshot) return void vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
       await gitToolWindow.open(snapshot.repository.info.rootPath, relativePath);
-    }),
-    vscode.commands.registerCommand("jbGit.showCommit", async (node?: CommitNode) => {
-      if (!node) return;
-      const snapshot = manager.snapshot(node.repositoryRoot);
-      if (!snapshot) return;
-      const output = await runWithNotification(`Loading commit ${node.commit.hash.slice(0, 12)}`, () => snapshot.repository.showCommit(node.commit.hash));
-      if (output === undefined) return;
-      showOutput(`Commit ${node.commit.hash.slice(0, 12)}`, output);
     }),
     vscode.commands.registerCommand("jbGit.blame", async () => {
       if (!(await requireTrustedWorkspace())) return;

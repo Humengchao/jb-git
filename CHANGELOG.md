@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reuse cached `git log` output while refs and HEAD are unchanged, resend branch/trace/commit payloads to the tool window only when they actually changed, read the shelf list only while its tab is open, and guard every state message against stale overwrites.
+- Keep changelist assignments across stashes and branch switches and route new changes into the active changelist, matching the IntelliJ model, with a bounded assignment store.
+- Remove the unused legacy tree-view layer and the unreachable "Show Commit" command; command payloads are now plain data nodes, and stricter compiler checks keep dead code out.
 - Stage/unstage exactly the selected hunk: a patch built for a later hunk no longer silently includes every earlier hunk.
 - Keep hunk staging working in CRLF files and preserve their line endings in the index.
 - Store shelf patches as raw bytes so non-UTF-8 (e.g. GBK) file content survives shelving, and skip conflicted files instead of silently resolving a merge to HEAD.

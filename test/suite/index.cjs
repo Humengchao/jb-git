@@ -61,7 +61,16 @@ async function run() {
   }]);
   assert.equal(changelists.listForFile(parent, "new.txt").id, feature.id, "rename assignments should migrate");
   await changelists.reconcile(parent, []);
-  assert.deepEqual(changelists.files(parent, feature.id), [], "clean paths should be removed from persisted assignments");
+  assert.deepEqual(
+    changelists.files(parent, feature.id),
+    ["new.txt"],
+    "assignments survive while their change is stashed or parked on another branch",
+  );
+  await changelists.reconcile(parent, [{
+    path: "fresh.txt", indexStatus: " ", workTreeStatus: "M",
+    kind: "modified", staged: false, unstaged: true, conflicted: false,
+  }]);
+  assert.equal(changelists.listForFile(parent, "fresh.txt").id, feature.id, "new changes join the active changelist");
   changelists.dispose();
 
   const { ShelfStore } = require(path.join(extension.extensionPath, "dist", "shelves", "store.js"));

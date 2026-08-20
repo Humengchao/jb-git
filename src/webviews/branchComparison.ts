@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { GitRepository } from "../git/repository";
-import { GitBranch, GitCommitFile } from "../git/types";
+import { GitBranch } from "../git/types";
 import { DiffContentProvider } from "../views/diffProvider";
 import { webviewDocument } from "./html";
 
@@ -48,7 +48,7 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
       { viewColumn: initialColumn, preserveFocus: false },
       { enableScripts: true, retainContextWhenHidden: true },
     );
-    panel.webview.html = webviewDocument(panel.webview, panel.title, comparisonStyles, comparisonScript);
+    panel.webview.html = webviewDocument(panel.title, comparisonStyles, comparisonScript);
 
     const session: ComparisonSession = { key, panel, disposables: [], requestVersion: 0 };
     this.sessions.set(key, session);

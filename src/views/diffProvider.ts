@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ChangeNode } from "./changesTree";
+import { ChangeNode } from "./nodes";
 import { RepositoryManager } from "../repositoryManager";
 
 export class DiffContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
@@ -8,18 +8,6 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider, 
   private readonly closeRegistration = vscode.workspace.onDidCloseTextDocument((document) => {
     if (document.uri.scheme === "jb-git-diff") this.contents.delete(document.uri.toString());
   });
-
-  public register(repositoryRoot: string, label: string, content: string): vscode.Uri {
-    const id = ++this.sequence;
-    const uri = vscode.Uri.parse(`jb-git-diff:${encodeURIComponent(label)}?repository=${encodeURIComponent(repositoryRoot)}&version=${id}`);
-    this.contents.set(uri.toString(), content);
-    while (this.contents.size > 100) {
-      const oldest = this.contents.keys().next().value as string | undefined;
-      if (!oldest) break;
-      this.contents.delete(oldest);
-    }
-    return uri;
-  }
 
   public registerFile(repositoryRoot: string, label: string, filePath: string, content: string): vscode.Uri {
     const id = ++this.sequence;

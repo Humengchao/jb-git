@@ -906,10 +906,6 @@ export class GitRepository {
     return trimOutput(await this.runner.text(["mktree"], { cwd: this.info.rootPath, input: "" }));
   }
 
-  private async gitPath(relativePath: string): Promise<string> {
-    const raw = trimOutput(await this.runner.text(["rev-parse", "--git-path", relativePath], { cwd: this.info.rootPath }));
-    return path.isAbsolute(raw) ? raw : path.resolve(this.info.rootPath, raw);
-  }
 
   private async exists(filePath: string): Promise<boolean> {
     try {

@@ -88,10 +88,6 @@
         "title": "JB Git: File History"
       },
       {
-        "command": "jbGit.showCommit",
-        "title": "JB Git: Show Commit"
-      },
-      {
         "command": "jbGit.blame",
         "title": "JB Git: Blame Active File"
       },
@@ -369,7 +365,6 @@
       ],
       "commandPalette": [
         { "command": "jbGit.openDiff", "when": "false" },
-        { "command": "jbGit.showCommit", "when": "false" },
         { "command": "jbGit.moveToChangelist", "when": "false" },
         { "command": "jbGit.commitChangelist", "when": "false" },
         { "command": "jbGit.applyShelf", "when": "false" },
