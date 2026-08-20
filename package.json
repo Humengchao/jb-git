@@ -28,7 +28,9 @@
     "idea"
   ],
   "activationEvents": [
-    "workspaceContains:.git"
+    "onStartupFinished",
+    "workspaceContains:.git",
+    "workspaceContains:**/.git"
   ],
   "main": "./dist/extension.js",
   "scripts": {
@@ -332,8 +334,7 @@
         {
           "id": "jbGit.toolWindow",
           "name": "Git",
-          "type": "webview",
-          "when": "jbGit.hasWorkspace"
+          "type": "webview"
         }
       ]
     },

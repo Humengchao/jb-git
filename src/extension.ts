@@ -17,6 +17,7 @@ import { RepositoryManager } from "./repositoryManager";
 import { IntelliJGitToolWindowProvider } from "./webviews/logPanel";
 import { MergeConflictEditor } from "./webviews/mergeEditor";
 import { validateGitRefName, validatePathInput, validateRemoteName, validateSingleLine } from "./inputValidation";
+import { canonicalPath, deepestContaining } from "./pathRouting";
 
 function workspacePaths(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
@@ -24,11 +25,6 @@ function workspacePaths(): string[] {
 
 function configurationGitPath(): string {
   return vscode.workspace.getConfiguration("jbGit").get<string>("gitPath", "git");
-}
-
-function isInside(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 async function requireTrustedWorkspace(): Promise<boolean> {
@@ -143,9 +139,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   const scheduleRefreshForPath = (filePath: string): void => {
     if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
-    const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
-    if (!snapshot) return;
-    scheduleRefreshRoot(snapshot.repository.info.rootPath);
+    void canonicalPath(filePath).then((candidate) => {
+      const snapshot = deepestContaining(manager.all, candidate, (item) => item.repository.info.rootPath);
+      if (snapshot) scheduleRefreshRoot(snapshot.repository.info.rootPath);
+    });
   };
   const scheduleDiscovery = (): void => {
     if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
@@ -344,7 +341,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.document.uri.scheme !== "file") return void vscode.window.showInformationMessage("Open a file before showing its Git history.");
       const filePath = editor.document.uri.fsPath;
-      const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
+      const snapshot = deepestContaining(manager.all, await canonicalPath(filePath), (item) => item.repository.info.rootPath);
       if (!snapshot) return void vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
       await gitToolWindow.open(snapshot.repository.info.rootPath, relativePath);
@@ -365,7 +362,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const filePath = editor.document.uri.fsPath;
-      const snapshot = manager.all.find((item) => isInside(item.repository.info.rootPath, filePath));
+      const snapshot = deepestContaining(manager.all, await canonicalPath(filePath), (item) => item.repository.info.rootPath);
       if (!snapshot) {
         await vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
         return;
@@ -568,10 +565,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(rootPath);
       const kind = first?.operation.kind;
-      if (!first || !kind || kind === "none" || kind === "bisect" || kind === "sequencer") return;
+      if (!first || !kind || kind === "none" || kind === "sequencer") return;
       const answer = await vscode.window.showWarningMessage(`Abort ${kind}?`, { modal: true }, "Abort");
       if (answer !== "Abort") return;
-      await runWithNotification(`Aborting ${kind}`, () => manager.abortOperation(first.repository.info.rootPath, kind));
+      if (kind === "bisect") await runWithNotification("Resetting bisect", () => manager.bisectReset(first.repository.info.rootPath));
+      else await runWithNotification(`Aborting ${kind}`, () => manager.abortOperation(first.repository.info.rootPath, kind));
     }),
     vscode.commands.registerCommand("jbGit.skipOperation", async () => {
       if (!(await requireTrustedWorkspace())) return;
@@ -944,7 +942,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  await refresh();
+  // Startup activation must stay cheap: this finds a repository containing
+  // each workspace root (including parent and bare repositories) without a
+  // recursive directory crawl. The full nested scan runs when the view opens
+  // or when the user explicitly refreshes.
+  await manager.discoverAndRefresh(false);
+  updateStatusBar();
 }
 
 export function deactivate(): void {

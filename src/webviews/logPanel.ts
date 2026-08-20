@@ -76,6 +76,7 @@ const ALLOWED_COMMANDS = new Set([
   "jbGit.applyPatch",
   "jbGit.continueOperation",
   "jbGit.abortOperation",
+  "jbGit.skipOperation",
 ]);
 
 export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -97,6 +98,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private updateTimer?: NodeJS.Timeout;
   private readonly branchComparisons: BranchComparisonWorkspace;
   private readonly disposables: vscode.Disposable[] = [];
+  private didRequestNestedDiscovery = false;
 
   public constructor(
     private readonly manager: RepositoryManager,
@@ -131,6 +133,12 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       view.onDidDispose(() => { if (this.view === view) this.view = undefined; }),
     );
     this.scheduleUpdate(0);
+    if (!this.didRequestNestedDiscovery) {
+      this.didRequestNestedDiscovery = true;
+      void this.manager.discoverAndRefresh().catch((error) => {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+      });
+    }
   }
 
   public async open(root?: string, filePath?: string, tab: ToolTab = "log"): Promise<void> {
@@ -1275,7 +1283,8 @@ const logScript = String.raw`
       const operation = node('div', 'operation', state.operation.kind.toUpperCase() + ' is in progress');
       const actions = node('div', 'operation-actions');
       if (state.operation.canContinue) actions.append(button('Continue', 'Continue operation', () => post('runCommand', { command: 'jbGit.continueOperation' }), 'small-button'));
-      if (state.operation.canAbort) actions.append(button('Abort', 'Abort operation', () => post('runCommand', { command: 'jbGit.abortOperation' }), 'small-button'));
+      if (state.operation.kind === 'rebase' || state.operation.kind === 'cherry-pick') actions.append(button('Skip', 'Skip current commit', () => post('runCommand', { command: 'jbGit.skipOperation' }), 'small-button'));
+      if (state.operation.canAbort) actions.append(button(state.operation.kind === 'bisect' ? 'Reset' : 'Abort', state.operation.kind === 'bisect' ? 'End bisect session' : 'Abort operation', () => post('runCommand', { command: 'jbGit.abortOperation' }), 'small-button'));
       operation.append(actions); pane.append(operation);
     }
     if (state.empty) { pane.append(node('div', 'empty', 'Open a folder containing a Git repository.')); return pane; }
@@ -2165,7 +2174,8 @@ const logScript = String.raw`
     if (event.data.type === 'activateTab' && event.data.tab !== activeToolTab) { selectToolTab(event.data.tab); }
     if (event.data.type === 'committed') {
       const drafts = { ...(uiState.commitMessages || {}) }; delete drafts[state.selectedRoot || ''];
-      saveUiState({ commitMessages: drafts, commitMessage: undefined }); render();
+      const options = { ...(uiState.commitOptions || {}) }; delete options[state.selectedRoot || ''];
+      saveUiState({ commitMessages: drafts, commitMessage: undefined, commitOptions: options }); render();
     }
     if (event.data.type === 'error') { const error = node('div', 'error', event.data.message); app.prepend(error); }
   });

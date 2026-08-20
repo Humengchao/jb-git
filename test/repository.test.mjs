@@ -197,6 +197,23 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.equal(applied?.unstaged, true);
 });
 
+test("discard restores both staged and working tree changes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-discard-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), "original\n");
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "file.txt"), "staged\n");
+  git(root, "add", "file.txt");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  await repository.discard(["file.txt"]);
+  assert.equal(readText(join(root, "file.txt")), "original\n");
+  assert.equal(git(root, "status", "--porcelain"), "");
+});
+
 test("shelves tracked changes and restores them as unstaged work", async () => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-shelf-"));
   git(root, "init", "-q");

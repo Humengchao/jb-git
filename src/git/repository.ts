@@ -72,7 +72,10 @@ export class GitRepository {
       { kind: "revert", paths: ["REVERT_HEAD"], canContinue: true, canAbort: true },
       { kind: "rebase", paths: ["rebase-merge", "rebase-apply"], canContinue: true, canAbort: true },
       { kind: "bisect", paths: ["BISECT_LOG"], canContinue: false, canAbort: true },
-      { kind: "sequencer", paths: ["sequencer"], canContinue: true, canAbort: true },
+      // A sequencer can belong to either a multi-commit cherry-pick or revert.
+      // Until its exact command is known, exposing generic buttons would run
+      // the wrong Git command, so keep the state visible but actions disabled.
+      { kind: "sequencer", paths: ["sequencer"], canContinue: false, canAbort: false },
     ];
     for (const candidate of candidates) {
       for (const gitPath of candidate.paths) {
@@ -463,7 +466,7 @@ export class GitRepository {
   }
 
   public async discard(paths: readonly string[]): Promise<void> {
-    await this.serial(() => this.runner.run(["restore", "--worktree", "--", ...paths], { cwd: this.info.rootPath }));
+    await this.serial(() => this.runner.run(["restore", "--source=HEAD", "--staged", "--worktree", "--", ...paths], { cwd: this.info.rootPath }));
   }
 
   public async resolveConflict(pathSpec: string, side: "ours" | "theirs"): Promise<void> {
@@ -895,10 +898,12 @@ export async function discoverRepositories(
   workspacePaths: readonly string[],
   runner: GitRunner,
   signal?: AbortSignal,
+  scanNested = true,
 ): Promise<GitRepository[]> {
   const found = new Map<string, GitRepository>();
   for (const workspacePath of workspacePaths) {
-    for (const candidate of await repositoryCandidates(workspacePath)) {
+    const candidates = scanNested ? await repositoryCandidates(workspacePath) : [workspacePath];
+    for (const candidate of candidates) {
       const repository = await discoverRepository(candidate, runner, signal);
       if (repository) found.set(repository.info.rootPath, repository);
     }
