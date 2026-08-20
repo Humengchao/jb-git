@@ -217,6 +217,42 @@ test("discard restores both staged and working tree changes", async () => {
   assert.equal(git(root, "status", "--porcelain"), "");
 });
 
+test("discard safely unstages newly added files and restores staged renames", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-discard-added-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "old.txt"), "tracked\n");
+  git(root, "add", "old.txt");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "new.txt"), "new content\n");
+  git(root, "add", "new.txt");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  await repository.discard(["new.txt"]);
+  assert.equal(readText(join(root, "new.txt")), "new content\n");
+  assert.equal(git(root, "status", "--porcelain"), "?? new.txt");
+
+  git(root, "mv", "old.txt", "renamed.txt");
+  await repository.discard(["renamed.txt"]);
+  assert.equal(readText(join(root, "old.txt")), "tracked\n");
+  assert.equal(git(root, "status", "--porcelain"), "?? new.txt");
+});
+
+test("unstage works before the repository has its first commit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-unstage-unborn-"));
+  git(root, "init", "-q");
+  writeFileSync(join(root, "first.txt"), "first\n");
+  git(root, "add", "first.txt");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  await repository.unstage(["first.txt"]);
+  assert.equal(readText(join(root, "first.txt")), "first\n");
+  assert.equal(git(root, "status", "--porcelain"), "?? first.txt");
+});
+
 test("pushes a new branch and records its upstream", async () => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-push-upstream-"));
   const remote = mkdtempSync(join(tmpdir(), "jb-git-push-remote-"));

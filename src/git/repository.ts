@@ -464,11 +464,68 @@ export class GitRepository {
   }
 
   public async unstage(paths: readonly string[]): Promise<void> {
-    await this.serial(() => this.runner.run(["reset", "HEAD", "--", ...paths], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      const head = await this.currentRevision();
+      if (head) {
+        await this.runner.run(["reset", head, "--", ...paths], { cwd: this.info.rootPath });
+        return;
+      }
+      // An unborn repository has no HEAD for `git reset` to resolve. Removing
+      // paths from the index keeps their working-tree contents intact.
+      await this.runner.run(["rm", "--cached", "-r", "--ignore-unmatch", "--", ...paths], { cwd: this.info.rootPath });
+    });
   }
 
   public async discard(paths: readonly string[]): Promise<void> {
-    await this.serial(() => this.runner.run(["restore", "--source=HEAD", "--staged", "--worktree", "--", ...paths], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      const snapshot = await this.status();
+      const requested = new Set(paths);
+      const candidates = new Set(paths);
+      const renamedTargets = new Set<string>();
+      for (const change of snapshot.changes) {
+        if (!requested.has(change.path) && (!change.originalPath || !requested.has(change.originalPath))) continue;
+        candidates.add(change.path);
+        if (change.originalPath) {
+          candidates.add(change.originalPath);
+          renamedTargets.add(change.path);
+        }
+      }
+
+      const pathSpecs = [...candidates];
+      const head = await this.currentRevision();
+      if (!head) {
+        await this.runner.run(["rm", "--cached", "-r", "--ignore-unmatch", "--", ...pathSpecs], { cwd: this.info.rootPath });
+        return;
+      }
+
+      const [treeOutput, indexOutput] = await Promise.all([
+        this.runner.text(["ls-tree", "-r", "-z", "--name-only", head, "--", ...pathSpecs], { cwd: this.info.rootPath }),
+        this.runner.text(["ls-files", "-z", "--cached", "--", ...pathSpecs], { cwd: this.info.rootPath }),
+      ]);
+      const treePaths = treeOutput.split("\0").filter(Boolean);
+      const indexPaths = indexOutput.split("\0").filter(Boolean);
+      const containsPath = (entries: readonly string[], candidate: string): boolean =>
+        entries.includes(candidate) || entries.some((entry) => entry.startsWith(`${candidate}/`));
+      const trackedAtHead = pathSpecs.filter((candidate) => containsPath(treePaths, candidate));
+      const addedToIndex = pathSpecs.filter((candidate) =>
+        !containsPath(treePaths, candidate) && containsPath(indexPaths, candidate));
+
+      if (trackedAtHead.length) {
+        await this.runner.run(
+          ["restore", `--source=${head}`, "--staged", "--worktree", "--", ...trackedAtHead],
+          { cwd: this.info.rootPath },
+        );
+      }
+      if (addedToIndex.length) {
+        // IntelliJ-style rollback of a newly added file removes it from the
+        // index but deliberately keeps the user's local file as untracked.
+        await this.runner.run(["restore", "--staged", "--", ...addedToIndex], { cwd: this.info.rootPath });
+      }
+      const obsoleteRenameTargets = addedToIndex.filter((candidate) => renamedTargets.has(candidate));
+      if (obsoleteRenameTargets.length) {
+        await this.runner.run(["clean", "-f", "--", ...obsoleteRenameTargets], { cwd: this.info.rootPath });
+      }
+    });
   }
 
   public async resolveConflict(pathSpec: string, side: "ours" | "theirs"): Promise<void> {
