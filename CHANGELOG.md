@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2
+
+- Debounce repository refreshes, narrow Git metadata watchers, cache stable snapshots, and stop loading Log data while another tool-window tab is active.
+- Preserve context menus, filters, focus, selections, and scroll positions while repository state updates in the background.
+- Add progressive history loading, clearer search scope, safer path filtering, synchronized filtered selection, and compact ref labels.
+- Improve Local Changes with repository-scoped selections and drafts, collapsible changelists, keyboard navigation, responsive splitters, and guarded commit actions.
+- Add an incremental, filterable Git Console that hides successful background queries by default and caps retained command output.
+- Reuse branch-comparison sessions, add changed-file search/status filters, guard asynchronous selections, and handle binary files explicitly.
+- Persist merge-conflict drafts, detect externally changed files before Apply, improve conflict navigation and scroll synchronization, and confirm destructive whole-file choices.
+- Validate user-provided Git names and paths, add cancellation to network operations, improve accessibility and responsive layout, and add initial Chinese UI localization.
+
 ## 0.1.1
 
 - Stabilize context menus and filter popovers during background repository refreshes.
