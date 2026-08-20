@@ -89,6 +89,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private filePath?: string;
   private logOptions: GitLogOptions = { order: "date", firstParent: false, noMerges: false };
   private requestedTab: ToolTab = "log";
+  private pendingOpenTab?: ToolTab;
   private currentCommits: GitCommit[] = [];
   private traces: DisplayTrace[] = [];
   private readonly selectedPaths = new Map<string, Set<string>>();
@@ -132,11 +133,14 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = webviewDocument("Git", logStyles, logScript);
-    this.disposables.push(
+    const registrations: vscode.Disposable[] = [
       view.webview.onDidReceiveMessage((message: LogMessage) => void this.handleMessage(message)),
       view.onDidChangeVisibility(() => { if (view.visible) this.scheduleUpdate(0); }),
-      view.onDidDispose(() => { if (this.view === view) this.view = undefined; }),
-    );
+    ];
+    registrations.push(view.onDidDispose(() => {
+      for (const registration of registrations.splice(0)) registration.dispose();
+      if (this.view === view) this.view = undefined;
+    }));
     this.scheduleUpdate(0);
     if (!this.didRequestNestedDiscovery) {
       this.didRequestNestedDiscovery = true;
@@ -147,8 +151,15 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   }
 
   public async open(root?: string, filePath?: string, tab: ToolTab = "log"): Promise<void> {
-    if (root && this.manager.snapshot(root)) this.selectedRoot = root;
+    if (root && this.manager.snapshot(root)) {
+      if (root !== this.selectedRoot) {
+        this.logOptions = { ...this.logOptions, author: undefined, since: undefined };
+        this.logLimit = 300;
+      }
+      this.selectedRoot = root;
+    }
     this.requestedTab = tab;
+    this.pendingOpenTab = this.view ? undefined : tab;
     this.filePath = filePath;
     this.selectedRef = undefined;
     this.selectedHash = undefined;
@@ -329,15 +340,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         type: "state",
         state: {
           repositories,
+          empty: false,
           selectedRoot: repository.info.rootPath,
           branch: snapshot.status?.branch.head ?? "detached HEAD",
-          selectedRef: this.selectedRef,
-          filePath: this.filePath,
+          selectedRef: this.selectedRef ?? null,
+          filePath: this.filePath ?? null,
           logOptions: this.logOptions,
           ...(this.lastSentBranchesKey === refsKey ? {} : { branches: snapshot.branches }),
           ...logState,
           operation: snapshot.operation,
-          error: snapshot.error,
+          error: snapshot.error ?? null,
           ...(includeTraces ? { traces: this.traces } : {}),
           lists,
           totalChanges: changes.length,
@@ -364,7 +376,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     try {
       if (message.type === "ready") {
         this.logOptions = normalizeLogOptions(message.logOptions);
-        if (isToolTab(message.activeTab)) this.requestedTab = message.activeTab;
+        if (this.pendingOpenTab) {
+          this.requestedTab = this.pendingOpenTab;
+          this.pendingOpenTab = undefined;
+        } else if (isToolTab(message.activeTab)) this.requestedTab = message.activeTab;
         // A reloaded webview starts empty, so nothing counts as already sent.
         this.lastSentBranchesKey = undefined;
         this.lastSentTracesKey = undefined;
@@ -375,6 +390,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "setActiveTab") {
         if (!isToolTab(message.tab)) return;
         this.requestedTab = message.tab;
+        this.pendingOpenTab = undefined;
         return void this.update();
       }
       if (message.type === "clearConsole") {
@@ -1119,7 +1135,7 @@ const logScript = String.raw`
 
   function captureScroll() {
     const result = { positions: {}, focus: captureFocus() };
-    for (const id of ['branch-pane', 'commit-scroll', 'changed-files', 'commit-details']) {
+    for (const id of ['branch-pane', 'commit-scroll', 'changed-files', 'commit-details', 'changes-list', 'shelf-pane', 'console-output']) {
       const element = document.getElementById(id);
       if (element) result.positions[id] = { top: element.scrollTop, left: element.scrollLeft };
     }
@@ -1226,9 +1242,13 @@ const logScript = String.raw`
     });
   }
 
+  let composing = false;
+  document.addEventListener('compositionstart', () => { composing = true; }, true);
+  document.addEventListener('compositionend', () => { composing = false; }, true);
+
   function blocksStateRender() {
     const active = document.activeElement;
-    return Boolean(openMenu || document.querySelector('.dragging, .splitter.active') ||
+    return Boolean(composing || openMenu || document.querySelector('.dragging, .splitter.active') ||
       (active && active.tagName === 'SELECT'));
   }
 
@@ -1239,7 +1259,7 @@ const logScript = String.raw`
     saveUiState({ knownAuthors: [...knownAuthors].slice(-500) });
     if (previousRoot && state.selectedRoot && previousRoot !== state.selectedRoot) {
       search = ''; authorFilter = ''; dateFilter = 'all'; selectedFilePath = undefined;
-      state.commits = []; state.selection = null;
+      if (!('commits' in next)) { state.commits = []; state.selection = null; }
       collapsedGraphSeries.clear(); selectedGraphSeries = ''; hoveredGraphSeries = '';
       saveUiState({ search, authorFilter, dateFilter, collapsedGraphSeries: [], selectedGraphSeries: '' });
     }
@@ -1257,6 +1277,15 @@ const logScript = String.raw`
     saveUiState({ selectedBranchKeys: [...selectedBranchKeys] });
     if (state.selection && !(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
     render();
+  }
+
+  let errorBanner;
+  function showErrorBanner(message) {
+    // A full render clears the banner via replaceChildren; failures between
+    // renders reuse one element instead of stacking a banner per failure.
+    if (errorBanner && errorBanner.isConnected) { errorBanner.textContent = message; return; }
+    errorBanner = node('div', 'error', message);
+    app.prepend(errorBanner);
   }
 
   function flushDeferredState() {
@@ -1319,7 +1348,7 @@ const logScript = String.raw`
       const option = node('option', '', repo.name + (repo.branch ? ' · ' + repo.branch : ''));
       option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option);
     }
-    repositories.addEventListener('change', () => post('selectRepository', { root: repositories.value }));
+    repositories.addEventListener('change', () => { post('selectRepository', { root: repositories.value }); repositories.blur(); });
     return repositories;
   }
 
@@ -1371,6 +1400,7 @@ const logScript = String.raw`
         window.removeEventListener('mousemove', resize); window.removeEventListener('mouseup', finish); splitter.classList.remove('dragging');
         const value = Number(splitter.getAttribute('aria-valuenow'));
         saveUiState(compact() ? { commitPaneHeight: value } : { commitPaneWidth: value });
+        flushDeferredState();
       };
       window.addEventListener('mousemove', resize); window.addEventListener('mouseup', finish);
     });
@@ -1382,7 +1412,7 @@ const logScript = String.raw`
   }
 
   function changesPane() {
-    const pane = node('div', 'changes-list');
+    const pane = node('div', 'changes-list'); pane.id = 'changes-list';
     if (state.error) pane.append(node('div', 'error', state.error));
     if (state.operation && state.operation.kind !== 'none') {
       const operation = node('div', 'operation', state.operation.kind.toUpperCase() + ' is in progress');
@@ -1487,7 +1517,7 @@ const logScript = String.raw`
   }
 
   function shelfPanel() {
-    const pane = node('div', 'shelf-pane');
+    const pane = node('div', 'shelf-pane'); pane.id = 'shelf-pane';
     const top = node('div', 'group-header');
     top.append(node('span', '', 'Shelved Changes'), node('span', 'spacer'), button('+ Shelve', 'Shelve selected local changes', () => { selectToolTab('changes'); }, 'action'));
     pane.append(top);
@@ -1540,7 +1570,7 @@ const logScript = String.raw`
     const bar = node('div', 'toolbar');
     const repositories = node('select'); repositories.title = 'Git root';
     for (const repo of state.repositories || []) { const option = node('option', '', repo.name); option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option); }
-    repositories.addEventListener('change', () => post('selectRepository', { root: repositories.value }));
+    repositories.addEventListener('change', () => { post('selectRepository', { root: repositories.value }); repositories.blur(); });
     bar.append(
       repositories,
       button('Refresh', 'Refresh repository', () => post('refresh'), 'icon-button'),
@@ -1586,6 +1616,7 @@ const logScript = String.raw`
       const finish = () => {
         window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', finish);
         splitter.classList.remove('dragging'); persistColumnWidths(workspace);
+        flushDeferredState();
       };
       window.addEventListener('mousemove', move); window.addEventListener('mouseup', finish);
     });
@@ -1646,6 +1677,8 @@ const logScript = String.raw`
       const active = selectedBranchKeys.has(row.dataset.branchKey);
       row.classList.toggle('selected', active); row.setAttribute('aria-selected', String(active));
     });
+    const allRow = document.querySelector('.branch-row[data-branch-all]');
+    if (allRow) allRow.classList.toggle('active', !selectedBranchKeys.size);
   }
 
   function branchContextItems(branch) {
@@ -1678,6 +1711,7 @@ const logScript = String.raw`
   function branchPane() {
     const pane = node('aside', 'pane branches'); pane.id = 'branch-pane'; pane.setAttribute('role', 'listbox'); pane.setAttribute('aria-label', 'Branches'); pane.setAttribute('aria-multiselectable', 'true'); pane.append(node('div', 'pane-title', 'Branches'));
     const all = button('All', 'Show all branches', () => { setBranchSelection([]); post('selectRef', {}); }, 'branch-row' + (!state.selectedRef && !selectedBranchKeys.size ? ' active' : ''));
+    all.dataset.branchAll = '1';
     pane.append(all);
     for (const [kind, title] of [['local','Local'], ['remote','Remote'], ['tag','Tags']]) {
       const section = node('section', 'branch-section'); section.append(node('div', 'section-title', title));
@@ -1739,7 +1773,7 @@ const logScript = String.raw`
     const input = node('input', 'commit-search'); input.id = 'commit-search'; input.type = 'search'; input.placeholder = 'Filter loaded commits'; input.value = search;
     input.setAttribute('aria-label', 'Filter the loaded commits by text or hash');
     input.title = 'Filters the ' + String(state.logLimit || (state.commits || []).length) + ' commits currently loaded';
-    input.addEventListener('input', () => { search = input.value.toLowerCase(); saveUiState({ search }); renderCommitRows(); refreshDetailsForFilter(); });
+    input.addEventListener('input', () => { search = input.value; saveUiState({ search }); renderCommitRows(); refreshDetailsForFilter(); });
     const branch = filterButton('Branch', state.selectedRef ? shortRef(state.selectedRef) : '', 'Filter by branch', Boolean(state.selectedRef), branchFilterItems);
     const user = filterButton('User', authorFilter, 'Filter by author', Boolean(authorFilter), userFilterItems);
     const dateLabels = { all: '', today: 'Today', week: '7 days', month: '30 days', year: '1 year' };
@@ -1860,6 +1894,14 @@ const logScript = String.raw`
     virtualCommits = commits; virtualGraph = graph;
     currentGraphFragments = model.fragments;
     for (const id of [...collapsedGraphSeries]) if (!currentGraphFragments.has(id)) collapsedGraphSeries.delete(id);
+    if (selectedGraphSeries) {
+      const liveSeries = new Set();
+      for (const entry of graph) {
+        liveSeries.add(entry.nodeSeriesId);
+        for (const segment of graphSegments(entry)) liveSeries.add(segment.seriesId);
+      }
+      if (!liveSeries.has(selectedGraphSeries)) { selectedGraphSeries = ''; saveUiState({ selectedGraphSeries: '' }); }
+    }
     const currentHash = pendingCommitHash || state.selection?.commit?.hash;
     if (commits.length && !commits.some(commit => commit.hash === currentHash)) {
       pendingCommitHash = commits[0].hash; post('selectCommit', { hash: pendingCommitHash });
@@ -1975,7 +2017,7 @@ const logScript = String.raw`
 
   function filteredCommits() {
     let commits = [...(state.commits || [])];
-    if (search) commits = commits.filter(c => (c.subject + '\n' + c.body + '\n' + c.author + '\n' + c.email + '\n' + c.hash + '\n' + (c.refs || []).join(' ')).toLowerCase().includes(search));
+    if (search) commits = commits.filter(c => (c.subject + '\n' + c.body + '\n' + c.author + '\n' + c.email + '\n' + c.hash + '\n' + (c.refs || []).join(' ')).toLowerCase().includes(search.toLowerCase()));
     if (authorFilter) commits = commits.filter(commit => commit.author === authorFilter);
     if (dateFilter !== 'all') {
       const now = new Date(); let cutoff;
@@ -2125,6 +2167,7 @@ const logScript = String.raw`
         window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', finish);
         splitter.classList.remove('dragging');
         saveUiState({ messagePaneHeight: parseFloat(getComputedStyle(pane).getPropertyValue('--message-height')) });
+        flushDeferredState();
       };
       window.addEventListener('mousemove', move); window.addEventListener('mouseup', finish);
     });
@@ -2295,7 +2338,11 @@ const logScript = String.raw`
     });
     canvas.addEventListener('mouseleave', () => { if (hoveredGraphSeries) { hoveredGraphSeries = ''; drawGraphs(); } });
     canvas.addEventListener('click', event => {
-      const series = graphSeriesAt(canvas, event); if (!series) return;
+      const series = graphSeriesAt(canvas, event);
+      if (!series) {
+        if (selectedGraphSeries) { selectedGraphSeries = ''; saveUiState({ selectedGraphSeries: '' }); drawGraphs(); }
+        return;
+      }
       event.preventDefault(); event.stopPropagation(); selectedGraphSeries = series;
       if (currentGraphFragments.has(series)) {
         if (collapsedGraphSeries.has(series)) collapsedGraphSeries.delete(series); else collapsedGraphSeries.add(series);
@@ -2320,7 +2367,7 @@ const logScript = String.raw`
 
   window.addEventListener('message', event => {
     if (event.data.type === 'state') {
-      if (blocksStateRender()) deferredState = event.data.state;
+      if (blocksStateRender()) deferredState = { ...deferredState, ...event.data.state };
       else applyIncomingState(event.data.state);
     }
     if (event.data.type === 'selection') {
@@ -2336,7 +2383,7 @@ const logScript = String.raw`
       const options = { ...(uiState.commitOptions || {}) }; delete options[state.selectedRoot || ''];
       saveUiState({ commitMessages: drafts, commitMessage: undefined, commitOptions: options }); render();
     }
-    if (event.data.type === 'error') { const error = node('div', 'error', event.data.message); app.prepend(error); }
+    if (event.data.type === 'error') { showErrorBanner(event.data.message); }
   });
   document.addEventListener('pointerdown', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); });
   document.addEventListener('wheel', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });

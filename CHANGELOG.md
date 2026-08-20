@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fix the branch filter never returning to "All": tool-window state fields that reset to undefined (selected ref, path filter, error text, empty flag) are now sent explicitly, so the merging webview no longer keeps stale values.
+- Merge deferred state patches instead of overwriting them, and stop discarding commits that arrive together with a repository switch; both previously left the log stuck on stale data with Refresh unable to recover.
+- Clear graph-series highlights when the recomputed graph no longer contains them, deselect by clicking empty graph space, keep the search box casing, sync the "All" branches row during multi-select, blur the repository dropdown so switching renders immediately, and preserve scroll positions in the changes, shelf, and console panes.
+- Reuse a single error banner, apply deferred state as soon as a splitter drag ends, keep the DOM intact during IME composition, honor the requested tab when the tool window opens fresh, reset per-repository log filters when commands open another repository, and drop stale webview listeners when the view is rebuilt.
+- Fix Windows CI: the path-canonicalization test now expands 8.3 short names in its expected value, matching fsPromises.realpath.
+
 - Reuse cached `git log` output while refs and HEAD are unchanged, resend branch/trace/commit payloads to the tool window only when they actually changed, read the shelf list only while its tab is open, and guard every state message against stale overwrites.
 - Keep changelist assignments across stashes and branch switches and route new changes into the active changelist, matching the IntelliJ model, with a bounded assignment store.
 - Remove the unused legacy tree-view layer and the unreachable "Show Commit" command; command payloads are now plain data nodes, and stricter compiler checks keep dead code out.

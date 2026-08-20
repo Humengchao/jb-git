@@ -17,5 +17,8 @@ test("canonicalizes paths below symlinked and deleted descendants", async () => 
   const real = join(root, "real");
   mkdirSync(real);
   symlinkSync(real, join(root, "alias"));
-  assert.equal(await canonicalPath(join(root, "alias", "missing", "file.ts")), join(realpathSync(real), "missing", "file.ts"));
+  // realpathSync.native matches fsPromises.realpath (used by canonicalPath):
+  // on Windows both expand 8.3 short names like RUNNER~1, the JS
+  // implementation behind plain realpathSync does not.
+  assert.equal(await canonicalPath(join(root, "alias", "missing", "file.ts")), join(realpathSync.native(real), "missing", "file.ts"));
 });
