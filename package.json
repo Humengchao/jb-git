@@ -312,7 +312,7 @@
       },
       {
         "command": "jbGit.resolveConflict",
-        "title": "JB Git: Resolve Conflict"
+        "title": "JB Git: Open Merge Conflict Editor"
       },
       {
         "command": "jbGit.markResolved",

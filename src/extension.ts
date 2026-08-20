@@ -15,6 +15,7 @@ import { StashNode } from "./views/stashTree";
 import { SubmoduleNode } from "./views/submoduleTree";
 import { RepositoryManager } from "./repositoryManager";
 import { IntelliJGitToolWindowProvider } from "./webviews/logPanel";
+import { MergeConflictEditor } from "./webviews/mergeEditor";
 
 function workspacePaths(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
@@ -69,6 +70,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const shelfStore = new ShelfStore(context.globalStorageUri.fsPath);
   const diffProvider = new DiffContentProvider();
   const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore, diffProvider);
+  const mergeEditor = new MergeConflictEditor(manager);
   const traceRegistration = runner.onDidRun((event) => gitToolWindow.appendTrace(event));
   const toolWindowRegistration = vscode.window.registerWebviewViewProvider(
     IntelliJGitToolWindowProvider.viewType,
@@ -192,6 +194,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     changelistStore,
     shelfStore,
     gitToolWindow,
+    mergeEditor,
     traceRegistration,
     toolWindowRegistration,
     diffProvider,
@@ -226,6 +229,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.openChanges", (rootPath?: string) => gitToolWindow.openChanges(rootPath)),
     vscode.commands.registerCommand("jbGit.openDiff", async (node?: ChangeNode) => {
       if (!node) return;
+      if (node.change.conflicted) {
+        await openMergeConflictEditor(manager, mergeEditor, node);
+        return;
+      }
       await runWithNotification(`Loading diff for ${node.change.path}`, () => openChangeDiff(manager, diffProvider, node));
     }),
     vscode.commands.registerCommand("jbGit.showHistory", () => gitToolWindow.open()),
@@ -902,17 +909,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.resolveConflict", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node || !node.change.conflicted) return;
-      const side = await vscode.window.showQuickPick(
-        [
-          { label: "Accept ours", value: "ours" as const, description: "Use the current branch version" },
-          { label: "Accept theirs", value: "theirs" as const, description: "Use the incoming branch version" },
-        ],
-        { placeHolder: `Resolve ${node.change.path}` },
-      );
-      if (!side) return;
-      const answer = await vscode.window.showWarningMessage(`Replace ${node.change.path} with ${side.label.toLowerCase()}?`, { modal: true }, "Resolve");
-      if (answer !== "Resolve") return;
-      await runWithNotification(`Resolving ${node.change.path}`, () => manager.resolveConflict(node.repositoryRoot, node.change.path, side.value));
+      await openMergeConflictEditor(manager, mergeEditor, node);
     }),
     vscode.commands.registerCommand("jbGit.markResolved", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node || !node.change.conflicted) return;
@@ -932,4 +929,35 @@ export function formatGitError(error: unknown): string {
     return error.stderr.trim() || error.stdout.trim() || error.message;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+async function openMergeConflictEditor(
+  manager: RepositoryManager,
+  mergeEditor: MergeConflictEditor,
+  node: ChangeNode,
+): Promise<void> {
+  const opened = await runWithNotification(
+    `Loading merge conflict for ${node.change.path}`,
+    () => mergeEditor.open(node.repositoryRoot, node.change.path),
+  );
+  if (opened !== false) return;
+
+  const side = await vscode.window.showQuickPick(
+    [
+      { label: "Accept ours", value: "ours" as const, description: "Use the complete current-branch binary file" },
+      { label: "Accept theirs", value: "theirs" as const, description: "Use the complete incoming binary file" },
+    ],
+    { title: "Binary merge conflict", placeHolder: `${node.change.path} cannot be merged as text` },
+  );
+  if (!side) return;
+  const answer = await vscode.window.showWarningMessage(
+    `Replace ${node.change.path} with ${side.label.toLowerCase()} and mark it resolved?`,
+    { modal: true },
+    "Resolve",
+  );
+  if (answer !== "Resolve") return;
+  await runWithNotification(`Resolving ${node.change.path}`, async () => {
+    await manager.resolveConflict(node.repositoryRoot, node.change.path, side.value);
+    await manager.markResolved(node.repositoryRoot, [node.change.path]);
+  });
 }

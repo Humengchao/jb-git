@@ -1023,7 +1023,7 @@ const logScript = String.raw`
     if (change.staged) file.append(node('span', 'stage-mark', 'staged'));
     file.addEventListener('dblclick', () => post('openDiff', { path: change.path }));
     const actions = node('div', 'row-actions');
-    actions.append(button('↔', 'Show Diff', () => post('openDiff', { path: change.path }), 'row-action'));
+    actions.append(button('↔', change.conflicted ? 'Open Merge Conflict Editor' : 'Show Diff', () => post('openDiff', { path: change.path }), 'row-action'));
     if (change.staged && !change.unstaged) actions.append(button('−', 'Unstage', () => post('unstage', { path: change.path }), 'row-action'));
     else actions.append(button('+', 'Stage', () => post('stage', { path: change.path }), 'row-action'));
     actions.append(

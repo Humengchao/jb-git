@@ -36,8 +36,8 @@ The staged local implementation currently reaches the following checkpoint:
 | P1 | Complete for local extension host | Git Core runner, repository discovery, porcelain-v2 status, serialized mutations, operation-state detection |
 | P2 | Complete for MVP workflows | Local Changes, diff, stage/unstage/discard, commit, branch, fetch/pull/push, remotes, clone |
 | P3 | Core and primary UI complete | Bottom Git tool window with Local Changes and Shelf tabs, Changelist-based selected-file commit, Patch import, File History, Blame, Stash |
-| P4 | Core workflows and Log UI complete | Bottom Log and Console tabs, colored log graph, branch filters, Changed Files and Details panes, Merge/Rebase/Cherry-pick/Revert/Reset, continue/abort/skip, conflict ours/theirs/mark-resolved, Bisect |
+| P4 | Core workflows and Log UI complete | Bottom Log and Console tabs, colored log graph, branch filters, Changed Files and Details panes, Merge/Rebase/Cherry-pick/Revert/Reset, continue/abort/skip, three-pane conflict resolution, Bisect |
 | P5 | Partial | Worktree, Submodule, Sparse Checkout, LFS pull; large-repository tuning and full multi-root transaction semantics remain |
 | P6 | Partial | Windows/macOS/Linux core CI and VS Code 1.95/stable Extension Host matrix; Git-version fallbacks, accessibility, remote-host testing, release/signing remain |
 
-The current code deliberately stops short of claiming complete IntelliJ parity. The remaining work should be implemented as separate commits: a three-way merge editor, interactive rebase sequencing, full multi-root rollback, large-log indexing/pagination, capability-based command fallbacks, and cross-platform/package verification.
+The current code deliberately stops short of claiming complete IntelliJ parity. The remaining work should be implemented as separate commits: interactive rebase sequencing, full multi-root rollback, large-log indexing/pagination, capability-based command fallbacks, and cross-platform/package verification.

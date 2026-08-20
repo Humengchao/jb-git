@@ -14,6 +14,7 @@
 - Group changed files by folder and add a persistent draggable splitter for resizing the commit details pane.
 - Add persistent horizontal resizing for all three Log columns, Command/Ctrl branch multi-selection, branch comparison, and Branch/User/Date/Paths/order filters.
 - Replace raw Show Files Diff output with a Changes Between file tree and native side-by-side, syntax-highlighted file diffs.
+- Add an IntelliJ-inspired three-pane merge conflict editor with an editable result, per-block Left/Both/Right choices, conflict navigation, resizable panes, deletion handling, and automatic staging on Apply.
 
 ## 0.1.0-alpha.3
 
