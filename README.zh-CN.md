@@ -106,6 +106,17 @@ code --install-extension jb-git-0.1.4.vsix
 - 修复更新递增补丁版本，例如 `0.1.3` → `0.1.4`；新增较大功能递增次版本；不兼容更新递增主版本。
 - `package.json`、`package-lock.json`、Changelog 和安装文档中的版本由自动测试检查一致性。
 
+### 自动发布到 Marketplace
+
+推送 `v*.*.*` 格式的版本标签会触发 GitHub Actions 的 `Release` 工作流：自动运行完整测试、校验标签与 `package.json` 版本一致、打包 VSIX、发布到 Visual Studio Marketplace，并创建附带 VSIX 的 GitHub Release。
+
+```bash
+npm version patch        # 或 minor / major，会更新版本号并创建对应标签
+git push --follow-tags
+```
+
+工作流依赖仓库 Secret `VSCE_PAT`（拥有 `Marketplace (Manage)` 权限的 Azure DevOps 个人访问令牌）。
+
 ## 本地开发
 
 环境要求：

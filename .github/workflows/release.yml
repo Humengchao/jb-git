@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag v$TAG_VERSION does not match package.json version $PKG_VERSION" >&2
+            exit 1
+          fi
+      - run: npm run test:unit
+      - run: xvfb-run -a npm run test:extension
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Ensure marketplace token is configured
+        run: |
+          if [ -z "${{ secrets.VSCE_PAT }}" ]; then
+            echo "Repository secret VSCE_PAT is not set. Add an Azure DevOps PAT with Marketplace (Manage) scope." >&2
+            exit 1
+          fi
+      - run: npm run package
+      - name: Publish to Visual Studio Marketplace
+        run: npx vsce publish --packagePath jb-git-*.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      - name: Create GitHub release with VSIX
+        run: gh release create "$GITHUB_REF_NAME" jb-git-*.vsix --title "JB Git $GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
