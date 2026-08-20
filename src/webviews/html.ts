@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 export function webviewDocument(webview: vscode.Webview, title: string, styles: string, script: string): string {
   const nonce = randomBytes(18).toString("base64");
   return `<!doctype html>
-<html lang="en">
+<html lang="${escapeHtml(vscode.env.language || "en")}">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
@@ -13,7 +13,7 @@ export function webviewDocument(webview: vscode.Webview, title: string, styles: 
   <style nonce="${nonce}">${styles}</style>
 </head>
 <body>
-  <div id="app" role="application" aria-label="${escapeHtml(title)}"></div>
+  <div id="app" role="region" aria-label="${escapeHtml(title)}"></div>
   <script nonce="${nonce}">${script}</script>
 </body>
 </html>`;

@@ -17,6 +17,8 @@ export class RepositoryManager implements vscode.Disposable {
   private repositories: GitRepository[] = [];
   private disposed = false;
   private refreshQueue: Promise<void> = Promise.resolve();
+  private contextWorkspace?: boolean;
+  private contextRepository?: boolean;
 
   public constructor(
     private readonly runner: GitRunner,
@@ -40,6 +42,7 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async discoverAndRefresh(): Promise<void> {
     await this.enqueueRefresh(async () => {
+      const previous = this.snapshotKeys();
       this.repositories = await discoverRepositories(this.workspacePaths(), this.runner);
       const next = new Map<string, RepositorySnapshot>();
       const snapshots = await Promise.all(this.repositories.map((repository) => this.readSnapshot(repository)));
@@ -47,12 +50,13 @@ export class RepositoryManager implements vscode.Disposable {
       for (const snapshot of snapshots) next.set(snapshot.repository.info.rootPath, snapshot);
       for (const [root, snapshot] of next) this.snapshots.set(root, snapshot);
       await this.updateContextKeys();
-      this.changeEmitter.fire();
+      if (this.snapshotsChanged(previous)) this.changeEmitter.fire();
     });
   }
 
   public async refresh(rootPath?: string): Promise<void> {
     await this.enqueueRefresh(async () => {
+      const previous = this.snapshotKeys();
       const targets = rootPath ? this.repositories.filter((repo) => repo.info.rootPath === rootPath) : this.repositories;
       await Promise.all(
         targets.map(async (repository) => {
@@ -60,7 +64,7 @@ export class RepositoryManager implements vscode.Disposable {
         }),
       );
       await this.updateContextKeys();
-      this.changeEmitter.fire();
+      if (this.snapshotsChanged(previous)) this.changeEmitter.fire();
     });
   }
 
@@ -134,8 +138,8 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
-  public async lfsPull(rootPath: string): Promise<void> {
-    await this.requireRepository(rootPath).lfsPull();
+  public async lfsPull(rootPath: string, signal?: AbortSignal): Promise<void> {
+    await this.requireRepository(rootPath).lfsPull(signal);
     await this.refresh(rootPath);
   }
 
@@ -158,22 +162,22 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
-  public async fetch(rootPath?: string): Promise<void> {
+  public async fetch(rootPath?: string, signal?: AbortSignal): Promise<void> {
     const targets = rootPath ? [this.requireRepository(rootPath)] : this.repositories;
-    for (const repository of targets) await repository.fetch();
+    for (const repository of targets) await repository.fetch(signal);
     await this.refresh(rootPath);
   }
 
-  public async pull(rootPath: string, strategy: GitPullStrategy): Promise<void> {
+  public async pull(rootPath: string, strategy: GitPullStrategy, signal?: AbortSignal): Promise<void> {
     try {
-      await this.requireRepository(rootPath).pull(strategy);
+      await this.requireRepository(rootPath).pull(strategy, signal);
     } finally {
       await this.refresh(rootPath);
     }
   }
 
-  public async push(rootPath: string, forceWithLease = false): Promise<void> {
-    await this.requireRepository(rootPath).push(forceWithLease);
+  public async push(rootPath: string, forceWithLease = false, signal?: AbortSignal): Promise<void> {
+    await this.requireRepository(rootPath).push(forceWithLease, signal);
     await this.refresh(rootPath);
   }
 
@@ -346,13 +350,13 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
-  public async fetchRemote(rootPath: string, name: string): Promise<void> {
-    await this.requireRepository(rootPath).fetchRemote(name);
+  public async fetchRemote(rootPath: string, name: string, signal?: AbortSignal): Promise<void> {
+    await this.requireRepository(rootPath).fetchRemote(name, true, signal);
     await this.refresh(rootPath);
   }
 
-  public async pushRemote(rootPath: string, name: string, branch?: string, forceWithLease = false): Promise<void> {
-    await this.requireRepository(rootPath).pushRemote(name, branch, forceWithLease);
+  public async pushRemote(rootPath: string, name: string, branch?: string, forceWithLease = false, signal?: AbortSignal): Promise<void> {
+    await this.requireRepository(rootPath).pushRemote(name, branch, forceWithLease, signal);
     await this.refresh(rootPath);
   }
 
@@ -384,9 +388,9 @@ export class RepositoryManager implements vscode.Disposable {
     await this.refresh(rootPath);
   }
 
-  public async clone(source: string, destination: string, bare = false, cwd?: string): Promise<void> {
+  public async clone(source: string, destination: string, bare = false, cwd?: string, signal?: AbortSignal): Promise<void> {
     const cloneRoot = cwd ?? this.workspacePaths()[0] ?? ".";
-    await this.runner.run(["clone", ...(bare ? ["--bare"] : []), "--", source, destination], { cwd: cloneRoot });
+    await this.runner.run(["clone", ...(bare ? ["--bare"] : []), "--", source, destination], { cwd: cloneRoot, signal });
     await this.discoverAndRefresh();
   }
 
@@ -444,6 +448,18 @@ export class RepositoryManager implements vscode.Disposable {
     return next;
   }
 
+  private snapshotKeys(): Map<string, string> {
+    return new Map([...this.snapshots].map(([root, snapshot]) => [root, snapshotKey(snapshot)]));
+  }
+
+  private snapshotsChanged(previous: ReadonlyMap<string, string>): boolean {
+    if (previous.size !== this.snapshots.size) return true;
+    for (const [root, snapshot] of this.snapshots) {
+      if (previous.get(root) !== snapshotKey(snapshot)) return true;
+    }
+    return false;
+  }
+
   private requireRepository(rootPath: string): GitRepository {
     const repository = this.repository(rootPath);
     if (!repository) throw new Error(`Repository not found: ${rootPath}`);
@@ -451,8 +467,18 @@ export class RepositoryManager implements vscode.Disposable {
   }
 
   private async updateContextKeys(): Promise<void> {
-    await vscode.commands.executeCommand("setContext", "jbGit.hasWorkspace", this.workspacePaths().length > 0);
-    await vscode.commands.executeCommand("setContext", "jbGit.hasRepository", this.hasRepositories);
+    const hasWorkspace = this.workspacePaths().length > 0;
+    const hasRepository = this.hasRepositories;
+    const updates: Thenable<unknown>[] = [];
+    if (this.contextWorkspace !== hasWorkspace) {
+      this.contextWorkspace = hasWorkspace;
+      updates.push(vscode.commands.executeCommand("setContext", "jbGit.hasWorkspace", hasWorkspace));
+    }
+    if (this.contextRepository !== hasRepository) {
+      this.contextRepository = hasRepository;
+      updates.push(vscode.commands.executeCommand("setContext", "jbGit.hasRepository", hasRepository));
+    }
+    await Promise.all(updates);
   }
 
   public dispose(): void {
@@ -460,4 +486,15 @@ export class RepositoryManager implements vscode.Disposable {
     this.disposed = true;
     this.changeEmitter.dispose();
   }
+}
+
+/** A stable UI-facing snapshot identity. Status timestamps are deliberately ignored. */
+export function snapshotKey(snapshot: RepositorySnapshot): string {
+  return JSON.stringify({
+    root: snapshot.repository.info.rootPath,
+    status: snapshot.status ? { branch: snapshot.status.branch, changes: snapshot.status.changes } : null,
+    branches: snapshot.branches,
+    operation: snapshot.operation,
+    error: snapshot.error,
+  });
 }

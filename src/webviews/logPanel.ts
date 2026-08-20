@@ -9,9 +9,11 @@ import { ChangeNode } from "../views/changesTree";
 import { DiffContentProvider } from "../views/diffProvider";
 import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
+import { validateGitRefName, validatePathInput } from "../inputValidation";
 
 type LogMessage =
-  | { type: "ready"; logOptions?: Partial<GitLogOptions> }
+  | { type: "ready"; logOptions?: Partial<GitLogOptions>; activeTab?: ToolTab }
+  | { type: "setActiveTab"; tab: ToolTab }
   | { type: "selectRepository"; root: string }
   | { type: "selectRef"; ref?: string }
   | { type: "setPathFilter"; path?: string }
@@ -27,7 +29,8 @@ type LogMessage =
   | { type: "refresh" }
   | { type: "clearConsole" }
   | { type: "togglePath"; path: string; checked: boolean }
-  | { type: "toggleAll"; checked: boolean }
+  | { type: "toggleAll"; checked: boolean; listId?: string }
+  | { type: "loadMore" }
   | { type: "openDiff"; path: string }
   | { type: "commit"; message: string; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean }
   | { type: "createChangelist" }
@@ -52,6 +55,17 @@ interface LogSelection {
 
 type ToolTab = "log" | "console" | "changes" | "shelf";
 
+interface DisplayTrace extends GitTraceEvent {
+  background: boolean;
+}
+
+interface PersistedSelectionState {
+  version: 1;
+  repositories: Record<string, { selected: string[]; known: string[] }>;
+}
+
+const SELECTION_STORAGE_KEY = "jbGit.toolWindowSelections";
+
 const ALLOWED_COMMANDS = new Set([
   "jbGit.branchesPopup",
   "jbGit.operationsPopup",
@@ -75,10 +89,12 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private logOptions: GitLogOptions = { order: "date", firstParent: false, noMerges: false };
   private requestedTab: ToolTab = "log";
   private currentCommits: GitCommit[] = [];
-  private traces: GitTraceEvent[] = [];
+  private traces: DisplayTrace[] = [];
   private readonly selectedPaths = new Map<string, Set<string>>();
   private readonly knownPaths = new Map<string, Set<string>>();
   private updateVersion = 0;
+  private logLimit = 300;
+  private updateTimer?: NodeJS.Timeout;
   private readonly branchComparisons: BranchComparisonWorkspace;
   private readonly disposables: vscode.Disposable[] = [];
 
@@ -87,13 +103,21 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     private readonly changelists: ChangelistStore,
     private readonly shelves: ShelfStore,
     private readonly diffProvider: DiffContentProvider,
+    private readonly workspaceState: vscode.Memento,
   ) {
+    const persisted = workspaceState.get<PersistedSelectionState>(SELECTION_STORAGE_KEY);
+    if (persisted?.version === 1) {
+      for (const [root, selection] of Object.entries(persisted.repositories)) {
+        this.selectedPaths.set(root, new Set(selection.selected));
+        this.knownPaths.set(root, new Set(selection.known));
+      }
+    }
     this.branchComparisons = new BranchComparisonWorkspace(diffProvider);
     this.disposables.push(
       this.branchComparisons,
-      manager.onDidChange(() => void this.update()),
-      changelists.onDidChange(() => void this.update()),
-      shelves.onDidChange(() => void this.update()),
+      manager.onDidChange(() => this.scheduleUpdate()),
+      changelists.onDidChange(() => this.scheduleUpdate()),
+      shelves.onDidChange(() => this.scheduleUpdate()),
     );
   }
 
@@ -103,9 +127,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     view.webview.html = webviewDocument(view.webview, "Git", logStyles, logScript);
     this.disposables.push(
       view.webview.onDidReceiveMessage((message: LogMessage) => void this.handleMessage(message)),
+      view.onDidChangeVisibility(() => { if (view.visible) this.scheduleUpdate(0); }),
       view.onDidDispose(() => { if (this.view === view) this.view = undefined; }),
     );
-    void this.update();
+    this.scheduleUpdate(0);
   }
 
   public async open(root?: string, filePath?: string, tab: ToolTab = "log"): Promise<void> {
@@ -124,9 +149,21 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   }
 
   public appendTrace(event: GitTraceEvent): void {
-    this.traces.push(event);
-    if (this.traces.length > 400) this.traces = this.traces.slice(-400);
-    void this.view?.webview.postMessage({ type: "trace", trace: event });
+    const trace = { ...event, background: isBackgroundTrace(event) };
+    this.traces.push(trace);
+    if (this.traces.length > 200) this.traces = this.traces.slice(-200);
+    if (this.view?.visible && this.requestedTab === "console") {
+      void this.view.webview.postMessage({ type: "trace", trace });
+    }
+  }
+
+  private scheduleUpdate(delay = 75): void {
+    if (!this.view?.visible) return;
+    if (this.updateTimer) clearTimeout(this.updateTimer);
+    this.updateTimer = setTimeout(() => {
+      this.updateTimer = undefined;
+      void this.update();
+    }, delay);
   }
 
   private currentSnapshot() {
@@ -147,14 +184,25 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       for (const filePath of live) if (!known.has(filePath)) selected.add(filePath);
     }
     for (const filePath of [...selected]) if (!live.has(filePath)) selected.delete(filePath);
+    const changed = !known || !sameSet(known, live) || !sameSet(this.selectedPaths.get(root) ?? new Set(), selected);
     this.knownPaths.set(root, live);
     this.selectedPaths.set(root, selected);
+    if (changed) this.persistSelections();
     return selected;
   }
 
+  private persistSelections(): void {
+    const repositories: PersistedSelectionState["repositories"] = {};
+    for (const [root, selected] of this.selectedPaths) {
+      repositories[root] = { selected: [...selected], known: [...(this.knownPaths.get(root) ?? [])] };
+    }
+    void this.workspaceState.update(SELECTION_STORAGE_KEY, { version: 1, repositories } satisfies PersistedSelectionState);
+  }
+
   private async update(): Promise<void> {
-    const webview = this.view?.webview;
-    if (!webview) return;
+    const view = this.view;
+    const webview = view?.webview;
+    if (!webview || !view.visible) return;
     const version = ++this.updateVersion;
     const snapshot = this.currentSnapshot();
     const repositories = this.manager.all.map((item) => ({
@@ -177,18 +225,22 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       } catch (error) {
         if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
       }
-      const commits = this.selectedRef
-        ? await repository.logRef(this.selectedRef, 300, this.filePath, this.logOptions)
-        : await repository.log(300, this.filePath, this.logOptions);
-      if (version !== this.updateVersion) return;
-      this.currentCommits = commits;
-      if (!this.selectedHash || !commits.some((commit) => commit.hash === this.selectedHash)) {
-        this.selectedHash = commits[0]?.hash;
-      }
       let selection: LogSelection | undefined;
-      const commit = commits.find((item) => item.hash === this.selectedHash);
-      if (commit) selection = { commit, files: await this.manager.commitFiles(repository.info.rootPath, commit.hash) };
-      if (version !== this.updateVersion) return;
+      let logState: Record<string, unknown> = {};
+      if (this.requestedTab === "log") {
+        const commits = this.selectedRef
+          ? await repository.logRef(this.selectedRef, this.logLimit, this.filePath, this.logOptions)
+          : await repository.log(this.logLimit, this.filePath, this.logOptions);
+        if (version !== this.updateVersion) return;
+        this.currentCommits = commits;
+        if (!this.selectedHash || !commits.some((commit) => commit.hash === this.selectedHash)) {
+          this.selectedHash = commits[0]?.hash;
+        }
+        const commit = commits.find((item) => item.hash === this.selectedHash);
+        if (commit) selection = { commit, files: await this.manager.commitFiles(repository.info.rootPath, commit.hash) };
+        if (version !== this.updateVersion) return;
+        logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: commits.length >= this.logLimit };
+      }
       const lists = this.changelists.lists(root).map((list) => ({
         id: list.id,
         name: list.name,
@@ -218,8 +270,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           filePath: this.filePath,
           logOptions: this.logOptions,
           branches: snapshot.branches,
-          commits,
-          selection,
+          ...logState,
           operation: snapshot.operation,
           error: snapshot.error,
           traces: this.traces,
@@ -243,17 +294,25 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     try {
       if (message.type === "ready") {
         this.logOptions = normalizeLogOptions(message.logOptions);
+        if (isToolTab(message.activeTab)) this.requestedTab = message.activeTab;
         await this.view?.webview.postMessage({ type: "activateTab", tab: this.requestedTab });
+        return void this.update();
+      }
+      if (message.type === "setActiveTab") {
+        if (!isToolTab(message.tab)) return;
+        this.requestedTab = message.tab;
         return void this.update();
       }
       if (message.type === "clearConsole") {
         this.traces = [];
-        return void this.update();
+        await this.view?.webview.postMessage({ type: "consoleCleared" });
+        return;
       }
       if (message.type === "selectRepository") {
         if (this.manager.snapshot(message.root)) this.selectedRoot = message.root;
         this.selectedRef = undefined;
         this.selectedHash = undefined;
+        this.logLimit = 300;
         return void this.update();
       }
       const snapshot = this.currentSnapshot();
@@ -310,20 +369,20 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           if (!(await requireTrusted())) return;
           if (message.action === "newBranchFromRef") {
-            const name = await vscode.window.showInputBox({ title: `New Branch from '${branch.name}'`, prompt: "Branch name" });
+            const name = await vscode.window.showInputBox({ title: `New Branch from '${branch.name}'`, prompt: "Branch name", validateInput: (value) => validateGitRefName(value) });
             if (name?.trim()) await this.manager.createBranch(root, name.trim(), branch.name);
             return;
           }
           if (message.action === "createWorktreeFromRef") {
-            const worktreePath = await vscode.window.showInputBox({ title: `New Worktree from '${branch.name}'`, prompt: "Worktree path", placeHolder: "../feature-worktree" });
+            const worktreePath = await vscode.window.showInputBox({ title: `New Worktree from '${branch.name}'`, prompt: "Worktree path", placeHolder: "../feature-worktree", validateInput: (value) => validatePathInput(value) });
             if (!worktreePath?.trim()) return;
-            const newBranch = await vscode.window.showInputBox({ title: "Optional New Branch", prompt: "Leave empty to use the selected ref" });
+            const newBranch = await vscode.window.showInputBox({ title: "Optional New Branch", prompt: "Leave empty to use the selected ref", validateInput: (value) => validateGitRefName(value, true) });
             await this.manager.addWorktree(root, worktreePath.trim(), branch.name, newBranch?.trim() || undefined);
             return;
           }
           if (message.action === "renameBranch") {
             if (branch.kind !== "local") return;
-            const name = await vscode.window.showInputBox({ title: `Rename '${branch.name}'`, value: branch.name });
+            const name = await vscode.window.showInputBox({ title: `Rename '${branch.name}'`, value: branch.name, validateInput: (value) => validateGitRefName(value) });
             if (name?.trim() && name.trim() !== branch.name) await this.manager.renameBranch(root, branch.name, name.trim());
             return;
           }
@@ -409,7 +468,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           return;
         }
         if (message.action === "createTag") {
-          const name = await vscode.window.showInputBox({ title: `New Tag at ${commit.hash.slice(0, 8)}`, prompt: "Tag name" });
+          const name = await vscode.window.showInputBox({ title: `New Tag at ${commit.hash.slice(0, 8)}`, prompt: "Tag name", validateInput: (value) => validateGitRefName(value) });
           if (name?.trim()) await this.manager.createTag(root, name.trim(), commit.hash);
           return;
         }
@@ -419,11 +478,21 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const change = changes.find((item) => item.path === message.path);
         if (!change) return;
         if (message.checked) selected.add(change.path); else selected.delete(change.path);
+        this.persistSelections();
         return void this.update();
       }
       if (message.type === "toggleAll") {
-        selected.clear();
-        if (message.checked) for (const change of changes) selected.add(change.path);
+        const targetChanges = message.listId
+          ? changes.filter((change) => this.changelists.listForFile(root, change.path).id === message.listId)
+          : changes;
+        for (const change of targetChanges) {
+          if (message.checked) selected.add(change.path); else selected.delete(change.path);
+        }
+        this.persistSelections();
+        return void this.update();
+      }
+      if (message.type === "loadMore") {
+        this.logLimit = Math.min(5_000, this.logLimit + 300);
         return void this.update();
       }
       if (message.type === "openDiff") {
@@ -437,6 +506,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (message.ref && !snapshot.branches.some((branch) => branch.name === message.ref)) return;
         this.selectedRef = message.ref;
         this.selectedHash = undefined;
+        this.logLimit = 300;
         return void this.update();
       }
       if (message.type === "setPathFilter") {
@@ -444,11 +514,13 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (filePath && (filePath.length > 4096 || /[\r\n\0]/.test(filePath))) return;
         this.filePath = filePath || undefined;
         this.selectedHash = undefined;
+        this.logLimit = 300;
         return void this.update();
       }
       if (message.type === "setLogOptions") {
         this.logOptions = normalizeLogOptions(message.options);
         this.selectedHash = undefined;
+        this.logLimit = 300;
         return void this.update();
       }
       if (message.type === "selectCommit") {
@@ -498,7 +570,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           noVerify: message.noVerify,
         });
         await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
-        if (message.push) await this.manager.push(root);
+        if (message.push) {
+          await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: "Pushing Git commits", cancellable: true },
+            async (_progress, token) => {
+              const controller = new AbortController();
+              const registration = token.onCancellationRequested(() => controller.abort());
+              try { await this.manager.push(root, false, controller.signal); } finally { registration.dispose(); }
+            },
+          );
+        }
         await this.view?.webview.postMessage({ type: "committed" });
         return;
       }
@@ -533,10 +614,13 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const change = changes.find((item) => item.path === message.path);
         if (!change) return;
         const action = change.kind === "untracked" ? "Delete" : "Rollback";
-        const confirmed = await vscode.window.showWarningMessage(
-          `${action} all local changes in ${change.path}?`, { modal: true }, action,
-        );
-        if (confirmed !== action) return;
+        const shouldConfirm = vscode.workspace.getConfiguration("jbGit").get<boolean>("confirmDiscard", true);
+        if (shouldConfirm) {
+          const confirmed = await vscode.window.showWarningMessage(
+            `${action} all local changes in ${change.path}?`, { modal: true }, action,
+          );
+          if (confirmed !== action) return;
+        }
         if (change.kind === "untracked") await this.manager.cleanUntracked(root, [change.path]);
         else await this.manager.discard(root, [change.path]);
         return;
@@ -572,7 +656,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
       if (message.type === "newBranch") {
-        const name = await vscode.window.showInputBox({ title: "New Branch", prompt: `Create from ${message.hash.slice(0, 12)}` });
+        const name = await vscode.window.showInputBox({ title: "New Branch", prompt: `Create from ${message.hash.slice(0, 12)}`, validateInput: (value) => validateGitRefName(value) });
         if (name?.trim()) await this.manager.createBranch(root, name.trim(), message.hash);
         return;
       }
@@ -610,6 +694,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   }
 
   public dispose(): void {
+    if (this.updateTimer) clearTimeout(this.updateTimer);
     for (const disposable of this.disposables.splice(0)) disposable.dispose();
   }
 
@@ -650,6 +735,19 @@ function normalizeLogOptions(options?: Partial<GitLogOptions>): GitLogOptions {
   };
 }
 
+function isToolTab(value: unknown): value is ToolTab {
+  return value === "log" || value === "console" || value === "changes" || value === "shelf";
+}
+
+function sameSet<T>(left: ReadonlySet<T>, right: ReadonlySet<T>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function isBackgroundTrace(event: GitTraceEvent): boolean {
+  const command = event.args.find((argument) => !argument.startsWith("-")) ?? "";
+  return new Set(["status", "for-each-ref", "rev-parse", "symbolic-ref", "log", "diff-tree"]).has(command);
+}
+
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -668,7 +766,7 @@ const logStyles = String.raw`
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   html, body, #app { width: 100%; height: 100%; margin: 0; padding: 0; }
-  body { overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-panel-background, var(--vscode-editor-background)); font: 12px var(--vscode-font-family); }
+  body { overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-panel-background, var(--vscode-editor-background)); font: var(--vscode-font-size, 13px) var(--vscode-font-family); }
   button, select, input, textarea { color: inherit; font: inherit; }
   button { border: 0; background: transparent; cursor: pointer; }
   button:focus-visible, select:focus-visible, input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
@@ -700,7 +798,7 @@ const logStyles = String.raw`
   .branch-name { overflow: hidden; text-overflow: ellipsis; }
   .commit-pane { overflow: hidden; display: grid; grid-template-rows: 35px minmax(0, 1fr); }
   .commit-filters { min-width: 0; display: flex; align-items: center; gap: 2px; padding: 4px 5px; overflow: visible; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
-  .commit-search { width: 190px; min-width: 88px; max-width: 210px; flex: 0 1 190px; height: 27px; padding: 3px 7px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .commit-search { width: 150px; min-width: 82px; max-width: 180px; flex: 0 1 150px; height: 27px; padding: 3px 7px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
   .filter-button { height: 27px; flex: none; padding: 0 7px; border-radius: 3px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
   .filter-button:hover, .filter-button.active { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
   .sort-button { min-width: 31px; padding: 0 6px; font-size: 15px; }
@@ -713,6 +811,8 @@ const logStyles = String.raw`
   .table-head { position: sticky; top: 0; z-index: 3; height: 27px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); color: var(--vscode-descriptionForeground); font-size: 11px; }
   .table-head > span { padding: 0 7px; border-right: 1px solid var(--vscode-panel-border); }
   .commit-list { min-height: 0; overflow: visible; }
+  .load-more { display: block; min-height: 30px; margin: 8px auto 14px; padding: 4px 12px; border-radius: 3px; color: var(--vscode-textLink-foreground); background: var(--vscode-button-secondaryBackground); }
+  .load-more:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .commit-row { min-height: 27px; cursor: pointer; }
   .commit-row:hover { background: var(--vscode-list-hoverBackground); }
   .commit-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
@@ -757,27 +857,40 @@ const logStyles = String.raw`
   .empty { padding: 28px 14px; text-align: center; color: var(--vscode-descriptionForeground); }
   .error { margin: 10px; padding: 8px; color: var(--vscode-errorForeground); border: 1px solid var(--vscode-inputValidation-errorBorder); background: var(--vscode-inputValidation-errorBackground); }
   .console-toolbar { display: flex; align-items: center; gap: 5px; padding: 5px 8px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
+  .console-toolbar select { height: 26px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); }
   .console { min-height: 0; overflow: auto; padding: 7px 10px 28px; background: var(--vscode-terminal-background, var(--vscode-editor-background)); color: var(--vscode-terminal-foreground, var(--vscode-foreground)); font: 12px/1.45 var(--vscode-editor-font-family); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .trace { margin-bottom: 9px; }
+  .trace { margin-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border) 55%, transparent); }
+  .trace summary { min-height: 28px; display: flex; align-items: center; gap: 7px; cursor: pointer; list-style: none; }
+  .trace summary::-webkit-details-marker { display: none; }
+  .trace summary::before { content: '›'; width: 10px; color: var(--vscode-descriptionForeground); }
+  .trace[open] summary::before { content: '⌄'; }
+  .trace-output { padding: 0 0 8px 17px; }
+  .trace-status-ok { color: var(--vscode-testing-iconPassed); }
+  .trace-status-error { color: var(--vscode-testing-iconFailed); }
+  .trace-background { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 10px; }
   .trace-command { color: var(--vscode-terminal-ansiCyan); }
   .trace-cwd, .trace-time { color: var(--vscode-descriptionForeground); }
   .trace-error { color: var(--vscode-terminal-ansiRed); }
   .count { display: inline-grid; place-items: center; min-width: 16px; height: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; }
   .changes-toolbar { display: flex; align-items: center; gap: 5px; padding: 5px 7px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
   .changes-toolbar select { max-width: 240px; height: 26px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; padding: 2px 5px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
-  .changes-workspace { min-height: 0; display: grid; grid-template-columns: minmax(360px, 1fr) 340px; overflow: hidden; }
-  .changes-list { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid var(--vscode-panel-border); }
+  .changes-workspace { --commit-width: 340px; min-height: 0; display: grid; grid-template-columns: minmax(220px, 1fr) 9px var(--commit-width); overflow: hidden; }
+  .changes-list { min-width: 0; min-height: 0; overflow: auto; }
+  .changes-splitter { position: relative; min-width: 9px; cursor: col-resize; outline: none; touch-action: none; }
+  .changes-splitter::before { content: ''; position: absolute; inset: 0 auto 0 4px; width: 1px; background: var(--vscode-panel-border); }
+  .changes-splitter:hover::before, .changes-splitter:focus-visible::before, .changes-splitter.dragging::before { left: 3px; width: 2px; background: var(--vscode-focusBorder); }
   .operation { margin: 6px; padding: 7px 8px; border-radius: 3px; background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); }
   .operation-actions { margin-top: 6px; display: flex; gap: 5px; }
   .small-button { min-height: 24px; padding: 3px 7px; border-radius: 2px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .change-group { margin-top: 2px; }
   .group-header { height: 27px; display: flex; align-items: center; gap: 5px; padding: 0 8px; font-weight: 600; user-select: none; }
   .group-header:hover { background: var(--vscode-list-hoverBackground); }
+  .group-header:focus-visible, .change-row:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .twisty { width: 12px; color: var(--vscode-descriptionForeground); }
   .active-dot { color: var(--vscode-charts-blue); }
   .select-all { margin-left: auto; color: var(--vscode-descriptionForeground); }
   .change-row { height: 26px; display: grid; grid-template-columns: 24px 20px minmax(0, 1fr) auto; align-items: center; padding: 0 6px 0 20px; }
-  .change-row:hover { background: var(--vscode-list-hoverBackground); }
+  .change-row:hover, .change-row:focus-within { background: var(--vscode-list-hoverBackground); }
   .change-row input { margin: 0; }
   .change-status { width: 18px; font-weight: 700; text-align: center; }
   .status-M { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
@@ -790,7 +903,7 @@ const logStyles = String.raw`
   .directory, .stage-mark { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; }
   .stage-mark { margin-left: auto; }
   .row-actions { display: none; align-items: center; }
-  .change-row:hover .row-actions { display: flex; }
+  .change-row:hover .row-actions, .change-row:focus-within .row-actions { display: flex; }
   .row-action { width: 24px; height: 24px; border-radius: 2px; }
   .row-action:hover { background: var(--vscode-toolbar-hoverBackground); }
   .commit-form { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(60px, 1fr) auto auto; gap: 0; background: var(--vscode-panel-background, var(--vscode-editor-background)); }
@@ -799,9 +912,10 @@ const logStyles = String.raw`
   .commit-message::placeholder { color: var(--vscode-input-placeholderForeground); }
   .commit-options { min-height: 30px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 8px; color: var(--vscode-descriptionForeground); }
   .commit-options label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
-  .commit-actions { display: grid; grid-template-columns: minmax(0, 1fr) 40px; gap: 4px; padding: 0 7px 7px; }
+  .commit-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, auto); gap: 4px; padding: 0 7px 7px; }
   .primary { min-height: 29px; padding: 4px 10px; border-radius: 2px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .primary:hover { background: var(--vscode-button-hoverBackground); }
+  .primary:disabled, .secondary:disabled, .action:disabled { opacity: .45; cursor: default; }
   .secondary { min-height: 29px; padding: 4px 8px; border-radius: 2px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .shelf-pane { min-height: 0; overflow: auto; padding: 3px 0 16px; }
@@ -817,8 +931,14 @@ const logStyles = String.raw`
     .detail-meta { grid-template-columns: 44px 1fr; font-size: 11px; }
   }
   @media (max-width: 760px) { .filter-button .filter-value { display: none; } }
-  @media (max-width: 650px) { .workspace { grid-template-columns: var(--branch-width) 9px minmax(260px, 1fr); } .details, .column-splitter[data-side="details"] { display: none; } }
-  @media (max-width: 760px) { .changes-workspace { grid-template-columns: minmax(310px, 1fr) 280px; } .commit-options { gap: 5px; font-size: 11px; } }
+  @media (max-width: 650px) { .workspace { overflow-x: auto; } }
+  @media (max-width: 760px) { .commit-options { gap: 5px; font-size: 11px; } }
+  @media (max-width: 520px) {
+    .changes-workspace { --commit-height: 220px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(150px, 1fr) 9px var(--commit-height); }
+    .changes-splitter { min-height: 9px; cursor: row-resize; }
+    .changes-splitter::before { inset: 4px 0 auto; width: auto; height: 1px; }
+    .changes-splitter:hover::before, .changes-splitter:focus-visible::before, .changes-splitter.dragging::before { top: 3px; left: 0; width: auto; height: 2px; }
+  }
 `;
 
 const logScript = String.raw`
@@ -841,32 +961,95 @@ const logScript = String.raw`
   let pendingCommitHash;
   let selectedFilePath;
   let openMenu;
+  let menuInvoker;
+  let deferredState;
+  let consoleFilter = uiState.consoleFilter || 'operations';
+  let consolePaused = Boolean(uiState.consolePaused);
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
+  const zh = document.documentElement.lang.toLowerCase().startsWith('zh') ? {
+    'Log': '日志', 'Git Log': 'Git 日志', 'Console': '控制台', 'Git Console': 'Git 控制台',
+    'Local Changes': '本地更改', 'Shelf': '搁置', 'Shelved Changes': '已搁置的更改',
+    'User operations': '用户操作', 'Errors only': '仅错误', 'All commands': '全部命令',
+    'Pause scroll': '暂停滚动', 'Resume scroll': '继续滚动', 'Clear': '清空',
+    'Branches': '分支', 'All': '全部', 'Local': '本地', 'Remote': '远程', 'Tags': '标签',
+    'Refresh': '刷新', 'More…': '更多…', 'New Changelist': '新建更改列表', 'Shelve': '搁置',
+    'No local changes': '没有本地更改', 'No changes to commit': '没有可提交的更改',
+    'Commit Changes': '提交更改', 'Commit Message': '提交消息', 'Amend': '修正提交',
+    'Sign-off': '添加签署', 'Skip hooks': '跳过钩子', 'Commit': '提交', 'Commit & Push': '提交并推送',
+    'No shelved changes': '没有已搁置的更改', 'Unshelve': '取消搁置',
+    'Branch': '分支', 'User': '用户', 'Date': '日期', 'Paths': '路径',
+    'All Branches': '所有分支', 'All Users': '所有用户', 'All Dates': '所有日期',
+    'Today': '今天', 'Last 7 Days': '最近 7 天', 'Last 30 Days': '最近 30 天', 'Last Year': '最近一年',
+    'Sort': '排序', 'By Commit Date': '按提交日期', 'Topologically': '按拓扑', 'Options': '选项',
+    'First Parent': '仅第一父提交', 'No Merges': '隐藏合并提交', 'Branch Actions': '分支操作',
+    'Collapse Linear Branches': '折叠线性分支', 'Expand Linear Branches': '展开线性分支',
+    'Author': '作者', 'Commit': '提交', 'Parents': '父提交',
+    'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
+    'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
+    'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
+    'No matching commits': '没有匹配的提交', 'Loading commit details…': '正在加载提交详情…',
+    'Select a commit to view details': '选择一个提交以查看详情',
+    'No commit matches the current filters': '没有提交符合当前筛选条件',
+    'Open a folder containing a Git repository.': '请打开包含 Git 仓库的文件夹。',
+  } : {};
+  const t = value => typeof value === 'string' ? (zh[value] || value) : value;
   const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
-  const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; };
-  const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = title; b.addEventListener('click', handler); return b; };
+  const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = t(text); return n; };
+  const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = t(title); b.addEventListener('click', handler); return b; };
   const saveUiState = extra => { uiState = { ...uiState, ...extra }; vscode.setState(uiState); };
-  const selectToolTab = tab => { closeContextMenu(); activeToolTab = tab; saveUiState({ activeToolTab: tab }); render(); };
+  const selectToolTab = tab => {
+    closeContextMenu(); activeToolTab = tab; saveUiState({ activeToolTab: tab });
+    post('setActiveTab', { tab }); render();
+  };
   const keyboardActivate = (element, handler) => element.addEventListener('keydown', event => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault(); handler();
   });
 
   function captureScroll() {
-    const result = {};
+    const result = { positions: {}, focus: captureFocus() };
     for (const id of ['branch-pane', 'commit-scroll', 'changed-files', 'commit-details']) {
       const element = document.getElementById(id);
-      if (element) result[id] = { top: element.scrollTop, left: element.scrollLeft };
+      if (element) result.positions[id] = { top: element.scrollTop, left: element.scrollLeft };
     }
     return result;
   }
 
+  function captureFocus() {
+    const element = document.activeElement;
+    if (!element || element === document.body || !app.contains(element)) return undefined;
+    const descriptor = {
+      id: element.id || '',
+      hash: element.dataset?.hash || '',
+      filePath: element.dataset?.filePath || '',
+      branchKey: element.dataset?.branchKey || '',
+    };
+    if (typeof element.selectionStart === 'number') {
+      descriptor.selectionStart = element.selectionStart; descriptor.selectionEnd = element.selectionEnd;
+    }
+    return descriptor;
+  }
+
+  function restoreFocus(descriptor) {
+    if (!descriptor) return;
+    let element = descriptor.id ? document.getElementById(descriptor.id) : undefined;
+    if (!element && descriptor.hash) element = document.querySelector('[data-hash="' + CSS.escape(descriptor.hash) + '"]');
+    if (!element && descriptor.filePath) element = document.querySelector('[data-file-path="' + CSS.escape(descriptor.filePath) + '"]');
+    if (!element && descriptor.branchKey) element = document.querySelector('[data-branch-key="' + CSS.escape(descriptor.branchKey) + '"]');
+    if (!element) return;
+    element.focus({ preventScroll: true });
+    if (typeof descriptor.selectionStart === 'number' && typeof element.setSelectionRange === 'function') {
+      element.setSelectionRange(descriptor.selectionStart, descriptor.selectionEnd);
+    }
+  }
+
   function restoreScroll(saved) {
     requestAnimationFrame(() => {
-      for (const [id, position] of Object.entries(saved || {})) {
+      for (const [id, position] of Object.entries(saved?.positions || {})) {
         const element = document.getElementById(id);
         if (element) { element.scrollTop = position.top; element.scrollLeft = position.left; }
       }
+      restoreFocus(saved?.focus);
     });
   }
 
@@ -875,21 +1058,25 @@ const logScript = String.raw`
     if (graphs) requestAnimationFrame(drawGraphs);
   }
 
-  function closeContextMenu() {
-    openMenu?.remove(); openMenu = undefined;
+  function closeContextMenu(restoreInvoker = false) {
+    const invoker = menuInvoker;
+    openMenu?.remove(); openMenu = undefined; menuInvoker = undefined;
+    if (restoreInvoker && invoker?.isConnected) invoker.focus({ preventScroll: true });
+    requestAnimationFrame(flushDeferredState);
   }
 
   function showContextMenu(event, items) {
-    event.preventDefault(); event.stopPropagation(); showContextMenuAt(event.clientX, event.clientY, items);
+    event.preventDefault(); event.stopPropagation(); showContextMenuAt(event.clientX, event.clientY, items, event.currentTarget);
   }
 
-  function showContextMenuAt(clientX, clientY, items) {
+  function showContextMenuAt(clientX, clientY, items, invoker) {
     closeContextMenu();
+    menuInvoker = invoker;
     const menu = node('div', 'context-menu'); menu.setAttribute('role', 'menu');
     for (const item of items) {
       if (item.heading) { menu.append(node('div', 'context-menu-heading', item.heading)); continue; }
       if (item.separator) { menu.append(node('div', 'context-menu-separator')); continue; }
-      const entry = button('', item.label, () => { closeContextMenu(); item.run(); }, 'context-menu-item');
+      const entry = button('', item.label, () => { closeContextMenu(true); item.run(); }, 'context-menu-item');
       entry.disabled = Boolean(item.disabled); entry.setAttribute('role', 'menuitem');
       entry.append(node('span', 'context-menu-icon', item.icon || ''), node('span', '', item.label)); menu.append(entry);
     }
@@ -897,12 +1084,24 @@ const logScript = String.raw`
     const bounds = menu.getBoundingClientRect();
     menu.style.left = Math.max(6, Math.min(clientX, window.innerWidth - bounds.width - 6)) + 'px';
     menu.style.top = Math.max(6, Math.min(clientY, window.innerHeight - bounds.height - 6)) + 'px';
+    menu.addEventListener('keydown', event => {
+      const entries = [...menu.querySelectorAll('.context-menu-item:not(:disabled)')];
+      const current = entries.indexOf(document.activeElement);
+      let next = current;
+      if (event.key === 'ArrowDown') next = (current + 1) % entries.length;
+      else if (event.key === 'ArrowUp') next = (current + entries.length - 1) % entries.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = entries.length - 1;
+      else if (event.key === 'Escape') { event.preventDefault(); closeContextMenu(true); return; }
+      else return;
+      event.preventDefault(); entries[next]?.focus();
+    });
     menu.querySelector('.context-menu-item:not(:disabled)')?.focus();
   }
 
   function showMenuForElement(element, items) {
     const bounds = element.getBoundingClientRect();
-    showContextMenuAt(bounds.left, bounds.bottom + 2, items);
+    showContextMenuAt(bounds.left, bounds.bottom + 2, items, element);
   }
 
   function attachContextMenu(element, items) {
@@ -912,25 +1111,79 @@ const logScript = String.raw`
       if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
       event.preventDefault(); event.stopPropagation();
       const bounds = element.getBoundingClientRect();
-      showContextMenuAt(bounds.left + Math.min(28, bounds.width / 2), bounds.top + Math.min(22, bounds.height), entries());
+      showContextMenuAt(bounds.left + Math.min(28, bounds.width / 2), bounds.top + Math.min(22, bounds.height), entries(), element);
     });
+  }
+
+  function blocksStateRender() {
+    const active = document.activeElement;
+    return Boolean(openMenu || document.querySelector('.dragging, .splitter.active') ||
+      (active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)));
+  }
+
+  function applyIncomingState(next) {
+    const previousRoot = state.selectedRoot;
+    state = { ...state, ...next }; pendingCommitHash = undefined;
+    if (previousRoot && state.selectedRoot && previousRoot !== state.selectedRoot) {
+      search = ''; authorFilter = ''; dateFilter = 'all'; selectedFilePath = undefined;
+      state.commits = []; state.selection = null;
+      collapsedGraphSeries.clear(); selectedGraphSeries = ''; hoveredGraphSeries = '';
+      saveUiState({ search, authorFilter, dateFilter, collapsedGraphSeries: [], selectedGraphSeries: '' });
+    }
+    if (state.logOptions) {
+      sortMode = state.logOptions.order === 'topological' ? 'topological' : 'date';
+      firstParent = Boolean(state.logOptions.firstParent); noMerges = Boolean(state.logOptions.noMerges);
+      saveUiState({ sortMode, firstParent, noMerges });
+    }
+    const liveBranchKeys = new Set((state.branches || []).map(branchKey));
+    selectedBranchKeys = new Set([...selectedBranchKeys].filter(key => liveBranchKeys.has(key)));
+    if (!selectedBranchKeys.size && state.selectedRef) {
+      const selectedRefBranch = (state.branches || []).find(branch => branch.name === state.selectedRef);
+      if (selectedRefBranch) selectedBranchKeys.add(branchKey(selectedRefBranch));
+    }
+    saveUiState({ selectedBranchKeys: [...selectedBranchKeys] });
+    if (state.selection && !(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
+    render();
+  }
+
+  function flushDeferredState() {
+    if (!deferredState || blocksStateRender()) return;
+    const next = deferredState; deferredState = undefined; applyIncomingState(next);
   }
 
   function render() {
     const saved = captureScroll();
     app.replaceChildren(); const root = node('div', 'root');
-    const tabs = node('div', 'tool-tabs');
+    const tabs = node('div', 'tool-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Git tool window');
     const logTab = button('Log', 'Git Log', () => selectToolTab('log'), 'tool-tab' + (activeToolTab === 'log' ? ' active' : ''));
     const consoleTab = button('Console', 'Git Console', () => selectToolTab('console'), 'tool-tab' + (activeToolTab === 'console' ? ' active' : ''));
     const changesTab = button('Local Changes', 'Local Changes', () => selectToolTab('changes'), 'tool-tab' + (activeToolTab === 'changes' ? ' active' : ''));
     changesTab.append(node('span', 'count', String(state.totalChanges || 0)));
     const shelfTab = button('Shelf', 'Shelved Changes', () => selectToolTab('shelf'), 'tool-tab' + (activeToolTab === 'shelf' ? ' active' : ''));
     shelfTab.append(node('span', 'count', String((state.shelves || []).length)));
+    for (const [tab, active] of [[logTab, activeToolTab === 'log'], [consoleTab, activeToolTab === 'console'], [changesTab, activeToolTab === 'changes'], [shelfTab, activeToolTab === 'shelf']]) {
+      tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+    }
     tabs.append(logTab, consoleTab, changesTab, shelfTab);
+    tabs.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
+      const items = [logTab, consoleTab, changesTab, shelfTab]; let index = items.indexOf(document.activeElement);
+      if (event.key === 'Home') index = 0; else if (event.key === 'End') index = items.length - 1;
+      else index = (index + (event.key === 'ArrowRight' ? 1 : items.length - 1)) % items.length;
+      event.preventDefault(); items[index].click(); items[index].focus();
+    });
     root.append(tabs);
     if (activeToolTab === 'console') {
       const consoleBar = node('div', 'console-toolbar');
-      consoleBar.append(node('span', '', 'Git Console'), node('span', 'spacer'), button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
+      const filter = node('select'); filter.setAttribute('aria-label', 'Console filter');
+      for (const [value, label] of [['operations', 'User operations'], ['errors', 'Errors only'], ['all', 'All commands']]) {
+        const option = node('option', '', label); option.value = value; option.selected = value === consoleFilter; filter.append(option);
+      }
+      filter.addEventListener('change', () => { consoleFilter = filter.value; saveUiState({ consoleFilter }); render(); });
+      const pause = button(consolePaused ? 'Resume scroll' : 'Pause scroll', consolePaused ? 'Resume automatic scrolling' : 'Pause automatic scrolling', () => {
+        consolePaused = !consolePaused; saveUiState({ consolePaused }); render();
+      }, 'action');
+      consoleBar.append(node('span', '', 'Git Console'), filter, node('span', 'spacer'), pause, button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
       root.append(consoleBar, consolePanel()); finishRender(root, saved); return;
     }
     if (activeToolTab === 'changes') {
@@ -961,8 +1214,8 @@ const logScript = String.raw`
     const bar = node('div', 'changes-toolbar');
     bar.append(
       repositorySelect(),
-      button('⑂ ' + (state.branch || 'detached HEAD'), 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
-      button('↻', 'Refresh', () => post('refresh')),
+      button(state.branch || 'detached HEAD', 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
+      button('Refresh', 'Refresh', () => post('refresh'), 'icon-button'),
     );
     if (activeToolTab === 'changes') {
       bar.append(
@@ -976,8 +1229,43 @@ const logScript = String.raw`
 
   function changesWorkspace() {
     const workspace = node('div', 'changes-workspace');
-    workspace.append(changesPane(), commitForm());
+    const splitter = node('div', 'changes-splitter'); splitter.tabIndex = 0; splitter.setAttribute('role', 'separator'); splitter.setAttribute('aria-label', 'Resize commit editor');
+    workspace.append(changesPane(), splitter, commitForm());
+    requestAnimationFrame(() => setupChangesSplitter(workspace, splitter));
     return workspace;
+  }
+
+  function setupChangesSplitter(workspace, splitter) {
+    const compact = () => window.matchMedia('(max-width: 520px)').matches;
+    const applySize = requested => {
+      if (compact()) {
+        const maximum = Math.max(130, workspace.clientHeight - 150 - 9);
+        const size = Math.max(130, Math.min(requested, maximum)); workspace.style.setProperty('--commit-height', size + 'px');
+        splitter.setAttribute('aria-orientation', 'horizontal'); splitter.setAttribute('aria-valuenow', String(Math.round(size)));
+      } else {
+        const maximum = Math.max(220, workspace.clientWidth - 220 - 9);
+        const size = Math.max(220, Math.min(requested, maximum)); workspace.style.setProperty('--commit-width', size + 'px');
+        splitter.setAttribute('aria-orientation', 'vertical'); splitter.setAttribute('aria-valuenow', String(Math.round(size)));
+      }
+    };
+    applySize(compact() ? Number(uiState.commitPaneHeight) || 220 : Number(uiState.commitPaneWidth) || 340);
+    splitter.addEventListener('mousedown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault(); splitter.focus(); splitter.classList.add('dragging');
+      const resize = move => { const bounds = workspace.getBoundingClientRect(); applySize(compact() ? bounds.bottom - move.clientY : bounds.right - move.clientX); };
+      resize(event);
+      const finish = () => {
+        window.removeEventListener('mousemove', resize); window.removeEventListener('mouseup', finish); splitter.classList.remove('dragging');
+        const value = Number(splitter.getAttribute('aria-valuenow'));
+        saveUiState(compact() ? { commitPaneHeight: value } : { commitPaneWidth: value });
+      };
+      window.addEventListener('mousemove', resize); window.addEventListener('mouseup', finish);
+    });
+    splitter.addEventListener('keydown', event => {
+      const valid = compact() ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight']; if (!valid.includes(event.key)) return;
+      event.preventDefault(); const current = Number(splitter.getAttribute('aria-valuenow')) || (compact() ? 220 : 340);
+      const grow = event.key === 'ArrowUp' || event.key === 'ArrowLeft'; applySize(current + (grow ? 16 : -16));
+    });
   }
 
   function changesPane() {
@@ -994,25 +1282,34 @@ const logScript = String.raw`
     if (!state.totalChanges) { pane.append(node('div', 'empty', 'No local changes')); return pane; }
     for (const list of state.lists || []) {
       const group = node('section', 'change-group');
-      const header = node('div', 'group-header');
+      const collapsedByRoot = { ...(uiState.collapsedChangelists || {}) };
+      const collapsedLists = new Set(collapsedByRoot[state.selectedRoot || ''] || []); const collapsed = collapsedLists.has(list.id);
+      const header = node('div', 'group-header'); header.tabIndex = 0; header.setAttribute('role', 'treeitem'); header.setAttribute('aria-expanded', String(!collapsed));
       header.append(
-        node('span', 'twisty', '⌄'),
-        node('span', list.active ? 'active-dot' : '', list.active ? '●' : '○'),
+        node('span', 'twisty', collapsed ? '›' : '⌄'),
+        button(list.active ? '●' : '○', list.active ? 'Active Changelist' : 'Make active Changelist', event => { event.stopPropagation(); post('setActiveChangelist', { id: list.id }); }, list.active ? 'active-dot row-action' : 'row-action'),
         node('span', '', list.name),
         node('span', 'count', String(list.changes.length)),
       );
-      header.title = list.active ? 'Active Changelist' : 'Make active Changelist';
-      header.addEventListener('click', () => post('setActiveChangelist', { id: list.id }));
-      header.append(button('✓ All', 'Select all changes', event => { event.stopPropagation(); post('toggleAll', { checked: true }); }, 'select-all'));
+      const allSelected = list.changes.length > 0 && list.changes.every(change => change.checked);
+      header.append(button(allSelected ? 'Clear' : 'Select All', allSelected ? 'Exclude this Changelist from commit' : 'Include this Changelist in commit', event => {
+        event.stopPropagation(); post('toggleAll', { checked: !allSelected, listId: list.id });
+      }, 'select-all'));
+      const toggle = () => {
+        if (collapsedLists.has(list.id)) collapsedLists.delete(list.id); else collapsedLists.add(list.id);
+        collapsedByRoot[state.selectedRoot || ''] = [...collapsedLists]; saveUiState({ collapsedChangelists: collapsedByRoot }); render();
+      };
+      header.addEventListener('click', toggle);
+      header.addEventListener('keydown', event => { if (event.target === header && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); toggle(); } });
       group.append(header);
-      for (const change of list.changes) group.append(changeRow(change));
+      if (!collapsed) for (const change of list.changes) group.append(changeRow(change));
       pane.append(group);
     }
     return pane;
   }
 
   function changeRow(change) {
-    const row = node('div', 'change-row'); row.title = change.path;
+    const row = node('div', 'change-row'); row.title = change.path; row.tabIndex = 0; row.setAttribute('role', 'treeitem');
     const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = change.checked; checkbox.title = 'Include in commit';
     checkbox.addEventListener('change', () => post('togglePath', { path: change.path, checked: checkbox.checked }));
     const statusClass = change.status === '?' ? 'status-q' : change.status === '!' ? 'status-bang' : 'status-' + change.status;
@@ -1029,28 +1326,43 @@ const logScript = String.raw`
       button('↶', 'Rollback', () => post('discard', { path: change.path }), 'row-action'),
     );
     row.append(checkbox, node('span', 'change-status ' + statusClass, change.status), file, actions);
+    row.addEventListener('keydown', event => { if (event.target === row && event.key === 'Enter') { event.preventDefault(); post('openDiff', { path: change.path }); } });
+    attachContextMenu(row, [
+      { icon: '↔', label: change.conflicted ? 'Open Merge Conflict Editor' : 'Show Diff', run: () => post('openDiff', { path: change.path }) },
+      { icon: change.staged && !change.unstaged ? '−' : '+', label: change.staged && !change.unstaged ? 'Unstage' : 'Stage', run: () => post(change.staged && !change.unstaged ? 'unstage' : 'stage', { path: change.path }) },
+      { icon: '⇥', label: 'Move to Changelist…', run: () => post('moveToChangelist', { path: change.path }) },
+      { separator: true },
+      { icon: '↶', label: change.kind === 'untracked' ? 'Delete…' : 'Rollback…', run: () => post('discard', { path: change.path }) },
+    ]);
     return row;
   }
 
   function commitForm() {
     const form = node('div', 'commit-form');
     form.append(node('div', 'commit-form-title', 'Commit Changes'));
-    const message = node('textarea', 'commit-message'); message.placeholder = 'Commit Message'; message.value = uiState.commitMessage || '';
-    message.addEventListener('input', () => saveUiState({ commitMessage: message.value }));
+    const drafts = { ...(uiState.commitMessages || {}) }; const root = state.selectedRoot || '';
+    const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = state.totalChanges ? 'Commit Message' : 'No changes to commit'; message.value = drafts[root] || ''; message.disabled = !state.totalChanges;
     const options = node('div', 'commit-options');
-    const amend = checkboxOption('Amend', 'amend');
-    const signoff = checkboxOption('Sign-off', 'signoff');
-    const noVerify = checkboxOption('Skip hooks', 'noVerify');
+    const amend = checkboxOption('Amend', 'amend', root);
+    const signoff = checkboxOption('Sign-off', 'signoff', root);
+    const noVerify = checkboxOption('Skip hooks', 'noVerify', root);
     options.append(amend.label, signoff.label, noVerify.label, node('span', 'spacer'), node('span', '', (state.selectedCount || 0) + ' selected'));
     const submit = push => post('commit', { message: message.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push });
     const actions = node('div', 'commit-actions');
-    actions.append(button('Commit', 'Commit selected changes', () => submit(false), 'primary'), button('↑', 'Commit and Push', () => submit(true), 'secondary'));
+    const commit = button('Commit', 'Commit selected changes', () => submit(false), 'primary');
+    const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'secondary');
+    const updateEnabled = () => {
+      const disabled = !state.totalChanges || !state.selectedCount || !message.value.trim(); commit.disabled = disabled; commitPush.disabled = disabled;
+    };
+    message.addEventListener('input', () => { drafts[root] = message.value; saveUiState({ commitMessages: drafts, commitMessage: undefined }); updateEnabled(); });
+    updateEnabled(); actions.append(commit, commitPush);
     form.append(message, options, actions); return form;
   }
 
-  function checkboxOption(text, key) {
-    const label = node('label'); const input = node('input'); input.type = 'checkbox'; input.checked = Boolean(uiState[key]);
-    input.addEventListener('change', () => saveUiState({ [key]: input.checked }));
+  function checkboxOption(text, key, root) {
+    const options = { ...(uiState.commitOptions || {}) }; const repositoryOptions = { ...(options[root] || {}) };
+    const label = node('label'); const input = node('input'); input.type = 'checkbox'; input.checked = Boolean(repositoryOptions[key]);
+    input.addEventListener('change', () => { repositoryOptions[key] = input.checked; options[root] = repositoryOptions; saveUiState({ commitOptions: options }); });
     label.append(input, node('span', '', text)); return { label, input };
   }
 
@@ -1071,20 +1383,37 @@ const logScript = String.raw`
   }
 
   function consolePanel() {
-    const output = node('div', 'console');
-    const traces = state.traces || [];
-    if (!traces.length) { output.append(node('div', 'empty', 'Git command output will appear here.')); return output; }
-    for (const trace of traces) {
-      const block = node('div', 'trace');
-      block.append(node('div', 'trace-time', new Date(trace.startedAt).toLocaleTimeString() + ' · ' + trace.durationMs + ' ms · exit ' + (trace.exitCode ?? 'aborted')));
-      block.append(node('div', 'trace-cwd', trace.cwd));
-      block.append(node('div', 'trace-command', '$ git ' + trace.args.join(' ')));
-      if (trace.stdout) block.append(node('div', '', trace.stdout.trimEnd()));
-      if (trace.stderr) block.append(node('div', 'trace-error', trace.stderr.trimEnd()));
-      output.append(block);
-    }
-    requestAnimationFrame(() => { output.scrollTop = output.scrollHeight; });
+    const output = node('div', 'console'); output.id = 'console-output';
+    const traces = (state.traces || []).filter(consoleTraceVisible);
+    if (!traces.length) { output.append(node('div', 'empty', consoleFilter === 'operations' ? 'No user Git operations yet. Background refresh commands are hidden.' : 'No matching Git command output.')); return output; }
+    for (const trace of traces) output.append(consoleTraceNode(trace));
+    if (!consolePaused) requestAnimationFrame(() => { output.scrollTop = output.scrollHeight; });
     return output;
+  }
+
+  function consoleTraceVisible(trace) {
+    if (consoleFilter === 'all') return true;
+    if (consoleFilter === 'errors') return trace.exitCode !== 0;
+    return !trace.background || trace.exitCode !== 0;
+  }
+
+  function consoleTraceNode(trace) {
+    const block = node('details', 'trace'); if (trace.exitCode !== 0) block.open = true;
+    const summary = node('summary'); const status = node('span', trace.exitCode === 0 ? 'trace-status-ok' : 'trace-status-error', trace.exitCode === 0 ? '✓' : '!');
+    summary.append(status, node('span', 'trace-time', new Date(trace.startedAt).toLocaleTimeString() + ' · ' + trace.durationMs + ' ms'), node('span', 'trace-command', 'git ' + trace.args.join(' ')));
+    if (trace.background) summary.append(node('span', 'trace-background', 'background'));
+    const detail = node('div', 'trace-output'); detail.append(node('div', 'trace-cwd', trace.cwd));
+    if (trace.stdout) detail.append(node('div', '', trace.stdout.slice(0, 4_000).trimEnd()));
+    if (trace.stderr) detail.append(node('div', 'trace-error', trace.stderr.slice(0, 4_000).trimEnd()));
+    block.append(summary, detail); return block;
+  }
+
+  function appendConsoleTrace(trace) {
+    if (!consoleTraceVisible(trace)) return;
+    const output = document.getElementById('console-output'); if (!output) return;
+    const nearBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 36;
+    output.querySelector('.empty')?.remove(); output.append(consoleTraceNode(trace));
+    if (!consolePaused && nearBottom) output.scrollTop = output.scrollHeight;
   }
 
   function toolbar() {
@@ -1092,7 +1421,13 @@ const logScript = String.raw`
     const repositories = node('select'); repositories.title = 'Git root';
     for (const repo of state.repositories || []) { const option = node('option', '', repo.name); option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option); }
     repositories.addEventListener('change', () => post('selectRepository', { root: repositories.value }));
-    bar.append(repositories, button('↻', 'Refresh', () => post('refresh')), node('span', 'spacer'), node('span', 'branch-label', '⑂ ' + (state.branch || 'detached HEAD')));
+    bar.append(
+      repositories,
+      button('Refresh', 'Refresh repository', () => post('refresh'), 'icon-button'),
+      button(state.branch || 'detached HEAD', 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
+      node('span', 'spacer'),
+      button('More…', 'More Git actions', () => post('runCommand', { command: 'jbGit.operationsPopup' }), 'icon-button'),
+    );
     return bar;
   }
 
@@ -1152,7 +1487,7 @@ const logScript = String.raw`
   }
 
   function setColumnWidths(workspace, requestedLeft, requestedRight, persist) {
-    const compact = window.matchMedia('(max-width: 650px)').matches;
+    const compact = false;
     const total = workspace.clientWidth || window.innerWidth;
     const leftMinimum = 125; const rightMinimum = 190; const centerMinimum = 260; const gutters = compact ? 9 : 18;
     const maximumSides = Math.max(leftMinimum + rightMinimum, total - gutters - centerMinimum);
@@ -1220,7 +1555,7 @@ const logScript = String.raw`
   }
 
   function branchPane() {
-    const pane = node('aside', 'pane branches'); pane.id = 'branch-pane'; pane.append(node('div', 'pane-title', 'Branches'));
+    const pane = node('aside', 'pane branches'); pane.id = 'branch-pane'; pane.setAttribute('role', 'listbox'); pane.setAttribute('aria-label', 'Branches'); pane.setAttribute('aria-multiselectable', 'true'); pane.append(node('div', 'pane-title', 'Branches'));
     const all = button('All', 'Show all branches', () => { setBranchSelection([]); post('selectRef', {}); }, 'branch-row' + (!state.selectedRef && !selectedBranchKeys.size ? ' active' : ''));
     pane.append(all);
     for (const [kind, title] of [['local','Local'], ['remote','Remote'], ['tag','Tags']]) {
@@ -1241,7 +1576,22 @@ const logScript = String.raw`
       }
       pane.append(section);
     }
+    requestAnimationFrame(() => setupRovingRows(pane, '.branch-row'));
     return pane;
+  }
+
+  function setupRovingRows(container, selector) {
+    const rows = [...container.querySelectorAll(selector)]; if (!rows.length) return;
+    const initial = rows.find(row => row.classList.contains('active') || row.classList.contains('selected')) || rows[0];
+    rows.forEach(row => { row.tabIndex = row === initial ? 0 : -1; row.addEventListener('keydown', event => {
+      let index = rows.indexOf(row);
+      if (event.key === 'ArrowDown') index = Math.min(rows.length - 1, index + 1);
+      else if (event.key === 'ArrowUp') index = Math.max(0, index - 1);
+      else if (event.key === 'Home') index = 0;
+      else if (event.key === 'End') index = rows.length - 1;
+      else return;
+      event.preventDefault(); rows.forEach(item => { item.tabIndex = -1; }); rows[index].tabIndex = 0; rows[index].focus();
+    }); });
   }
 
   function commitPane() {
@@ -1249,7 +1599,7 @@ const logScript = String.raw`
     pane.append(commitFilterBar());
     const head = node('div', 'table-head'); head.append(node('span', '', 'Commit'), node('span', '', 'Author'), node('span', '', 'Date'), node('span', '', 'Hash'));
     const scroll = node('div', 'commit-scroll'); scroll.id = 'commit-scroll';
-    const list = node('div', 'commit-list'); list.id = 'commit-list'; scroll.append(head, list); pane.append(scroll); renderCommitRows(list); return pane;
+    const list = node('div', 'commit-list'); list.id = 'commit-list'; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Git commits'); scroll.append(head, list); pane.append(scroll); renderCommitRows(list); return pane;
   }
 
   function filterButton(label, value, title, active, items) {
@@ -1260,9 +1610,10 @@ const logScript = String.raw`
 
   function commitFilterBar() {
     const bar = node('div', 'commit-filters');
-    const input = node('input', 'commit-search'); input.type = 'search'; input.placeholder = 'Text or hash'; input.value = search;
-    input.setAttribute('aria-label', 'Filter commits by text or hash');
-    input.addEventListener('input', () => { search = input.value.toLowerCase(); saveUiState({ search }); renderCommitRows(); });
+    const input = node('input', 'commit-search'); input.id = 'commit-search'; input.type = 'search'; input.placeholder = 'Filter loaded commits'; input.value = search;
+    input.setAttribute('aria-label', 'Filter the loaded commits by text or hash');
+    input.title = 'Filters the ' + String(state.logLimit || (state.commits || []).length) + ' commits currently loaded';
+    input.addEventListener('input', () => { search = input.value.toLowerCase(); saveUiState({ search }); renderCommitRows(); refreshDetailsForFilter(); });
     const branch = filterButton('Branch', state.selectedRef ? shortRef(state.selectedRef) : '', 'Filter by branch', Boolean(state.selectedRef), branchFilterItems);
     const user = filterButton('User', authorFilter, 'Filter by author', Boolean(authorFilter), userFilterItems);
     const dateLabels = { all: '', today: 'Today', week: '7 days', month: '30 days', year: '1 year' };
@@ -1347,6 +1698,7 @@ const logScript = String.raw`
 
   function showPathFilterPopover(anchor) {
     closeContextMenu();
+    menuInvoker = anchor;
     const popover = node('form', 'filter-popover');
     popover.append(node('div', 'filter-popover-title', 'Show commits affecting this path'));
     const input = node('input'); input.type = 'text'; input.placeholder = 'src/path or file name'; input.value = state.filePath || '';
@@ -1374,13 +1726,25 @@ const logScript = String.raw`
     const model = graphModel(filteredCommits()); const commits = model.commits; const graph = graphLayout(commits, model);
     currentGraphFragments = model.fragments;
     for (const id of [...collapsedGraphSeries]) if (!currentGraphFragments.has(id)) collapsedGraphSeries.delete(id);
-    if (!commits.length) { list.append(node('div', 'empty', 'No matching commits')); return; }
+    const currentHash = pendingCommitHash || state.selection?.commit?.hash;
+    if (commits.length && !commits.some(commit => commit.hash === currentHash)) {
+      pendingCommitHash = commits[0].hash; post('selectCommit', { hash: pendingCommitHash });
+    }
+    if (!commits.length) {
+      pendingCommitHash = undefined;
+      list.append(node('div', 'empty', 'No match in the ' + String(state.logLimit || (state.commits || []).length) + ' loaded commits.'));
+      if (state.hasMoreCommits) list.append(button('Load 300 more commits', 'Load older history', () => post('loadMore'), 'load-more'));
+      return;
+    }
     commits.forEach((commit, index) => {
       const selected = (pendingCommitHash || state.selection?.commit.hash) === commit.hash;
       const row = node('div', 'commit-row' + (selected ? ' selected' : '')); row.dataset.hash = commit.hash;
-      row.tabIndex = 0; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
-      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(graph[index]); canvas.title = 'Click a graph line to collapse or expand its branch series'; attachGraphInteraction(canvas); subject.append(canvas);
-      const refs = node('div', 'refs'); for (const ref of (commit.refs || []).slice(0, 2)) refs.append(node('span', 'ref', shortRef(ref))); subject.append(refs, node('span', 'subject', commit.subject || '(no subject)'));
+      row.tabIndex = selected || (!currentHash && index === 0) ? 0 : -1; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
+      row.setAttribute('aria-label', (commit.subject || 'No subject') + ', ' + commit.author + ', ' + formatDate(commit.authoredAt) + ', ' + commit.hash.slice(0, 8));
+      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(graph[index]); canvas.title = 'Click a graph line to select or collapse its series'; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(graph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
+      const refs = node('div', 'refs'); for (const ref of (commit.refs || []).slice(0, 2)) refs.append(node('span', 'ref', shortRef(ref)));
+      if ((commit.refs || []).length > 2) { const more = node('span', 'ref', '+' + String(commit.refs.length - 2)); more.title = commit.refs.slice(2).map(shortRef).join('\n'); refs.append(more); }
+      subject.append(refs, node('span', 'subject', commit.subject || '(no subject)'));
       row.append(subject, node('div', '', commit.author), node('div', 'muted', formatDate(commit.authoredAt)), node('div', 'muted', commit.hash.slice(0, 8)));
       const select = () => {
         pendingCommitHash = commit.hash;
@@ -1391,6 +1755,7 @@ const logScript = String.raw`
         post('selectCommit', { hash: commit.hash });
       };
       row.addEventListener('click', select); keyboardActivate(row, select);
+      row.addEventListener('keydown', event => navigateCommitRows(event, row));
       row.addEventListener('dblclick', () => post('showPatch', { hash: commit.hash }));
       attachContextMenu(row, () => {
         const parent = commit.parents?.[0];
@@ -1415,7 +1780,24 @@ const logScript = String.raw`
       });
       list.append(row);
     });
+    if (state.hasMoreCommits) list.append(button('Load 300 more commits', 'Load older history', () => post('loadMore'), 'load-more'));
     requestAnimationFrame(drawGraphs);
+  }
+
+  function navigateCommitRows(event, row) {
+    const rows = [...document.querySelectorAll('.commit-row')]; const current = rows.indexOf(row); let next = current;
+    if (event.key === 'ArrowDown') next = Math.min(rows.length - 1, current + 1);
+    else if (event.key === 'ArrowUp') next = Math.max(0, current - 1);
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = rows.length - 1;
+    else if (event.key === 'PageDown') next = Math.min(rows.length - 1, current + 10);
+    else if (event.key === 'PageUp') next = Math.max(0, current - 10);
+    else return;
+    event.preventDefault(); rows[next]?.click(); rows[next]?.focus(); rows[next]?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function refreshDetailsForFilter() {
+    const current = document.getElementById('details-pane'); if (current) current.replaceWith(detailsPane());
   }
 
   function selectCommitByHash(hash) {
@@ -1438,7 +1820,9 @@ const logScript = String.raw`
 
   function detailsPane() {
     const pane = node('aside', 'pane details'); pane.id = 'details-pane'; const selection = state.selection;
-    if (!selection) { pane.append(node('div', 'empty', 'Select a commit to view details')); return pane; }
+    const visible = new Set(filteredCommits().map(commit => commit.hash));
+    if (pendingCommitHash && selection?.commit?.hash !== pendingCommitHash) { pane.append(node('div', 'empty', 'Loading commit details…')); return pane; }
+    if (!selection || !visible.has(selection.commit.hash)) { pane.append(node('div', 'empty', visible.size ? 'Select a commit to view details' : 'No commit matches the current filters')); return pane; }
     const commit = selection.commit; const details = node('div', 'commit-details');
     details.id = 'commit-details';
     details.append(node('div', 'detail-subject', commit.subject || '(no subject)'));
@@ -1451,8 +1835,26 @@ const logScript = String.raw`
     const splitter = node('div', 'detail-splitter'); splitter.tabIndex = 0; splitter.setAttribute('role', 'separator'); splitter.setAttribute('aria-orientation', 'horizontal'); splitter.title = 'Drag to resize commit message';
     setupDetailSplitter(pane, splitter);
     pane.append(files, splitter, details);
-    requestAnimationFrame(() => setMessagePaneHeight(pane, Number(uiState.messagePaneHeight) || 160, false));
+    requestAnimationFrame(() => { setMessagePaneHeight(pane, Number(uiState.messagePaneHeight) || 160, false); setupTreeKeyboard(files); });
     return pane;
+  }
+
+  function setupTreeKeyboard(tree) {
+    const visibleRows = () => [...tree.querySelectorAll('[role="treeitem"]')].filter(row => row.offsetParent !== null);
+    const rows = visibleRows(); if (!rows.length) return;
+    const initial = rows.find(row => row.classList.contains('selected')) || rows[0]; rows.forEach(row => { row.tabIndex = row === initial ? 0 : -1; });
+    tree.addEventListener('keydown', event => {
+      const current = event.target.closest?.('[role="treeitem"]'); if (!current) return;
+      const live = visibleRows(); let index = live.indexOf(current);
+      if (event.key === 'ArrowDown') index = Math.min(live.length - 1, index + 1);
+      else if (event.key === 'ArrowUp') index = Math.max(0, index - 1);
+      else if (event.key === 'Home') index = 0;
+      else if (event.key === 'End') index = live.length - 1;
+      else if (event.key === 'ArrowRight' && current.getAttribute('aria-expanded') === 'false') { event.preventDefault(); current.click(); return; }
+      else if (event.key === 'ArrowLeft' && current.getAttribute('aria-expanded') === 'true') { event.preventDefault(); current.click(); return; }
+      else return;
+      event.preventDefault(); live.forEach(row => { row.tabIndex = -1; }); live[index].tabIndex = 0; live[index].focus();
+    });
   }
 
   function fileTree(files, commit) {
@@ -1473,12 +1875,13 @@ const logScript = String.raw`
   }
 
   function renderDirectory(directory, depth, commit) {
+    const compacted = compactDirectory(directory); directory = compacted.directory;
     const section = node('section');
     const collapsed = new Set(uiState.collapsedFileFolders || []).has(directory.path);
-    const row = node('div', 'tree-row'); row.style.paddingLeft = (8 + depth * 16) + 'px'; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-expanded', String(!collapsed));
+    const row = node('div', 'tree-row'); row.tabIndex = 0; row.style.paddingLeft = (8 + depth * 16) + 'px'; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-expanded', String(!collapsed));
     const count = countTreeFiles(directory);
     const twisty = node('span', 'tree-twisty', collapsed ? '›' : '⌄');
-    row.append(twisty, node('span', 'tree-folder', '▱ ' + directory.name), node('span', 'tree-count', count + (count === 1 ? ' file' : ' files')));
+    row.append(twisty, node('span', 'tree-folder', '▱ ' + compacted.name), node('span', 'tree-count', count + (count === 1 ? ' file' : ' files')));
     const children = node('div'); children.hidden = collapsed;
     for (const child of directory.directories.values()) children.append(renderDirectory(child, depth + 1, commit));
     for (const file of directory.files) children.append(commitFileRow(file, depth + 1, commit));
@@ -1489,6 +1892,14 @@ const logScript = String.raw`
       saveUiState({ collapsedFileFolders: [...collapsedFolders] });
     };
     row.addEventListener('click', toggle); keyboardActivate(row, toggle); section.append(row, children); return section;
+  }
+
+  function compactDirectory(directory) {
+    const names = [directory.name]; let current = directory;
+    while (!current.files.length && current.directories.size === 1) {
+      current = current.directories.values().next().value; names.push(current.name);
+    }
+    return { name: names.join('/'), directory: current };
   }
 
   function countTreeFiles(directory) {
@@ -1510,7 +1921,11 @@ const logScript = String.raw`
         item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
       });
     };
-    row.addEventListener('click', selectFile); keyboardActivate(row, selectFile);
+    row.addEventListener('click', selectFile);
+    row.addEventListener('keydown', event => {
+      if (event.key === ' ') { event.preventDefault(); selectFile(); }
+      if (event.key === 'Enter') { event.preventDefault(); selectFile(); post('openCommitFile', { hash: commit.hash, path: file.path }); }
+    });
     row.addEventListener('dblclick', () => post('openCommitFile', { hash: commit.hash, path: file.path }));
     attachContextMenu(row, () => {
       selectFile();
@@ -1737,35 +2152,27 @@ const logScript = String.raw`
 
   window.addEventListener('message', event => {
     if (event.data.type === 'state') {
-      state = event.data.state; pendingCommitHash = undefined;
-      if (state.logOptions) {
-        sortMode = state.logOptions.order === 'topological' ? 'topological' : 'date';
-        firstParent = Boolean(state.logOptions.firstParent); noMerges = Boolean(state.logOptions.noMerges);
-        saveUiState({ sortMode, firstParent, noMerges });
-      }
-      const liveBranchKeys = new Set((state.branches || []).map(branchKey));
-      selectedBranchKeys = new Set([...selectedBranchKeys].filter(key => liveBranchKeys.has(key)));
-      if (!selectedBranchKeys.size && state.selectedRef) {
-        const selectedRefBranch = (state.branches || []).find(branch => branch.name === state.selectedRef);
-        if (selectedRefBranch) selectedBranchKeys.add(branchKey(selectedRefBranch));
-      }
-      saveUiState({ selectedBranchKeys: [...selectedBranchKeys] });
-      if (state.selection && !(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
-      render();
+      if (blocksStateRender()) deferredState = event.data.state;
+      else applyIncomingState(event.data.state);
     }
     if (event.data.type === 'selection') {
       state.selection = event.data.selection; pendingCommitHash = undefined;
       if (!(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
       updateSelectionWithoutRerender();
     }
-    if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-400); if (activeToolTab === 'console') render(); }
-    if (event.data.type === 'activateTab') { selectToolTab(event.data.tab); }
-    if (event.data.type === 'committed') { saveUiState({ commitMessage: '' }); render(); }
+    if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-200); if (activeToolTab === 'console') appendConsoleTrace(event.data.trace); }
+    if (event.data.type === 'consoleCleared') { state.traces = []; if (activeToolTab === 'console') render(); }
+    if (event.data.type === 'activateTab' && event.data.tab !== activeToolTab) { selectToolTab(event.data.tab); }
+    if (event.data.type === 'committed') {
+      const drafts = { ...(uiState.commitMessages || {}) }; delete drafts[state.selectedRoot || ''];
+      saveUiState({ commitMessages: drafts, commitMessage: undefined }); render();
+    }
     if (event.data.type === 'error') { const error = node('div', 'error', event.data.message); app.prepend(error); }
   });
   document.addEventListener('pointerdown', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); });
   document.addEventListener('wheel', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
   document.addEventListener('touchmove', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(); });
-  post('ready', { logOptions: { order: sortMode, firstParent, noMerges } }); render();
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(true); });
+  document.addEventListener('focusout', () => setTimeout(flushDeferredState, 0));
+  post('ready', { activeTab: activeToolTab, logOptions: { order: sortMode, firstParent, noMerges } }); render();
 `;

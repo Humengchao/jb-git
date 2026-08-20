@@ -1,11 +1,15 @@
 import * as path from "node:path";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import * as vscode from "vscode";
+import { GitConflictVersions } from "../git/types";
 import { RepositoryManager } from "../repositoryManager";
 import { webviewDocument } from "./html";
 
 type MergeEditorMessage =
   | { type: "ready" }
   | { type: "apply"; result: string; deleted?: boolean }
+  | { type: "dirty"; result: string; deleted?: boolean }
   | { type: "cancel" };
 
 interface MergeEditorLabels {
@@ -14,11 +18,31 @@ interface MergeEditorLabels {
   theirs: string;
 }
 
+interface MergeDraft {
+  fingerprint: string;
+  result: string;
+  deleted: boolean;
+  updatedAt: number;
+}
+
+interface PersistedMergeDrafts {
+  version: 1;
+  drafts: Record<string, MergeDraft>;
+}
+
+const MERGE_DRAFTS_KEY = "jbGit.mergeDrafts";
+
 /** IntelliJ-inspired three-pane editor for a single unmerged text file. */
 export class MergeConflictEditor implements vscode.Disposable {
   private readonly panels = new Map<string, vscode.WebviewPanel>();
+  private readonly drafts: Record<string, MergeDraft>;
+  private draftSaveTimer?: NodeJS.Timeout;
+  private disposed = false;
 
-  public constructor(private readonly manager: RepositoryManager) {}
+  public constructor(private readonly manager: RepositoryManager, private readonly workspaceState: vscode.Memento) {
+    const persisted = workspaceState.get<PersistedMergeDrafts>(MERGE_DRAFTS_KEY);
+    this.drafts = persisted?.version === 1 ? { ...persisted.drafts } : {};
+  }
 
   /** Returns false for binary conflicts, which must use a whole-file fallback. */
   public async open(rootPath: string, pathSpec: string): Promise<boolean> {
@@ -31,15 +55,35 @@ export class MergeConflictEditor implements vscode.Disposable {
 
     const versions = await this.manager.conflictVersions(rootPath, pathSpec);
     if (versions.binary) return false;
+    const fingerprint = conflictFingerprint(versions);
+    const draft = this.drafts[key];
+    const restoredDraft = draft?.fingerprint === fingerprint ? draft : undefined;
+    if (draft && !restoredDraft) {
+      delete this.drafts[key];
+      void this.saveDrafts();
+    }
+    const displayedVersions = restoredDraft
+      ? { ...versions, result: restoredDraft.result, resultExists: !restoredDraft.deleted }
+      : versions;
 
     const snapshot = this.manager.snapshot(rootPath);
     const operation = snapshot?.operation.kind ?? "none";
+    let incomingLabel = operation === "none"
+      ? "Incoming Changes"
+      : `Incoming Changes (${operation === "cherry-pick" ? "Cherry-pick" : operation[0].toUpperCase() + operation.slice(1)})`;
+    if (snapshot?.operation.detail && ["merge", "cherry-pick", "revert"].includes(operation)) {
+      try {
+        const revision = (await readFile(snapshot.operation.detail, "utf8")).trim().split(/\s+/)[0];
+        const branch = snapshot.branches.find((candidate) => candidate.oid === revision);
+        incomingLabel = branch ? `Changes from ${branch.name}` : `${incomingLabel} · ${revision.slice(0, 10)}`;
+      } catch {
+        // The operation may finish while the editor is opening; the generic label remains useful.
+      }
+    }
     const labels: MergeEditorLabels = {
       ours: `Changes from ${snapshot?.status?.branch.head ?? "Current Branch"}`,
       result: "Result",
-      theirs: operation === "none"
-        ? "Incoming Changes"
-        : `Incoming Changes (${operation === "cherry-pick" ? "Cherry-pick" : operation[0].toUpperCase() + operation.slice(1)})`,
+      theirs: incomingLabel,
     };
     const title = `Merge Revisions for ${path.basename(pathSpec)}`;
     const panel = vscode.window.createWebviewPanel(
@@ -49,28 +93,62 @@ export class MergeConflictEditor implements vscode.Disposable {
       { enableScripts: true, retainContextWhenHidden: true },
     );
     this.panels.set(key, panel);
+    let allowDispose = false;
+    let dirty = Boolean(restoredDraft);
     let messageRegistration: vscode.Disposable | undefined;
     const disposeRegistration = panel.onDidDispose(() => {
       disposeRegistration.dispose();
       messageRegistration?.dispose();
       this.panels.delete(key);
+      if (dirty && !allowDispose && !this.disposed) {
+        void vscode.window.showInformationMessage(
+          `The unapplied merge result for ${pathSpec} was saved as a draft.`,
+          "Reopen",
+        ).then((choice) => { if (choice === "Reopen") void this.open(rootPath, pathSpec); });
+      }
     });
     messageRegistration = panel.webview.onDidReceiveMessage(async (message: MergeEditorMessage) => {
       if (message.type === "ready") {
-        await panel.webview.postMessage({ type: "load", versions, labels, title });
+        await panel.webview.postMessage({
+          type: "load",
+          versions: displayedVersions,
+          originalResult: versions.result,
+          originalResultExists: versions.resultExists,
+          labels,
+          title,
+          restoredDraft: Boolean(restoredDraft),
+        });
+        return;
+      }
+      if (message.type === "dirty" && typeof message.result === "string") {
+        dirty = true;
+        this.drafts[key] = { fingerprint, result: message.result, deleted: message.deleted === true, updatedAt: Date.now() };
+        this.scheduleSaveDrafts();
         return;
       }
       if (message.type === "cancel") {
+        allowDispose = true;
+        dirty = false;
+        delete this.drafts[key];
+        await this.saveDrafts();
         panel.dispose();
         return;
       }
       if (message.type !== "apply" || typeof message.result !== "string") return;
       try {
         if (!vscode.workspace.isTrusted) throw new Error("Merge results cannot be applied until this workspace is trusted.");
+        const latest = await this.manager.conflictVersions(rootPath, pathSpec);
+        if (conflictFingerprint(latest) !== fingerprint) {
+          throw new Error("The conflicted file changed outside this editor. Reopen it before applying to avoid overwriting newer work.");
+        }
         await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `Applying merge result for ${pathSpec}`, cancellable: false },
           () => this.manager.applyConflictResult(rootPath, pathSpec, message.result, message.deleted === true),
         );
+        allowDispose = true;
+        dirty = false;
+        delete this.drafts[key];
+        await this.saveDrafts();
         await vscode.window.showInformationMessage(`${pathSpec} was resolved and staged.`);
         panel.dispose();
       } catch (error) {
@@ -84,9 +162,27 @@ export class MergeConflictEditor implements vscode.Disposable {
   }
 
   public dispose(): void {
+    this.disposed = true;
+    if (this.draftSaveTimer) clearTimeout(this.draftSaveTimer);
+    void this.saveDrafts();
     for (const panel of this.panels.values()) panel.dispose();
     this.panels.clear();
   }
+
+  private async saveDrafts(): Promise<void> {
+    await this.workspaceState.update(MERGE_DRAFTS_KEY, { version: 1, drafts: this.drafts } satisfies PersistedMergeDrafts);
+  }
+
+  private scheduleSaveDrafts(): void {
+    if (this.draftSaveTimer) clearTimeout(this.draftSaveTimer);
+    this.draftSaveTimer = setTimeout(() => { this.draftSaveTimer = undefined; void this.saveDrafts(); }, 250);
+  }
+}
+
+export function conflictFingerprint(versions: GitConflictVersions): string {
+  return createHash("sha256")
+    .update(JSON.stringify([versions.path, versions.baseExists, versions.base, versions.oursExists, versions.ours, versions.theirsExists, versions.theirs, versions.resultExists, versions.result]))
+    .digest("hex");
 }
 
 const mergeStyles = String.raw`
@@ -189,6 +285,7 @@ const mergeScript = String.raw`
   let applying = false;
   let loaded = false;
   let synchronizing = false;
+  let updateFrame;
 
   function marker(pattern, text, from) {
     pattern.lastIndex = from;
@@ -252,6 +349,15 @@ const mergeScript = String.raw`
     }
   }
 
+  function scheduleUpdate(selectCurrent = false) {
+    if (updateFrame) cancelAnimationFrame(updateFrame);
+    updateFrame = requestAnimationFrame(() => { updateFrame = undefined; updateControls(selectCurrent); });
+  }
+
+  function saveDraft() {
+    vscode.postMessage({ type: 'dirty', result: result.value, deleted: resultDeleted });
+  }
+
   function chooseCurrent(side) {
     if (!conflicts.length) return;
     const selected = conflicts[currentConflict];
@@ -262,7 +368,7 @@ const mergeScript = String.raw`
     }
     result.value = result.value.slice(0, selected.start) + replacement + result.value.slice(selected.end);
     resultDeleted = false;
-    updateControls(true);
+    saveDraft(); updateControls(true);
   }
 
   function syncFrom(source) {
@@ -270,18 +376,19 @@ const mergeScript = String.raw`
     gutters[sourceIndex].scrollTop = source.scrollTop;
     if (synchronizing) return;
     synchronizing = true;
-    const max = Math.max(0, source.scrollHeight - source.clientHeight);
-    const ratio = max ? source.scrollTop / max : 0;
+    const sourceLineHeight = Number.parseFloat(getComputedStyle(source).lineHeight) || 20;
+    const topLine = source.scrollTop / sourceLineHeight;
     editors.forEach((editor, index) => {
       if (editor === source) return;
-      editor.scrollTop = ratio * Math.max(0, editor.scrollHeight - editor.clientHeight);
+      const targetLineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 20;
+      editor.scrollTop = topLine * targetLineHeight;
       gutters[index].scrollTop = editor.scrollTop;
     });
     requestAnimationFrame(() => { synchronizing = false; });
   }
 
   editors.forEach((editor) => editor.addEventListener('scroll', () => syncFrom(editor)));
-  result.addEventListener('input', () => { resultDeleted = false; updateControls(false); });
+  result.addEventListener('input', () => { resultDeleted = false; saveDraft(); scheduleUpdate(false); });
   result.addEventListener('click', () => {
     const index = conflicts.findIndex((entry) => result.selectionStart >= entry.start && result.selectionStart <= entry.end);
     if (index >= 0) { currentConflict = index; updateControls(false); }
@@ -299,9 +406,15 @@ const mergeScript = String.raw`
   document.getElementById('take-left').addEventListener('click', () => chooseCurrent('ours'));
   document.getElementById('take-both').addEventListener('click', () => chooseCurrent('both'));
   document.getElementById('take-right').addEventListener('click', () => chooseCurrent('theirs'));
-  document.getElementById('accept-left').addEventListener('click', () => { result.value = left.value; resultDeleted = !window.mergeVersions.oursExists; updateControls(false); });
-  document.getElementById('accept-right').addEventListener('click', () => { result.value = right.value; resultDeleted = !window.mergeVersions.theirsExists; updateControls(false); });
-  document.getElementById('reset').addEventListener('click', () => { result.value = initialResult; resultDeleted = initialResultDeleted; currentConflict = 0; updateControls(true); });
+  document.getElementById('accept-left').addEventListener('click', () => {
+    if (!window.confirm('Replace the complete result with the left version?')) return;
+    result.value = left.value; resultDeleted = !window.mergeVersions.oursExists; saveDraft(); updateControls(false);
+  });
+  document.getElementById('accept-right').addEventListener('click', () => {
+    if (!window.confirm('Replace the complete result with the right version?')) return;
+    result.value = right.value; resultDeleted = !window.mergeVersions.theirsExists; saveDraft(); updateControls(false);
+  });
+  document.getElementById('reset').addEventListener('click', () => { result.value = initialResult; resultDeleted = initialResultDeleted; currentConflict = 0; saveDraft(); updateControls(true); });
   document.getElementById('cancel').addEventListener('click', () => {
     if ((result.value === initialResult && resultDeleted === initialResultDeleted) || window.confirm('Discard the unapplied merge result?')) vscode.postMessage({ type: 'cancel' });
   });
@@ -317,6 +430,9 @@ const mergeScript = String.raw`
       event.preventDefault();
       apply.click();
     }
+  });
+  window.addEventListener('beforeunload', () => {
+    if (loaded && (result.value !== initialResult || resultDeleted !== initialResultDeleted)) vscode.postMessage({ type: 'dirty', result: result.value, deleted: resultDeleted });
   });
 
   document.querySelectorAll('.splitter').forEach((splitter) => {
@@ -356,14 +472,18 @@ const mergeScript = String.raw`
       left.value = message.versions.ours;
       right.value = message.versions.theirs;
       result.value = message.versions.result;
-      initialResult = message.versions.result;
-      initialResultDeleted = !message.versions.resultExists;
-      resultDeleted = initialResultDeleted;
+      initialResult = message.originalResult;
+      initialResultDeleted = !message.originalResultExists;
+      resultDeleted = !message.versions.resultExists;
       document.getElementById('left-title').textContent = message.labels.ours + (message.versions.oursExists ? '' : ' (deleted)');
       document.getElementById('result-title').textContent = message.labels.result;
       document.getElementById('right-title').textContent = message.labels.theirs + (message.versions.theirsExists ? '' : ' (deleted)');
       currentConflict = 0;
       updateControls(true);
+      if (message.restoredDraft) {
+        counter.className = 'counter';
+        counter.textContent = conflicts.length ? counter.textContent + ' · draft restored' : 'Draft restored · ready to apply';
+      }
       return;
     }
     if (message.type === 'applyFailed') {

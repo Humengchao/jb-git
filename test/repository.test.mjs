@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { discoverRepositories, discoverRepository } from "../dist/git/repository.js";
+import { discoverRepositories, discoverRepository, logPathspec } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
 
 function git(cwd, ...args) {
@@ -22,6 +22,12 @@ function sameDirectory(left, right) {
   const rightStat = statSync(right);
   return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
 }
+
+test("uses literal paths and suffix matching for the log path filter", () => {
+  assert.equal(logPathspec("src/file.ts"), ":(literal)src/file.ts");
+  assert.equal(logPathspec("file.ts"), ":(glob)**/file.ts");
+  assert.equal(logPathspec("file[1].ts"), ":(glob)**/file\\[1].ts");
+});
 
 test("discovers a repository and reads its status", async () => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-repository-"));

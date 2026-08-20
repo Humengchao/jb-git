@@ -170,8 +170,8 @@ export class GitRunner {
       startedAt: startedAt.toISOString(),
       durationMs: Date.now() - started,
       exitCode,
-      stdout: redactGitText(stdout).slice(0, 20_000),
-      stderr: redactGitText(stderr).slice(0, 20_000),
+      stdout: redactGitText(stdout).slice(0, 8_000),
+      stderr: redactGitText(stderr).slice(0, 8_000),
     };
     for (const listener of this.traceListeners) {
       try {

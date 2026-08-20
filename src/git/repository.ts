@@ -76,7 +76,10 @@ export class GitRepository {
     ];
     for (const candidate of candidates) {
       for (const gitPath of candidate.paths) {
-        const resolved = await this.gitPath(gitPath);
+        // Operation markers always live in the worktree-specific Git directory.
+        // Resolving every marker through `git rev-parse --git-path` made one
+        // lightweight refresh spawn up to seven extra Git processes.
+        const resolved = path.join(this.info.gitDir, gitPath);
         if (await this.exists(resolved)) {
           return {
             kind: candidate.kind,
@@ -112,11 +115,11 @@ export class GitRepository {
       order,
       ...(options.firstParent ? ["--first-parent"] : []),
       ...(options.noMerges ? ["--no-merges"] : []),
-      `--max-count=${Math.max(1, Math.min(limit, 500))}`,
+      `--max-count=${Math.max(1, Math.min(limit, 5_000))}`,
       "--date=iso-strict",
       "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B%x01",
       ...revisions,
-      ...(filePath ? ["--", filePath] : []),
+      ...(filePath ? ["--", logPathspec(filePath)] : []),
     ], { cwd: this.info.rootPath });
     return output.split("\x01").filter((record) => record.trim()).map((record) => {
       const fields = record.replace(/^[\r\n]+/, "").split("\x00");
@@ -301,8 +304,8 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["sparse-checkout", "disable"], { cwd: this.info.rootPath }));
   }
 
-  public async lfsPull(): Promise<void> {
-    await this.serial(() => this.runner.run(["lfs", "pull"], { cwd: this.info.rootPath }));
+  public async lfsPull(signal?: AbortSignal): Promise<void> {
+    await this.serial(() => this.runner.run(["lfs", "pull"], { cwd: this.info.rootPath, signal }));
   }
 
   public async branches(signal?: AbortSignal): Promise<GitBranch[]> {
@@ -363,12 +366,12 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["remote", "set-url", ...(push ? ["--push"] : []), name, url], { cwd: this.info.rootPath }));
   }
 
-  public async fetchRemote(name: string, prune = true): Promise<void> {
-    await this.serial(() => this.runner.run(["fetch", ...(prune ? ["--prune"] : []), name], { cwd: this.info.rootPath }));
+  public async fetchRemote(name: string, prune = true, signal?: AbortSignal): Promise<void> {
+    await this.serial(() => this.runner.run(["fetch", ...(prune ? ["--prune"] : []), name], { cwd: this.info.rootPath, signal }));
   }
 
-  public async pushRemote(name: string, branch?: string, forceWithLease = false): Promise<void> {
-    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : []), name, ...(branch ? [branch] : [])], { cwd: this.info.rootPath }));
+  public async pushRemote(name: string, branch?: string, forceWithLease = false, signal?: AbortSignal): Promise<void> {
+    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : []), name, ...(branch ? [branch] : [])], { cwd: this.info.rootPath, signal }));
   }
 
   public async createTag(name: string, ref = "HEAD"): Promise<void> {
@@ -502,22 +505,22 @@ export class GitRepository {
     await this.stage(paths);
   }
 
-  public async fetch(): Promise<void> {
-    await this.serial(() => this.runner.run(["fetch", "--all", "--prune"], { cwd: this.info.rootPath }));
+  public async fetch(signal?: AbortSignal): Promise<void> {
+    await this.serial(() => this.runner.run(["fetch", "--all", "--prune"], { cwd: this.info.rootPath, signal }));
   }
 
-  public async pull(strategy: GitPullStrategy): Promise<void> {
+  public async pull(strategy: GitPullStrategy, signal?: AbortSignal): Promise<void> {
     await this.serial(() => {
       const args = ["pull"];
       if (strategy === "merge") args.push("--no-rebase");
       if (strategy === "rebase") args.push("--rebase");
       if (strategy === "ff-only") args.push("--ff-only");
-      return this.runner.run(args, { cwd: this.info.rootPath });
+      return this.runner.run(args, { cwd: this.info.rootPath, signal });
     });
   }
 
-  public async push(forceWithLease = false): Promise<void> {
-    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : [])], { cwd: this.info.rootPath }));
+  public async push(forceWithLease = false, signal?: AbortSignal): Promise<void> {
+    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : [])], { cwd: this.info.rootPath, signal }));
   }
 
   public async merge(ref: string): Promise<void> {
@@ -810,6 +813,14 @@ export class GitRepository {
       return false;
     }
   }
+}
+
+export function logPathspec(value: string): string {
+  // A bare file name is treated as a suffix search, matching IntelliJ's path
+  // filter. Paths containing a directory separator remain exact and literal.
+  if (value.includes("/") || value.includes("\\")) return `:(literal)${value.replaceAll("\\", "/")}`;
+  const escaped = value.replace(/([*?\[\\])/g, "\\$1");
+  return `:(glob)**/${escaped}`;
 }
 
 export async function discoverRepository(

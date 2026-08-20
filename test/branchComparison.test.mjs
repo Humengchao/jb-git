@@ -19,6 +19,11 @@ test("renders a grouped file tree and opens native side-by-side diffs", () => {
   assert.match(source, /registerFile/);
   assert.match(source, /executeCommand\("vscode\.diff"/);
   assert.match(source, /viewColumn: targetColumn/);
+  assert.match(source, /requestVersion/);
+  assert.match(source, /this\.sessions\.get\(key\)/);
+  assert.match(scriptMatch[1], /Filter changed files/);
+  assert.match(scriptMatch[1], /setupTreeKeyboard/);
+  assert.match(scriptMatch[1], /compactDirectory/);
 });
 
 test("loads both rename sides and handles added, deleted, and binary files", () => {

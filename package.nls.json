@@ -1,0 +1,9 @@
+{
+  "extension.displayName": "JB Git",
+  "extension.description": "An IntelliJ IDEA-inspired Git workspace for Visual Studio Code.",
+  "configuration.title": "JB Git",
+  "configuration.gitPath": "Path to the Git executable.",
+  "configuration.autoRefresh": "Refresh repository state when files or Git metadata change.",
+  "configuration.refreshDebounceMs": "Debounce interval for repository refreshes.",
+  "configuration.confirmDiscard": "Ask for confirmation before discarding changes."
+}

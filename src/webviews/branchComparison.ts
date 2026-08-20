@@ -9,16 +9,24 @@ type ComparisonMessage =
   | { type: "openFile"; index: number };
 
 interface ComparisonSession {
+  key: string;
   panel: vscode.WebviewPanel;
   disposables: vscode.Disposable[];
+  requestVersion: number;
 }
 
 export class BranchComparisonWorkspace implements vscode.Disposable {
-  private readonly sessions = new Set<ComparisonSession>();
+  private readonly sessions = new Map<string, ComparisonSession>();
 
   public constructor(private readonly diffProvider: DiffContentProvider) {}
 
   public async open(repository: GitRepository, left: GitBranch, right: GitBranch): Promise<void> {
+    const key = `${repository.info.rootPath}\0${left.oid}\0${right.oid}`;
+    const existing = this.sessions.get(key);
+    if (existing) {
+      existing.panel.reveal(existing.panel.viewColumn, false);
+      return;
+    }
     const files = await repository.diffFiles(left.oid, right.oid);
     const initialColumn = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
     const panel = vscode.window.createWebviewPanel(
@@ -29,30 +37,48 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
     );
     panel.webview.html = webviewDocument(panel.webview, panel.title, comparisonStyles, comparisonScript);
 
-    const session: ComparisonSession = { panel, disposables: [] };
-    this.sessions.add(session);
+    const session: ComparisonSession = { key, panel, disposables: [], requestVersion: 0 };
+    this.sessions.set(key, session);
     let firstFileOpened = false;
 
     const openFile = async (index: number): Promise<void> => {
       if (!Number.isInteger(index) || index < 0 || index >= files.length) return;
+      const requestVersion = ++session.requestVersion;
+      await panel.webview.postMessage({ type: "loading", index });
       const file = files[index];
       const oldPath = file.originalPath ?? file.path;
       const [leftContent, rightContent] = await Promise.all([
         file.status.startsWith("A") ? Promise.resolve(Buffer.alloc(0)) : repository.fileContent(oldPath, left.oid),
         file.status.startsWith("D") ? Promise.resolve(Buffer.alloc(0)) : repository.fileContent(file.path, right.oid),
       ]);
+      if (requestVersion !== session.requestVersion || !this.sessions.has(key)) return;
+      if (isBinary(leftContent) || isBinary(rightContent)) {
+        await panel.webview.postMessage({ type: "selection", index });
+        await vscode.window.showInformationMessage(`${file.path} is binary and cannot be displayed in the text diff editor.`);
+        return;
+      }
       const leftText = displayContent(leftContent, `${left.name}:${oldPath}`);
       const rightText = displayContent(rightContent, `${right.name}:${file.path}`);
       const leftUri = this.diffProvider.registerFile(repository.info.rootPath, left.name, oldPath, leftText);
       const rightUri = this.diffProvider.registerFile(repository.info.rootPath, right.name, file.path, rightText);
-      const targetColumn = Math.min(Number(vscode.ViewColumn.Nine), Number(panel.viewColumn ?? initialColumn) + 1) as vscode.ViewColumn;
+      const panelColumn = Number(panel.viewColumn ?? initialColumn);
+      const targetColumn = panelColumn >= Number(vscode.ViewColumn.Nine)
+        ? vscode.ViewColumn.Beside
+        : Math.min(Number(vscode.ViewColumn.Nine), panelColumn + 1) as vscode.ViewColumn;
       const label = `${file.path} (${left.name} ↔ ${right.name})`;
       await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, {
         preview: true,
         preserveFocus: false,
         viewColumn: targetColumn,
       });
+      if (requestVersion !== session.requestVersion || !this.sessions.has(key)) return;
       await panel.webview.postMessage({ type: "selection", index });
+    };
+    const openFileSafely = (index: number): void => {
+      void openFile(index).catch((error) => {
+        showComparisonError(error);
+        void panel.webview.postMessage({ type: "loading", index: -1 });
+      });
     };
 
     session.disposables.push(
@@ -64,27 +90,31 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
           });
           if (!firstFileOpened && files.length) {
             firstFileOpened = true;
-            void openFile(0).catch(showComparisonError);
+            openFileSafely(0);
           }
           return;
         }
-        if (message.type === "openFile") void openFile(message.index).catch(showComparisonError);
+        if (message.type === "openFile") openFileSafely(message.index);
       }),
       panel.onDidDispose(() => {
         for (const disposable of session.disposables) disposable.dispose();
-        this.sessions.delete(session);
+        this.sessions.delete(key);
       }),
     );
   }
 
   public dispose(): void {
-    for (const session of [...this.sessions]) session.panel.dispose();
+    for (const session of [...this.sessions.values()]) session.panel.dispose();
     this.sessions.clear();
   }
 }
 
+function isBinary(content: Buffer): boolean {
+  return content.subarray(0, 8192).includes(0);
+}
+
 function displayContent(content: Buffer, source: string): string {
-  if (!content.subarray(0, 8192).includes(0)) return content.toString("utf8");
+  if (!isBinary(content)) return content.toString("utf8");
   return `Binary file differs and cannot be displayed as text.\n\n${source}\n${content.length} bytes\n`;
 }
 
@@ -103,6 +133,8 @@ const comparisonStyles = String.raw`
   .title { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); font-size: 15px; font-weight: 600; }
   .refs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toolbar { display: flex; align-items: center; gap: 3px; padding: 4px 8px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
+  .toolbar input, .toolbar select { height: 27px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; padding: 2px 7px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .toolbar input { width: min(260px, 38vw); }
   .toolbar-button { min-width: 28px; height: 27px; padding: 0 7px; border-radius: 3px; color: var(--vscode-descriptionForeground); }
   .toolbar-button:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
   .count { margin-left: auto; color: var(--vscode-descriptionForeground); }
@@ -111,6 +143,7 @@ const comparisonStyles = String.raw`
   .folder-row, .file-row { width: 100%; min-width: max-content; height: 27px; display: flex; align-items: center; gap: 6px; padding-right: 8px; border-radius: 3px; text-align: left; white-space: nowrap; }
   .folder-row:hover, .file-row:hover { background: var(--vscode-list-hoverBackground); }
   .file-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .file-row.loading::after { content: 'Loading…'; margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 11px; }
   .twisty { width: 13px; color: var(--vscode-descriptionForeground); text-align: center; }
   .folder-icon { color: var(--vscode-symbolIcon-folderForeground, var(--vscode-descriptionForeground)); }
   .folder-name { font-weight: 600; }
@@ -130,7 +163,10 @@ const comparisonScript = String.raw`
   const app = document.getElementById('app');
   let state = { leftRef: '', rightRef: '', files: [] };
   let selectedIndex = 0;
+  let loadingIndex = -1;
   let collapsed = new Set();
+  let query = '';
+  let statusFilter = 'all';
   const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
   const node = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; };
   const button = (label, title, handler, className) => { const element = node('button', className, label); element.type = 'button'; element.title = title; element.addEventListener('click', handler); return element; };
@@ -141,15 +177,35 @@ const comparisonScript = String.raw`
     const title = node('div', 'title');
     title.append(node('span', '', '↔'), node('span', 'refs', 'Changes Between ' + state.leftRef + ' and ' + state.rightRef));
     const toolbar = node('div', 'toolbar');
+    const search = node('input'); search.type = 'search'; search.placeholder = 'Filter changed files'; search.value = query; search.setAttribute('aria-label', 'Filter changed files');
+    const status = node('select'); status.setAttribute('aria-label', 'Filter by change status');
+    for (const [value, label] of [['all', 'All statuses'], ['M', 'Modified'], ['A', 'Added'], ['D', 'Deleted'], ['R', 'Renamed']]) { const option = node('option', '', label); option.value = value; option.selected = value === statusFilter; status.append(option); }
+    const count = node('span', 'count');
     toolbar.append(
+      search, status,
       button('⌃', 'Collapse all folders', () => { collapsed = new Set(allDirectoryPaths()); render(); }, 'toolbar-button'),
       button('⌄', 'Expand all folders', () => { collapsed.clear(); render(); }, 'toolbar-button'),
-      node('span', 'count', state.files.length + (state.files.length === 1 ? ' file' : ' files')),
+      count,
     );
     const tree = node('div', 'tree'); tree.setAttribute('role', 'tree');
-    if (!state.files.length) tree.append(node('div', 'empty', 'The selected branches have no file differences.'));
-    else renderTree(tree, buildTree(state.files));
+    const refreshTree = () => {
+      tree.replaceChildren(); const files = filteredFiles(); count.textContent = files.length + (files.length === 1 ? ' file' : ' files');
+      if (!files.length) tree.append(node('div', 'empty', state.files.length ? 'No files match the current filters.' : 'The selected branches have no file differences.'));
+      else renderTree(tree, buildTree(files));
+      setupTreeKeyboard(tree);
+    };
+    search.addEventListener('input', () => { query = search.value.toLowerCase(); refreshTree(); });
+    status.addEventListener('change', () => { statusFilter = status.value; refreshTree(); });
+    refreshTree();
     root.append(title, toolbar, tree); app.append(root);
+  }
+
+  function filteredFiles() {
+    return state.files.map((file, index) => ({ ...file, index })).filter(file => {
+      const status = (file.status || 'M').charAt(0);
+      return (statusFilter === 'all' || status === statusFilter || (statusFilter === 'R' && status === 'C')) &&
+        (!query || (file.path + '\n' + (file.originalPath || '')).toLowerCase().includes(query));
+    });
   }
 
   function buildTree(files) {
@@ -161,7 +217,7 @@ const comparisonScript = String.raw`
         if (!current.directories.has(part)) current.directories.set(part, { name: part, path: currentPath, directories: new Map(), files: [] });
         current = current.directories.get(part);
       }
-      current.files.push({ ...file, index });
+      current.files.push({ ...file, index: Number.isInteger(file.index) ? file.index : index });
     });
     return root;
   }
@@ -172,6 +228,7 @@ const comparisonScript = String.raw`
   }
 
   function renderDirectory(directory, depth) {
+    const compacted = compactDirectory(directory); directory = compacted.directory;
     const section = node('section');
     const isCollapsed = collapsed.has(directory.path);
     const row = button('', directory.path, () => {
@@ -180,7 +237,7 @@ const comparisonScript = String.raw`
     }, 'folder-row');
     row.style.paddingLeft = (6 + depth * 16) + 'px'; row.setAttribute('aria-expanded', String(!isCollapsed));
     const count = countFiles(directory);
-    row.append(node('span', 'twisty', isCollapsed ? '›' : '⌄'), node('span', 'folder-icon', '▱'), node('span', 'folder-name', directory.name), node('span', 'folder-count', count + (count === 1 ? ' file' : ' files')));
+    row.append(node('span', 'twisty', isCollapsed ? '›' : '⌄'), node('span', 'folder-icon', '▱'), node('span', 'folder-name', compacted.name), node('span', 'folder-count', count + (count === 1 ? ' file' : ' files')));
     const children = node('div'); children.hidden = isCollapsed;
     [...directory.directories.values()].sort(byName).forEach(child => children.append(renderDirectory(child, depth + 1)));
     [...directory.files].sort(byName).forEach(file => children.append(renderFile(file, depth + 1)));
@@ -189,7 +246,7 @@ const comparisonScript = String.raw`
 
   function renderFile(file, depth) {
     const status = (file.status || 'M').charAt(0);
-    const row = button('', file.path, () => selectFile(file.index), 'file-row' + (file.index === selectedIndex ? ' selected' : ''));
+    const row = button('', file.path, () => selectFile(file.index), 'file-row' + (file.index === selectedIndex ? ' selected' : '') + (file.index === loadingIndex ? ' loading' : ''));
     row.style.paddingLeft = (22 + depth * 16) + 'px'; row.dataset.index = String(file.index); row.setAttribute('role', 'treeitem'); row.setAttribute('aria-selected', String(file.index === selectedIndex));
     row.append(node('span', 'status status-' + status, status), node('span', 'file-icon', fileIcon(file.path)), node('span', 'file-name', file.path.split('/').pop()));
     if (file.originalPath) row.append(node('span', 'rename', '← ' + file.originalPath));
@@ -197,10 +254,10 @@ const comparisonScript = String.raw`
   }
 
   function selectFile(index) {
-    selectedIndex = index;
+    selectedIndex = index; loadingIndex = index;
     document.querySelectorAll('.file-row').forEach(row => {
       const selected = Number(row.dataset.index) === selectedIndex;
-      row.classList.toggle('selected', selected); row.setAttribute('aria-selected', String(selected));
+      row.classList.toggle('selected', selected); row.classList.toggle('loading', Number(row.dataset.index) === loadingIndex); row.setAttribute('aria-selected', String(selected));
     });
     post('openFile', { index });
   }
@@ -217,6 +274,27 @@ const comparisonScript = String.raw`
     return count;
   }
 
+  function compactDirectory(directory) {
+    const names = [directory.name]; let current = directory;
+    while (!current.files.length && current.directories.size === 1) { current = current.directories.values().next().value; names.push(current.name); }
+    return { name: names.join('/'), directory: current };
+  }
+
+  function setupTreeKeyboard(tree) {
+    const rows = [...tree.querySelectorAll('.folder-row, .file-row')]; if (!rows.length) return;
+    const initial = rows.find(row => row.classList.contains('selected')) || rows[0]; rows.forEach(row => { row.tabIndex = row === initial ? 0 : -1; });
+    tree.onkeydown = event => {
+      const current = event.target.closest?.('.folder-row, .file-row'); if (!current) return;
+      const live = [...tree.querySelectorAll('.folder-row, .file-row')].filter(row => row.offsetParent !== null); let index = live.indexOf(current);
+      if (event.key === 'ArrowDown') index = Math.min(live.length - 1, index + 1);
+      else if (event.key === 'ArrowUp') index = Math.max(0, index - 1);
+      else if (event.key === 'Home') index = 0;
+      else if (event.key === 'End') index = live.length - 1;
+      else return;
+      event.preventDefault(); live.forEach(row => { row.tabIndex = -1; }); live[index].tabIndex = 0; live[index].focus();
+    };
+  }
+
   function fileIcon(filePath) {
     const extension = filePath.split('.').pop().toLowerCase();
     if (extension === 'json') return '{}';
@@ -231,11 +309,15 @@ const comparisonScript = String.raw`
   window.addEventListener('message', event => {
     if (event.data.type === 'state') { state = event.data.state; selectedIndex = 0; render(); }
     if (event.data.type === 'selection') {
-      selectedIndex = event.data.index;
+      selectedIndex = event.data.index; loadingIndex = -1;
       document.querySelectorAll('.file-row').forEach(row => {
         const selected = Number(row.dataset.index) === selectedIndex;
-        row.classList.toggle('selected', selected); row.setAttribute('aria-selected', String(selected));
+        row.classList.toggle('selected', selected); row.classList.remove('loading'); row.setAttribute('aria-selected', String(selected));
       });
+    }
+    if (event.data.type === 'loading') {
+      loadingIndex = event.data.index;
+      document.querySelectorAll('.file-row').forEach(row => row.classList.toggle('loading', Number(row.dataset.index) === loadingIndex));
     }
   });
   post('ready'); render();

@@ -1,0 +1,9 @@
+{
+  "extension.displayName": "JB Git",
+  "extension.description": "为 Visual Studio Code 提供受 IntelliJ IDEA 启发的 Git 工作区。",
+  "configuration.title": "JB Git",
+  "configuration.gitPath": "Git 可执行文件的路径。",
+  "configuration.autoRefresh": "文件或 Git 元数据变化时刷新仓库状态。",
+  "configuration.refreshDebounceMs": "仓库自动刷新的防抖间隔。",
+  "configuration.confirmDiscard": "丢弃更改前要求确认。"
+}

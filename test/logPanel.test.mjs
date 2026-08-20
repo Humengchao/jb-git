@@ -17,9 +17,9 @@ test("keeps the embedded Git tool-window script syntactically valid", () => {
   assert.doesNotThrow(() => new Function(scriptMatch[1]));
 });
 
-test("wires context menus for branches, commits, and changed files", () => {
+test("wires context menus for branches, commits, local changes, and changed files", () => {
   assert.ok(scriptMatch);
-  assert.equal(scriptMatch[1].match(/attachContextMenu\(row,/g)?.length, 3);
+  assert.equal(scriptMatch[1].match(/attachContextMenu\(row,/g)?.length, 4);
   assert.match(scriptMatch[1], /event\.key === 'F10'/);
   assert.match(scriptMatch[1], /event\.key !== 'ContextMenu'/);
 });
@@ -31,6 +31,8 @@ test("keeps context menus and filter popovers open across background state rende
   assert.doesNotMatch(renderSource[1], /closeContextMenu/);
   assert.doesNotMatch(scriptMatch[1], /addEventListener\('scroll'.*closeContextMenu/);
   assert.match(scriptMatch[1], /addEventListener\('wheel'/);
+  assert.match(scriptMatch[1], /deferredState/);
+  assert.match(scriptMatch[1], /blocksStateRender/);
 });
 
 test("does not render the removed five-button commit detail action strip", () => {
@@ -68,7 +70,7 @@ test("supports modifier-click branch selection and multi-branch actions", () => 
 
 test("provides real branch, user, date, path, and ordering filters", () => {
   assert.ok(scriptMatch);
-  assert.match(scriptMatch[1], /Text or hash/);
+  assert.match(scriptMatch[1], /Filter loaded commits/);
   assert.match(scriptMatch[1], /branchFilterItems/);
   assert.match(scriptMatch[1], /userFilterItems/);
   assert.match(scriptMatch[1], /dateFilterItems/);
@@ -79,6 +81,35 @@ test("provides real branch, user, date, path, and ordering filters", () => {
   assert.match(scriptMatch[1], /First Parent/);
   assert.match(scriptMatch[1], /No Merges/);
   assert.match(scriptMatch[1], /setLogOptions/);
+});
+
+test("keeps filtered selection, details, and progressively loaded history consistent", () => {
+  assert.ok(scriptMatch);
+  assert.match(source, /type: "loadMore"/);
+  assert.match(source, /logLimit = Math\.min\(5_000/);
+  assert.match(scriptMatch[1], /refreshDetailsForFilter/);
+  assert.match(scriptMatch[1], /Loading commit details/);
+  assert.match(scriptMatch[1], /Load 300 more commits/);
+});
+
+test("provides safe local-change commits and repository-scoped drafts", () => {
+  assert.ok(scriptMatch);
+  assert.match(source, /listId\?: string/);
+  assert.match(scriptMatch[1], /listId: list\.id/);
+  assert.match(scriptMatch[1], /commitMessages/);
+  assert.match(scriptMatch[1], /commit\.disabled = disabled/);
+  assert.match(scriptMatch[1], /collapsedChangelists/);
+  assert.match(scriptMatch[1], /setupChangesSplitter/);
+});
+
+test("supports keyboard navigation and a filtered incremental Git console", () => {
+  assert.ok(scriptMatch);
+  assert.match(scriptMatch[1], /navigateCommitRows/);
+  assert.match(scriptMatch[1], /setupRovingRows/);
+  assert.match(scriptMatch[1], /setupTreeKeyboard/);
+  assert.match(scriptMatch[1], /consoleTraceVisible/);
+  assert.match(scriptMatch[1], /appendConsoleTrace/);
+  assert.match(scriptMatch[1], /Background refresh commands are hidden/);
 });
 
 test("collapses, expands, and directly interacts with real graph series", () => {

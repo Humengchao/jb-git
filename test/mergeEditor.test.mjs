@@ -26,6 +26,11 @@ test("provides editable three-pane conflict controls and a staged Apply flow", (
   assert.match(scriptMatch[1], /take-both/);
   assert.match(scriptMatch[1], /vscode\.postMessage\(\{ type: 'apply', result: result\.value, deleted: resultDeleted }\)/);
   assert.match(scriptMatch[1], /querySelectorAll\('\.splitter'\)/);
+  assert.match(source, /MERGE_DRAFTS_KEY/);
+  assert.match(source, /conflictFingerprint/);
+  assert.match(source, /changed outside this editor/);
+  assert.match(scriptMatch[1], /type: 'dirty'/);
+  assert.match(scriptMatch[1], /sourceLineHeight/);
 });
 
 test("parses ordinary and diff3 conflict markers without including marker lines", () => {

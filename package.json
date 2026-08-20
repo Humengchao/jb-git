@@ -1,7 +1,7 @@
 {
   "name": "jb-git",
-  "displayName": "JB Git",
-  "description": "An IntelliJ IDEA-inspired Git workspace for Visual Studio Code.",
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
   "version": "0.1.1",
   "publisher": "local",
   "license": "Apache-2.0",
@@ -28,7 +28,6 @@
     "idea"
   ],
   "activationEvents": [
-    "onStartupFinished",
     "workspaceContains:.git"
   ],
   "main": "./dist/extension.js",
@@ -342,57 +341,63 @@
       "editor/title": [
         {
           "command": "jbGit.blame",
-          "when": "resourceScheme == file",
+          "when": "resourceScheme == file && jbGit.hasRepository",
           "group": "navigation@80"
         },
         {
           "command": "jbGit.fileHistory",
-          "when": "resourceScheme == file",
+          "when": "resourceScheme == file && jbGit.hasRepository",
           "group": "navigation@81"
         }
       ],
-      "view/title": [
-        {
-          "command": "jbGit.refresh",
-          "when": "view == jbGit.toolWindow",
-          "group": "navigation@1"
-        },
-        {
-          "command": "jbGit.branchesPopup",
-          "when": "view == jbGit.toolWindow",
-          "group": "navigation@2"
-        },
-        {
-          "command": "jbGit.operationsPopup",
-          "when": "view == jbGit.toolWindow",
-          "group": "navigation@3"
-        }
+      "commandPalette": [
+        { "command": "jbGit.openDiff", "when": "false" },
+        { "command": "jbGit.showCommit", "when": "false" },
+        { "command": "jbGit.moveToChangelist", "when": "false" },
+        { "command": "jbGit.commitChangelist", "when": "false" },
+        { "command": "jbGit.applyShelf", "when": "false" },
+        { "command": "jbGit.deleteShelf", "when": "false" },
+        { "command": "jbGit.removeWorktree", "when": "false" },
+        { "command": "jbGit.updateSubmodule", "when": "false" },
+        { "command": "jbGit.removeRemote", "when": "false" },
+        { "command": "jbGit.setRemoteUrl", "when": "false" },
+        { "command": "jbGit.fetchRemote", "when": "false" },
+        { "command": "jbGit.pushRemote", "when": "false" },
+        { "command": "jbGit.applyStash", "when": "false" },
+        { "command": "jbGit.popStash", "when": "false" },
+        { "command": "jbGit.dropStash", "when": "false" },
+        { "command": "jbGit.stageChange", "when": "false" },
+        { "command": "jbGit.unstageChange", "when": "false" },
+        { "command": "jbGit.stageHunk", "when": "false" },
+        { "command": "jbGit.unstageHunk", "when": "false" },
+        { "command": "jbGit.discardChange", "when": "false" },
+        { "command": "jbGit.markResolved", "when": "false" }
       ]
     },
     "configuration": {
-      "title": "JB Git",
+      "title": "%configuration.title%",
       "properties": {
         "jbGit.gitPath": {
           "type": "string",
           "default": "git",
-          "description": "Path to the Git executable."
+          "description": "%configuration.gitPath%"
         },
         "jbGit.autoRefresh": {
           "type": "boolean",
           "default": true,
-          "description": "Refresh repository state when files or Git metadata change."
+          "description": "%configuration.autoRefresh%"
         },
         "jbGit.refreshDebounceMs": {
           "type": "number",
-          "default": 250,
+          "default": 600,
           "minimum": 50,
           "maximum": 5000,
-          "description": "Debounce interval for repository refreshes."
+          "description": "%configuration.refreshDebounceMs%"
         },
         "jbGit.confirmDiscard": {
           "type": "boolean",
           "default": true,
-          "description": "Ask for confirmation before discarding changes."
+          "description": "%configuration.confirmDiscard%"
         }
       }
     }
