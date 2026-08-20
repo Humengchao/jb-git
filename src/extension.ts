@@ -908,8 +908,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await runWithNotification(`Discarding ${node.change.path}`, () => manager.discard(node.repositoryRoot, [node.change.path]));
     }),
     vscode.commands.registerCommand("jbGit.resolveConflict", async (node?: ChangeNode) => {
-      if (!(await requireTrustedWorkspace()) || !node || !node.change.conflicted) return;
-      await openMergeConflictEditor(manager, mergeEditor, node);
+      if (!(await requireTrustedWorkspace())) return;
+      const target = node?.change.conflicted ? node : await pickConflict(manager);
+      if (!target) return;
+      await openMergeConflictEditor(manager, mergeEditor, target);
     }),
     vscode.commands.registerCommand("jbGit.markResolved", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node || !node.change.conflicted) return;
@@ -960,4 +962,26 @@ async function openMergeConflictEditor(
     await manager.resolveConflict(node.repositoryRoot, node.change.path, side.value);
     await manager.markResolved(node.repositoryRoot, [node.change.path]);
   });
+}
+
+async function pickConflict(manager: RepositoryManager): Promise<ChangeNode | undefined> {
+  const candidates = manager.all.flatMap((snapshot) => (snapshot.status?.changes ?? [])
+    .filter((change) => change.conflicted)
+    .map((change) => ({
+      label: change.path,
+      description: path.basename(snapshot.repository.info.rootPath),
+      detail: snapshot.repository.info.rootPath,
+      node: new ChangeNode(snapshot.repository.info.rootPath, change),
+    })));
+  if (candidates.length === 0) {
+    await vscode.window.showInformationMessage("There are no unresolved Git conflicts in this workspace.");
+    return undefined;
+  }
+  if (candidates.length === 1) return candidates[0].node;
+  return (await vscode.window.showQuickPick(candidates, {
+    title: "Open Merge Conflict Editor",
+    placeHolder: "Select a conflicted file",
+    matchOnDescription: true,
+    matchOnDetail: true,
+  }))?.node;
 }
