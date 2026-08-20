@@ -117,6 +117,9 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.equal(history[0].subject, "update");
   assert.equal(history[1].hash, initialRevision);
   assert.match(history[1].hash, /^[0-9a-f]{40}$/);
+  const internalRevision = git(root, "commit-tree", git(root, "write-tree"), "-m", "internal ref");
+  git(root, "update-ref", "refs/jb-git/internal", internalRevision);
+  assert.equal((await repository.log(10)).some((commit) => commit.hash === internalRevision), false);
   assert.deepEqual(await repository.commitFiles(revision), [{ status: "M", path: "file.txt" }]);
   assert.equal((await repository.logRef(revision, 10))[0].hash, revision);
   assert.equal((await repository.operationState()).kind, "none");

@@ -91,7 +91,8 @@ export class GitRepository {
   }
 
   public async log(limit = 50, filePath?: string, options?: Partial<GitLogOptions>): Promise<GitCommit[]> {
-    return this.readLog(["--all"], limit, filePath, options);
+    const head = await this.currentRevision();
+    return this.readLog(["--branches", "--remotes", "--tags", ...(head ? [head] : [])], limit, filePath, options);
   }
 
   public async logRef(ref: string, limit = 200, filePath?: string, options?: Partial<GitLogOptions>): Promise<GitCommit[]> {

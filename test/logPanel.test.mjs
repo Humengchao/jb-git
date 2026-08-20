@@ -24,6 +24,21 @@ test("wires context menus for branches, commits, and changed files", () => {
   assert.match(scriptMatch[1], /event\.key !== 'ContextMenu'/);
 });
 
+test("keeps context menus and filter popovers open across background state renders", () => {
+  assert.ok(scriptMatch);
+  const renderSource = scriptMatch[1].match(/function render\(\) \{([\s\S]*?)\n  }\n\n  function repositorySelect/);
+  assert.ok(renderSource);
+  assert.doesNotMatch(renderSource[1], /closeContextMenu/);
+  assert.doesNotMatch(scriptMatch[1], /addEventListener\('scroll'.*closeContextMenu/);
+  assert.match(scriptMatch[1], /addEventListener\('wheel'/);
+});
+
+test("does not render the removed five-button commit detail action strip", () => {
+  assert.ok(scriptMatch);
+  assert.doesNotMatch(scriptMatch[1], /detail-actions/);
+  assert.doesNotMatch(scriptMatch[1], /actions\.append\(button\('Show Diff'.*button\('Reset…'/);
+});
+
 test("uses one commit scroll area and a mouse-and-keyboard resizable details pane", () => {
   assert.ok(scriptMatch);
   assert.match(scriptMatch[1], /scroll\.append\(head, list\)/);

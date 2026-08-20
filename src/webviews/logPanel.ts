@@ -731,7 +731,6 @@ const logStyles = String.raw`
   .detail-meta { display: grid; grid-template-columns: 54px 1fr; gap: 4px 6px; color: var(--vscode-descriptionForeground); }
   .detail-meta strong { color: var(--vscode-foreground); font-weight: 400; overflow-wrap: anywhere; }
   .detail-body { margin-top: 9px; white-space: pre-wrap; line-height: 1.45; }
-  .detail-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
   .action { height: 25px; padding: 0 7px; border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .files { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .detail-splitter { position: relative; min-height: 9px; cursor: row-resize; background: transparent; outline: none; }
@@ -816,7 +815,6 @@ const logStyles = String.raw`
     .table-head > :nth-child(3), .table-head > :nth-child(4), .commit-row > :nth-child(3), .commit-row > :nth-child(4) { display: none; }
     .commit-details { padding: 8px; }
     .detail-meta { grid-template-columns: 44px 1fr; font-size: 11px; }
-    .detail-actions .action { padding: 0 5px; }
   }
   @media (max-width: 760px) { .filter-button .filter-value { display: none; } }
   @media (max-width: 650px) { .workspace { grid-template-columns: var(--branch-width) 9px minmax(260px, 1fr); } .details, .column-splitter[data-side="details"] { display: none; } }
@@ -848,7 +846,7 @@ const logScript = String.raw`
   const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; };
   const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = title; b.addEventListener('click', handler); return b; };
   const saveUiState = extra => { uiState = { ...uiState, ...extra }; vscode.setState(uiState); };
-  const selectToolTab = tab => { activeToolTab = tab; saveUiState({ activeToolTab: tab }); render(); };
+  const selectToolTab = tab => { closeContextMenu(); activeToolTab = tab; saveUiState({ activeToolTab: tab }); render(); };
   const keyboardActivate = (element, handler) => element.addEventListener('keydown', event => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault(); handler();
@@ -919,7 +917,7 @@ const logScript = String.raw`
   }
 
   function render() {
-    const saved = captureScroll(); closeContextMenu();
+    const saved = captureScroll();
     app.replaceChildren(); const root = node('div', 'root');
     const tabs = node('div', 'tool-tabs');
     const logTab = button('Log', 'Git Log', () => selectToolTab('log'), 'tool-tab' + (activeToolTab === 'log' ? ' active' : ''));
@@ -1447,9 +1445,6 @@ const logScript = String.raw`
     const meta = node('div', 'detail-meta');
     for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', new Date(commit.authoredAt).toLocaleString()], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
     details.append(meta); if (commit.body && commit.body !== commit.subject) details.append(node('div', 'detail-body', commit.body));
-    const actions = node('div', 'detail-actions');
-    actions.append(button('Show Diff', 'Open full patch', () => post('showPatch', { hash: commit.hash }), 'action'), button('Cherry-pick', 'Cherry-pick commit', () => post('cherryPick', { hash: commit.hash }), 'action'), button('Revert', 'Revert commit', () => post('revert', { hash: commit.hash }), 'action'), button('New Branch', 'Create branch here', () => post('newBranch', { hash: commit.hash }), 'action'), button('Reset…', 'Reset current branch here', () => post('reset', { hash: commit.hash }), 'action'));
-    details.append(actions);
     const files = node('div', 'files'); files.id = 'changed-files'; files.setAttribute('role', 'tree');
     files.append(node('div', 'pane-title', 'Changed Files (' + selection.files.length + ')'));
     const tree = node('div', 'file-tree-root'); tree.append(fileTree(selection.files, commit)); files.append(tree);
@@ -1769,7 +1764,8 @@ const logScript = String.raw`
     if (event.data.type === 'error') { const error = node('div', 'error', event.data.message); app.prepend(error); }
   });
   document.addEventListener('pointerdown', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); });
-  document.addEventListener('scroll', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, true);
+  document.addEventListener('wheel', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
+  document.addEventListener('touchmove', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
   document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(); });
   post('ready', { logOptions: { order: sortMode, firstParent, noMerges } }); render();
 `;
