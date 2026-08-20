@@ -204,6 +204,10 @@
         "title": "JB Git: Create Worktree"
       },
       {
+        "command": "jbGit.manageWorktrees",
+        "title": "JB Git: Manage Worktrees"
+      },
+      {
         "command": "jbGit.removeWorktree",
         "title": "JB Git: Remove Worktree"
       },
@@ -220,6 +224,10 @@
         "title": "JB Git: Update Submodule"
       },
       {
+        "command": "jbGit.manageSubmodules",
+        "title": "JB Git: Manage Submodules"
+      },
+      {
         "command": "jbGit.createTag",
         "title": "JB Git: Create Tag"
       },
@@ -230,6 +238,10 @@
       {
         "command": "jbGit.addRemote",
         "title": "JB Git: Add Remote"
+      },
+      {
+        "command": "jbGit.manageRemotes",
+        "title": "JB Git: Manage Remotes"
       },
       {
         "command": "jbGit.removeRemote",
@@ -250,6 +262,10 @@
       {
         "command": "jbGit.applyStash",
         "title": "JB Git: Apply Stash"
+      },
+      {
+        "command": "jbGit.manageStashes",
+        "title": "JB Git: Manage Stashes"
       },
       {
         "command": "jbGit.popStash",
@@ -358,19 +374,9 @@
         { "command": "jbGit.commitChangelist", "when": "false" },
         { "command": "jbGit.applyShelf", "when": "false" },
         { "command": "jbGit.deleteShelf", "when": "false" },
-        { "command": "jbGit.removeWorktree", "when": "false" },
-        { "command": "jbGit.updateSubmodule", "when": "false" },
         { "command": "jbGit.removeRemote", "when": "false" },
-        { "command": "jbGit.setRemoteUrl", "when": "false" },
         { "command": "jbGit.fetchRemote", "when": "false" },
         { "command": "jbGit.pushRemote", "when": "false" },
-        { "command": "jbGit.applyStash", "when": "false" },
-        { "command": "jbGit.popStash", "when": "false" },
-        { "command": "jbGit.dropStash", "when": "false" },
-        { "command": "jbGit.stageChange", "when": "false" },
-        { "command": "jbGit.unstageChange", "when": "false" },
-        { "command": "jbGit.stageHunk", "when": "false" },
-        { "command": "jbGit.unstageHunk", "when": "false" },
         { "command": "jbGit.discardChange", "when": "false" },
         { "command": "jbGit.markResolved", "when": "false" }
       ]

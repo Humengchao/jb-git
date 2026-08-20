@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { GitCommandError, GitRunner } from "./git/runner";
+import { GitCommandError, GitRunner, redactGitText } from "./git/runner";
 import { BranchNode, RepositoryNode } from "./views/repositoryTree";
 import { ChangeNode, HunkNode } from "./views/changesTree";
 import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
@@ -203,6 +203,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       { placeHolder: "Select a workspace folder" },
     ))?.rootPath;
   };
+  const pickChangeNode = async (mode: "staged" | "unstaged", rootPath?: string): Promise<ChangeNode | undefined> => {
+    const snapshot = await pickRepository(rootPath);
+    if (!snapshot?.status) return;
+    const changes = snapshot.status.changes.filter((change) => mode === "staged" ? change.staged : change.unstaged);
+    const selected = await vscode.window.showQuickPick(
+      changes.map((change) => ({ label: change.path, description: change.kind, change })),
+      { title: mode === "staged" ? "Staged Changes" : "Unstaged Changes", placeHolder: "Select a changed file", matchOnDescription: true },
+    );
+    return selected ? new ChangeNode(snapshot.repository.info.rootPath, selected.change, mode) : undefined;
+  };
+  const pickHunkNode = async (mode: "staged" | "unstaged", rootPath?: string): Promise<HunkNode | undefined> => {
+    const change = await pickChangeNode(mode, rootPath);
+    if (!change || change.change.conflicted || change.change.kind === "untracked") return;
+    const hunks = await manager.diffHunks(change.repositoryRoot, change.change.path, mode === "staged");
+    if (!hunks.length) {
+      await vscode.window.showInformationMessage(`No ${mode} text hunks were found in ${change.change.path}.`);
+      return;
+    }
+    const selected = await vscode.window.showQuickPick(
+      hunks.map((hunk, index) => ({
+        label: hunk.header,
+        description: hunk.lines.find((line) => line.startsWith("+") || line.startsWith("-"))?.slice(0, 100),
+        hunk,
+        index,
+      })),
+      { title: change.change.path, placeHolder: mode === "staged" ? "Select a hunk to unstage" : "Select a hunk to stage", matchOnDescription: true },
+    );
+    return selected ? new HunkNode(change.repositoryRoot, change.change.path, mode, selected.index, selected.hunk) : undefined;
+  };
 
   context.subscriptions.push(
     manager,
@@ -318,13 +347,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { label: "$(discard) Revert…", command: "jbGit.revert" },
         { label: "$(debug-restart) Reset HEAD…", command: "jbGit.reset" },
         { label: "Save work", kind: vscode.QuickPickItemKind.Separator },
-        { label: "$(archive) Stash Changes…", command: "jbGit.stash" },
+        { label: "$(archive) Manage Stashes…", command: "jbGit.manageStashes" },
         { label: "$(package) Shelve Changes…", command: "jbGit.createShelf" },
         { label: "$(file-code) Apply Patch…", command: "jbGit.applyPatch" },
         { label: "Repository", kind: vscode.QuickPickItemKind.Separator },
-        { label: "$(remote) Manage Remotes…", command: "jbGit.addRemote" },
-        { label: "$(repo-forked) Add Worktree…", command: "jbGit.createWorktree" },
-        { label: "$(file-submodule) Update Submodules", command: "jbGit.updateSubmodules" },
+        { label: "$(remote) Manage Remotes…", command: "jbGit.manageRemotes" },
+        { label: "$(repo-forked) Manage Worktrees…", command: "jbGit.manageWorktrees" },
+        { label: "$(file-submodule) Manage Submodules…", command: "jbGit.manageSubmodules" },
         { label: "$(tag) Create Tag…", command: "jbGit.createTag" },
         { label: "$(list-tree) Configure Sparse Checkout…", command: "jbGit.sparseCheckoutSet" },
         { label: "$(cloud-download) Pull LFS Objects", command: "jbGit.lfsPull" },
@@ -753,15 +782,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const newBranch = await vscode.window.showInputBox({ prompt: "Optional new branch name", placeHolder: "feature/worktree", validateInput: (value) => validateGitRefName(value, true) });
       await runWithNotification("Creating Git worktree", () => manager.addWorktree(first.repository.info.rootPath, worktreePath.trim(), ref?.trim() || undefined, newBranch?.trim() || undefined));
     }),
+    vscode.commands.registerCommand("jbGit.manageWorktrees", async (rootPath?: string) => {
+      const first = await pickRepository(rootPath);
+      if (!first) return;
+      const root = first.repository.info.rootPath;
+      const worktrees = await manager.worktrees(root);
+      const selected = await vscode.window.showQuickPick([
+        { label: "$(add) Create Worktree…", action: "create" as const },
+        { label: "$(clear-all) Prune Missing Worktrees", action: "prune" as const },
+        ...worktrees.map((worktree) => ({
+          label: `$(git-branch) ${worktree.branch ?? "detached HEAD"}`,
+          description: worktree.path,
+          detail: worktree.prunable ? "Prunable" : worktree.head ?? undefined,
+          action: "worktree" as const,
+          worktree,
+        })),
+      ], { title: "Git Worktrees", placeHolder: "Create, open, or remove a worktree", matchOnDescription: true, matchOnDetail: true });
+      if (!selected) return;
+      if (selected.action === "create") return void vscode.commands.executeCommand("jbGit.createWorktree", root);
+      if (selected.action === "prune") return void vscode.commands.executeCommand("jbGit.pruneWorktrees", root);
+      const action = await vscode.window.showQuickPick([
+        { label: "$(folder-opened) Open Worktree", action: "open" as const },
+        { label: "$(trash) Remove Worktree…", action: "remove" as const },
+      ], { title: selected.worktree.path, placeHolder: "Select a worktree action" });
+      if (action?.action === "open") await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(selected.worktree.path), { forceNewWindow: false });
+      if (action?.action === "remove") await vscode.commands.executeCommand("jbGit.removeWorktree", new WorktreeNode(root, selected.worktree));
+    }),
     vscode.commands.registerCommand("jbGit.removeWorktree", async (node?: WorktreeNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      if (!node) {
+        const first = await pickRepository();
+        if (!first) return;
+        const worktree = (await vscode.window.showQuickPick(
+          (await manager.worktrees(first.repository.info.rootPath))
+            .filter((item) => path.normalize(item.path) !== path.normalize(first.repository.info.rootPath))
+            .map((item) => ({ label: item.branch ?? "detached HEAD", description: item.path, item })),
+          { placeHolder: "Select a worktree to remove", matchOnDescription: true },
+        ))?.item;
+        if (!worktree) return;
+        node = new WorktreeNode(first.repository.info.rootPath, worktree);
+      }
       const answer = await vscode.window.showWarningMessage(`Remove worktree ${node.worktree.path}?`, { modal: true }, "Remove");
       if (answer !== "Remove") return;
       await runWithNotification("Removing Git worktree", () => manager.removeWorktree(node.repositoryRoot, node.worktree.path, node.worktree.prunable));
     }),
-    vscode.commands.registerCommand("jbGit.pruneWorktrees", async () => {
+    vscode.commands.registerCommand("jbGit.pruneWorktrees", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       await runWithNotification("Pruning Git worktrees", () => manager.pruneWorktrees(first.repository.info.rootPath));
     }),
@@ -772,8 +839,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await runWithNotification("Updating Git submodules", () => manager.updateSubmodules(first.repository.info.rootPath));
     }),
     vscode.commands.registerCommand("jbGit.updateSubmodule", async (node?: SubmoduleNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      if (!node) {
+        const first = await pickRepository();
+        if (!first) return;
+        const submodule = (await vscode.window.showQuickPick(
+          (await manager.submodules(first.repository.info.rootPath)).map((item) => ({ label: item.path, description: item.status, item })),
+          { placeHolder: "Select a submodule to update" },
+        ))?.item;
+        if (!submodule) return;
+        node = new SubmoduleNode(first.repository.info.rootPath, submodule);
+      }
       await runWithNotification(`Updating submodule ${node.submodule.path}`, () => manager.updateSubmodules(node.repositoryRoot, [node.submodule.path]));
+    }),
+    vscode.commands.registerCommand("jbGit.manageSubmodules", async (rootPath?: string) => {
+      const first = await pickRepository(rootPath);
+      if (!first) return;
+      const root = first.repository.info.rootPath;
+      const submodules = await manager.submodules(root);
+      if (!submodules.length) return void vscode.window.showInformationMessage("This repository has no Git submodules.");
+      const selected = await vscode.window.showQuickPick([
+        { label: "$(sync) Update All Submodules", action: "all" as const },
+        ...submodules.map((submodule) => ({ label: `$(repo) ${submodule.path}`, description: submodule.status, detail: submodule.url ? redactGitText(submodule.url) : submodule.oid, action: "one" as const, submodule })),
+      ], { title: "Git Submodules", placeHolder: "Select what to update", matchOnDescription: true, matchOnDetail: true });
+      if (selected?.action === "all") await vscode.commands.executeCommand("jbGit.updateSubmodules", root);
+      if (selected?.action === "one") await vscode.commands.executeCommand("jbGit.updateSubmodule", new SubmoduleNode(root, selected.submodule));
     }),
     vscode.commands.registerCommand("jbGit.createTag", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -806,6 +896,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!url?.trim()) return;
       await runWithNotification(`Adding remote ${name.trim()}`, () => manager.addRemote(first.repository.info.rootPath, name.trim(), url.trim()));
     }),
+    vscode.commands.registerCommand("jbGit.manageRemotes", async (rootPath?: string) => {
+      const first = await pickRepository(rootPath);
+      if (!first) return;
+      const root = first.repository.info.rootPath;
+      const selected = await vscode.window.showQuickPick([
+        { label: "$(add) Add Remote…", action: "add" as const },
+        ...(await manager.remotes(root)).map((remote) => ({ label: `$(remote) ${remote.name}`, description: redactGitText(remote.fetchUrl), action: "remote" as const, remote })),
+      ], { title: "Git Remotes", placeHolder: "Add or manage a remote", matchOnDescription: true });
+      if (!selected) return;
+      if (selected.action === "add") return void vscode.commands.executeCommand("jbGit.addRemote", root);
+      const action = await vscode.window.showQuickPick([
+        { label: "$(sync) Fetch", command: "jbGit.fetchRemote" },
+        { label: "$(cloud-upload) Push…", command: "jbGit.pushRemote" },
+        { label: "$(edit) Edit URL…", command: "jbGit.setRemoteUrl" },
+        { label: "$(trash) Remove…", command: "jbGit.removeRemote" },
+      ], { title: selected.remote.name, placeHolder: "Select a remote action" });
+      if (action) await vscode.commands.executeCommand(action.command, new RemoteNode(root, selected.remote));
+    }),
     vscode.commands.registerCommand("jbGit.removeRemote", async (node?: RemoteNode) => {
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(node?.repositoryRoot);
@@ -823,7 +931,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(node?.repositoryRoot);
       if (!first) return;
-      const remote = node?.remote ?? (await manager.remotes(first.repository.info.rootPath))[0];
+      const remote = node?.remote ?? (await vscode.window.showQuickPick(
+        (await manager.remotes(first.repository.info.rootPath)).map((item) => ({ label: item.name, description: redactGitText(item.fetchUrl), item })),
+        { placeHolder: "Select a remote to edit", matchOnDescription: true },
+      ))?.item;
       if (!remote) return;
       const kind = await vscode.window.showQuickPick(
         [{ label: "Fetch URL", push: false }, { label: "Push URL", push: true }],
@@ -871,18 +982,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await runWithNotification(`Pushing ${branch} to ${name}`, (signal) => manager.pushRemote(root, name, branch, mode.force, signal), true);
     }),
     vscode.commands.registerCommand("jbGit.applyStash", async (node?: StashNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      if (!node) {
+        const first = await pickRepository(); if (!first) return;
+        const entry = (await vscode.window.showQuickPick((await manager.stashes(first.repository.info.rootPath)).map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to apply" }))?.item;
+        if (!entry) return; node = new StashNode(first.repository.info.rootPath, entry);
+      }
       await runWithNotification(`Applying ${node.entry.ref}`, () => manager.applyStash(node.repositoryRoot, node.entry.ref));
     }),
     vscode.commands.registerCommand("jbGit.popStash", async (node?: StashNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      if (!node) {
+        const first = await pickRepository(); if (!first) return;
+        const entry = (await vscode.window.showQuickPick((await manager.stashes(first.repository.info.rootPath)).map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to pop" }))?.item;
+        if (!entry) return; node = new StashNode(first.repository.info.rootPath, entry);
+      }
       await runWithNotification(`Popping ${node.entry.ref}`, () => manager.applyStash(node.repositoryRoot, node.entry.ref, true));
     }),
     vscode.commands.registerCommand("jbGit.dropStash", async (node?: StashNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      if (!node) {
+        const first = await pickRepository(); if (!first) return;
+        const entry = (await vscode.window.showQuickPick((await manager.stashes(first.repository.info.rootPath)).map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to drop" }))?.item;
+        if (!entry) return; node = new StashNode(first.repository.info.rootPath, entry);
+      }
       const answer = await vscode.window.showWarningMessage(`Drop ${node.entry.ref}?`, { modal: true }, "Drop");
       if (answer !== "Drop") return;
       await runWithNotification(`Dropping ${node.entry.ref}`, () => manager.dropStash(node.repositoryRoot, node.entry.ref));
+    }),
+    vscode.commands.registerCommand("jbGit.manageStashes", async (rootPath?: string) => {
+      const first = await pickRepository(rootPath);
+      if (!first) return;
+      const root = first.repository.info.rootPath;
+      const selected = await vscode.window.showQuickPick([
+        { label: "$(add) Stash Current Changes…", action: "create" as const },
+        ...(await manager.stashes(root)).map((entry) => ({ label: `$(archive) ${entry.ref}`, description: entry.message, action: "stash" as const, entry })),
+      ], { title: "Git Stashes", placeHolder: "Create or manage a stash", matchOnDescription: true });
+      if (!selected) return;
+      if (selected.action === "create") return void vscode.commands.executeCommand("jbGit.stash", root);
+      const action = await vscode.window.showQuickPick([
+        { label: "$(check) Apply", command: "jbGit.applyStash" },
+        { label: "$(move) Pop", command: "jbGit.popStash" },
+        { label: "$(trash) Drop…", command: "jbGit.dropStash" },
+      ], { title: `${selected.entry.ref} · ${selected.entry.message}`, placeHolder: "Select a stash action" });
+      if (action) await vscode.commands.executeCommand(action.command, new StashNode(root, selected.entry));
     }),
     vscode.commands.registerCommand("jbGit.checkoutBranch", async (node?: BranchNode) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -896,19 +1039,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await runWithNotification(`Checking out ${selected.name}`, () => manager.checkout(snapshot.repository.info.rootPath, selected.name, selected.kind));
     }),
     vscode.commands.registerCommand("jbGit.stageChange", async (node?: ChangeNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      node ??= await pickChangeNode("unstaged");
+      if (!node) return;
       await runWithNotification(`Staging ${node.change.path}`, () => manager.stage(node.repositoryRoot, [node.change.path]));
     }),
     vscode.commands.registerCommand("jbGit.unstageChange", async (node?: ChangeNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      node ??= await pickChangeNode("staged");
+      if (!node) return;
       await runWithNotification(`Unstaging ${node.change.path}`, () => manager.unstage(node.repositoryRoot, [node.change.path]));
     }),
     vscode.commands.registerCommand("jbGit.stageHunk", async (node?: HunkNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      node ??= await pickHunkNode("unstaged");
+      if (!node) return;
       await runWithNotification(`Staging hunk in ${node.pathSpec}`, () => manager.stageHunk(node.repositoryRoot, node.pathSpec, node.hunk));
     }),
     vscode.commands.registerCommand("jbGit.unstageHunk", async (node?: HunkNode) => {
-      if (!(await requireTrustedWorkspace()) || !node) return;
+      if (!(await requireTrustedWorkspace())) return;
+      node ??= await pickHunkNode("staged");
+      if (!node) return;
       await runWithNotification(`Unstaging hunk in ${node.pathSpec}`, () => manager.unstageHunk(node.repositoryRoot, node.pathSpec, node.hunk));
     }),
     vscode.commands.registerCommand("jbGit.discardChange", async (node?: ChangeNode) => {
