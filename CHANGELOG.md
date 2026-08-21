@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5
+
+- Fix "Commit & Push" appearing to skip the push: the push was gated on the commit notification, which only settles when the toast is dismissed, so it could sit idle for as long as the notification stayed up.
+- Open generated diffs (double-clicking a commit, "Compare with Local", branch diffs) in a read-only editor. They used to open as untitled documents, which start dirty and made VS Code ask to save a patch that was only meant to be read; the virtual scheme is now a readonly file system rather than a text-document content provider.
+- Expand the branch context menu to the IntelliJ set: Push, Fetch, "Pull into <current> using Merge/Rebase", "Merge <branch> into <current>", "Rebase <current> onto <branch>", New Tag, Delete Tag, alongside the existing checkout, worktree, rename, and delete actions.
+- Give the branch column its own toolbar (fetch, pull, push, new branch, more actions) and a name filter for branches, remotes, and tags.
+- Mark decorations with per-kind icons: local branches, remote branches, and tags are now visually distinct in the commit list, and every ref of the selected commit is listed in the details pane.
+
 ## 0.1.4
 
 - Change the Marketplace publisher identity from the local development placeholder to `hmc` and prepare a distinct installable release for publishing.

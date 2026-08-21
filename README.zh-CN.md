@@ -43,6 +43,8 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 
 ### 分支与远端
 
+- 左侧 Branches 栏自带工具条（Fetch、Pull、Push、新建分支、更多操作）和按名称筛选输入框。
+- 分支右键菜单提供 IDEA 同款操作：Push、Fetch、`Pull into <当前分支> using Merge/Rebase`、`Merge <分支> into <当前分支>`、`Rebase <当前分支> onto <分支>`、新建标签和删除标签。
 - 创建、切换、重命名和删除本地分支。
 - 从本地分支、远端分支或标签创建新分支。
 - 以 detached HEAD 模式检出标签。
@@ -54,6 +56,8 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 ### 历史与高级操作
 
 - 查看仓库历史、文件历史和提交详情。
+- 本地分支、远端分支和标签使用不同图标区分，选中提交的全部引用会显示在右侧详情中。
+- 双击提交或使用 `Compare with Local` 打开的差异为只读编辑器，关闭时不会提示保存。
 - 对当前文件执行 Blame。
 - Merge、Rebase、Cherry-pick、Revert 和 Reset。
 - Continue、Abort 或 Skip 正在进行的 Git 操作。
@@ -91,13 +95,13 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 1. 在 VS Code 中打开扩展视图。
 2. 点击扩展视图右上角的 `...` 菜单。
 3. 选择“从 VSIX 安装…”。
-4. 选择项目生成的 `jb-git-0.1.4.vsix`。
+4. 选择项目生成的 `jb-git-0.1.5.vsix`。
 5. 根据提示重新加载 VS Code。
 
 也可以通过命令行安装：
 
 ```bash
-code --install-extension jb-git-0.1.4.vsix
+code --install-extension jb-git-0.1.5.vsix
 ```
 
 ### 版本号规则

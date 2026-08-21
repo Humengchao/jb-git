@@ -554,3 +554,34 @@ test("runs and resets a Git bisect session", async () => {
   await repository.bisectReset();
   assert.equal((await repository.operationState()).kind, "none");
 });
+
+test("pushes a branch that has no upstream and then pushes follow-up commits", async () => {
+  const base = mkdtempSync(join(tmpdir(), "jb-git-push-"));
+  const remote = join(base, "remote.git");
+  const work = join(base, "work");
+  // Not via git(): the helper configures autocrlf in cwd afterwards, and `base` is not a repository.
+  execFileSync("git", ["init", "--bare", "-q", "remote.git"], { cwd: base });
+  mkdirSync(work);
+  git(work, "init", "-q");
+  git(work, "config", "user.name", "JB Git Test");
+  git(work, "config", "user.email", "jb-git-test@example.invalid");
+  git(work, "remote", "add", "origin", remote);
+  writeFileSync(join(work, "a.txt"), "one\n");
+  git(work, "add", "a.txt");
+  git(work, "commit", "-qm", "first");
+
+  const repository = await discoverRepository(work, new GitRunner());
+  assert.ok(repository);
+  const branch = git(work, "branch", "--show-current");
+
+  // A fresh branch has no upstream; push must establish one instead of failing.
+  await repository.push();
+  assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(work, "rev-parse", "HEAD"));
+  assert.equal((await repository.status()).branch.upstream, `origin/${branch}`);
+
+  writeFileSync(join(work, "a.txt"), "two\n");
+  git(work, "add", "a.txt");
+  git(work, "commit", "-qm", "second");
+  await repository.push();
+  assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(work, "rev-parse", "HEAD"));
+});

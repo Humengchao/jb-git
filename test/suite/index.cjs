@@ -73,6 +73,34 @@ async function run() {
   assert.equal(changelists.listForFile(parent, "fresh.txt").id, feature.id, "new changes join the active changelist");
   changelists.dispose();
 
+  // Generated diffs must not open as untitled documents: those start dirty, so closing a
+  // patch the user only wanted to read pops VS Code's unsaved-changes prompt. Measured in
+  // this host: untitled -> isDirty true; a read-only file system -> isDirty false.
+  const { DiffContentProvider } = require(path.join(extension.extensionPath, "dist", "views", "diffProvider.js"));
+  assert.equal(DiffContentProvider.scheme, "jb-git-diff");
+  const probeScheme = "jb-git-diff-probe";
+  const diffProvider = new DiffContentProvider(probeScheme);
+  const providerRegistration = vscode.workspace.registerFileSystemProvider(probeScheme, diffProvider, {
+    isCaseSensitive: true,
+    isReadonly: true,
+  });
+  try {
+    const uri = diffProvider.registerFile(parent, "abc123", "abc123.diff", "diff --git a/a b/a\n");
+    const document = await vscode.workspace.openTextDocument(uri);
+    assert.equal(document.isUntitled, false, "diff documents must not be untitled");
+    assert.equal(document.isDirty, false, "a diff must never open dirty");
+    assert.equal(document.languageId, "diff", "the .diff name should select the diff language");
+    assert.equal(document.getText(), "diff --git a/a b/a\n");
+    // A readonly file system refuses every mutation, which is what keeps the editor read-only.
+    await assert.rejects(vscode.workspace.fs.writeFile(uri, Buffer.from("nope")), "writes must be refused");
+    await assert.rejects(vscode.workspace.fs.delete(uri), "deletes must be refused");
+    const untitled = await vscode.workspace.openTextDocument({ content: "x\n", language: "diff" });
+    assert.equal(untitled.isDirty, true, "the pattern this replaced is what caused the save prompt");
+  } finally {
+    providerRegistration.dispose();
+    diffProvider.dispose();
+  }
+
   const { ShelfStore } = require(path.join(extension.extensionPath, "dist", "shelves", "store.js"));
   const shelfRoot = await mkdtemp(path.join(tmpdir(), "jb-git-shelf-delete-"));
   const invalidPatch = path.join(shelfRoot, "patch-is-a-directory");

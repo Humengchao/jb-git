@@ -248,7 +248,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       for (const watchers of repositoryMetadataWatchers.values()) for (const watcher of watchers) watcher.dispose();
       repositoryMetadataWatchers.clear();
     } },
-    vscode.workspace.registerTextDocumentContentProvider("jb-git-diff", diffProvider),
+    vscode.workspace.registerFileSystemProvider(DiffContentProvider.scheme, diffProvider, {
+      isCaseSensitive: true,
+      isReadonly: true,
+    }),
     branchStatus,
     outputChannel,
     manager.onDidChange(() => {

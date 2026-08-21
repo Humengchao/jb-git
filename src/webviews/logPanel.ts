@@ -44,7 +44,7 @@ type LogMessage =
   | { type: "deleteShelf"; id: string }
   | { type: "runCommand"; command: string }
   | { type: "contextAction"; action: "copyRevision" | "createPatch" | "checkoutRevision" | "compareWithLocal" | "createTag"; hash: string }
-  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch"; ref: string; kind: GitBranch["kind"] }
+  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag"; ref: string; kind: GitBranch["kind"] }
   | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
   | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string };
 
@@ -73,6 +73,10 @@ const ALLOWED_COMMANDS = new Set([
   "jbGit.pull",
   "jbGit.push",
   "jbGit.stash",
+  "jbGit.createBranch",
+  "jbGit.pushRemote",
+  "jbGit.merge",
+  "jbGit.rebase",
   "jbGit.applyPatch",
   "jbGit.continueOperation",
   "jbGit.abortOperation",
@@ -428,7 +432,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
               return;
             }
             const content = await snapshot.repository.compareRefHistory(left.name, right.name);
-            await showDiffText(content);
+            await this.showReadOnlyDiff(root, `${left.name}...${right.name}`, content);
             return;
           }
           if (message.action === "deleteBranches") {
@@ -457,10 +461,58 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           if (message.action === "showRefDiff") {
             const diff = await snapshot.repository.diffAgainstWorkingTree(branch.name);
-            await showDiffText(diff);
+            await this.showReadOnlyDiff(root, `${branch.name} vs working tree`, diff);
             return;
           }
           if (!(await requireTrusted())) return;
+          if (message.action === "mergeRef" || message.action === "rebaseOntoRef" || message.action === "pullRefMerge" || message.action === "pullRefRebase") {
+            const head = snapshot.status?.branch.head;
+            if (!head) return void vscode.window.showWarningMessage("Check out a branch before merging or rebasing.");
+            if (branch.kind === "local" && branch.name === head) return;
+            // IDEA's "Pull into <current>" is a fetch followed by an integration of the
+            // remote-tracking ref, so run it as those two verified steps.
+            if (message.action === "pullRefMerge" || message.action === "pullRefRebase") {
+              const remote = await this.remoteForBranch(root, branch.name);
+              if (!remote) return void vscode.window.showWarningMessage(`Could not determine the remote for '${branch.name}'.`);
+              await this.withCancellableProgress(`Fetching ${remote}`, (signal) => this.manager.fetchRemote(root, remote, signal));
+            }
+            const rebase = message.action === "rebaseOntoRef" || message.action === "pullRefRebase";
+            if (rebase) await this.manager.rebase(root, branch.name);
+            else await this.manager.merge(root, branch.name);
+            return;
+          }
+          if (message.action === "fetchRef") {
+            const remote = await this.remoteForBranch(root, branch.name);
+            if (!remote) return void vscode.window.showWarningMessage(`Could not determine the remote for '${branch.name}'.`);
+            await this.withCancellableProgress(`Fetching ${remote}`, (signal) => this.manager.fetchRemote(root, remote, signal));
+            return;
+          }
+          if (message.action === "pushRef") {
+            if (branch.kind !== "local") return;
+            if (branch.name === snapshot.status?.branch.head) {
+              await this.withCancellableProgress(`Pushing ${branch.name}`, (signal) => this.manager.push(root, false, signal));
+              return;
+            }
+            const remotes = await this.manager.remotes(root);
+            const remote = remotes.find((item) => item.name === "origin") ?? (remotes.length === 1 ? remotes[0] : undefined);
+            if (!remote) return void vscode.window.showWarningMessage("This repository has no remote to push to.");
+            await this.withCancellableProgress(
+              `Pushing ${branch.name} to ${remote.name}`,
+              (signal) => this.manager.pushRemote(root, remote.name, branch.name, false, signal),
+            );
+            return;
+          }
+          if (message.action === "tagFromRef") {
+            const name = await vscode.window.showInputBox({ title: `New Tag at '${branch.name}'`, prompt: "Tag name", validateInput: (value) => validateGitRefName(value) });
+            if (name?.trim()) await this.manager.createTag(root, name.trim(), branch.name);
+            return;
+          }
+          if (message.action === "deleteTag") {
+            if (branch.kind !== "tag") return;
+            const confirmed = await vscode.window.showWarningMessage(`Delete tag '${branch.name}'?`, { modal: true }, "Delete");
+            if (confirmed === "Delete") await this.manager.deleteTag(root, branch.name);
+            return;
+          }
           if (message.action === "newBranchFromRef") {
             const name = await vscode.window.showInputBox({ title: `New Branch from '${branch.name}'`, prompt: "Branch name", validateInput: (value) => validateGitRefName(value) });
             if (name?.trim()) await this.manager.createBranch(root, name.trim(), branch.name);
@@ -553,7 +605,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           return;
         }
         if (message.action === "compareWithLocal") {
-          await showDiffText(await snapshot.repository.diffAgainstWorkingTree(commit.hash));
+          const diff = await snapshot.repository.diffAgainstWorkingTree(commit.hash);
+          await this.showReadOnlyDiff(root, `${commit.hash.slice(0, 12)} vs local`, diff);
           return;
         }
         if (!(await requireTrusted())) return;
@@ -635,8 +688,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "showPatch") {
         if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
         const patch = await snapshot.repository.showCommit(message.hash);
-        const document = await vscode.workspace.openTextDocument({ content: patch, language: "diff" });
-        await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+        await this.showReadOnlyDiff(root, message.hash.slice(0, 12), patch);
         return;
       }
       if (message.type === "openCommitFile") {
@@ -664,16 +716,20 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           signoff: message.signoff,
           noVerify: message.noVerify,
         });
-        await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
+        // Never await a notification here: showInformationMessage only settles once the
+        // toast is dismissed, which used to stall the push for as long as it stayed up.
         if (message.push) {
           await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: "Pushing Git commits", cancellable: true },
+            { location: vscode.ProgressLocation.Notification, title: `Pushing ${revision.slice(0, 12)}`, cancellable: true },
             async (_progress, token) => {
               const controller = new AbortController();
               const registration = token.onCancellationRequested(() => controller.abort());
               try { await this.manager.push(root, false, controller.signal); } finally { registration.dispose(); }
             },
           );
+          void vscode.window.showInformationMessage(`Committed ${revision.slice(0, 12)} and pushed it.`);
+        } else {
+          void vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
         }
         await this.view?.webview.postMessage({ type: "committed" });
         return;
@@ -800,6 +856,37 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     for (const disposable of this.disposables.splice(0)) disposable.dispose();
   }
 
+  /** Resolves the remote a remote-tracking branch belongs to, longest name first so `origin/sub/main` beats `origin`. */
+  private async remoteForBranch(root: string, branchName: string): Promise<string | undefined> {
+    const remotes = await this.manager.remotes(root);
+    return [...remotes]
+      .sort((left, right) => right.name.length - left.name.length)
+      .find((remote) => branchName.startsWith(`${remote.name}/`))?.name
+      ?? (remotes.length === 1 ? remotes[0].name : undefined);
+  }
+
+  private async withCancellableProgress(title: string, operation: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title, cancellable: true },
+      async (_progress, token) => {
+        const controller = new AbortController();
+        const registration = token.onCancellationRequested(() => controller.abort());
+        try { await operation(controller.signal); } finally { registration.dispose(); }
+      },
+    );
+  }
+
+  /**
+   * Shows generated diff text in a read-only editor. An untitled document would open
+   * dirty and make VS Code ask to save a patch the user only wanted to read.
+   */
+  private async showReadOnlyDiff(root: string, name: string, content: string): Promise<void> {
+    const fileName = `${name.replace(/[^\w.@-]+/g, "-").replace(/^-+|-+$/g, "") || "changes"}.diff`;
+    const uri = this.diffProvider.registerFile(root, name, fileName, content);
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+  }
+
   private async openCommitFile(repository: NonNullable<ReturnType<RepositoryManager["snapshot"]>>["repository"], commit: GitCommit, file: GitCommitFile): Promise<void> {
     const root = repository.info.rootPath;
     const oldPath = file.originalPath ?? file.path;
@@ -859,11 +946,6 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function showDiffText(content: string): Promise<void> {
-  const document = await vscode.workspace.openTextDocument({ content, language: "diff" });
-  await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
-}
-
 async function savePatch(root: string, name: string, content: string): Promise<void> {
   const target = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.join(root, name)), filters: { "Patch files": ["patch"] } });
   if (target) await vscode.workspace.fs.writeFile(target, Buffer.from(content, "utf8"));
@@ -901,6 +983,10 @@ const logStyles = String.raw`
   .branches { overscroll-behavior: contain; scrollbar-gutter: stable; }
   .pane-title { position: sticky; top: 0; z-index: 2; height: 28px; display: flex; align-items: center; padding: 0 9px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
   .branch-section { padding: 5px 0 2px; }
+  .pane-action { width: 21px; height: 21px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 3px; color: var(--vscode-icon-foreground); font-size: 12px; font-weight: 400; }
+  .pane-action:hover { background: var(--vscode-toolbar-hoverBackground); }
+  .pane-action:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .branch-filter { width: calc(100% - 12px); height: 23px; margin: 5px 6px 3px; padding: 0 6px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 3px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font-size: 11px; }
   .section-title { height: 23px; display: flex; align-items: center; padding: 0 9px; color: var(--vscode-descriptionForeground); font-weight: 600; }
   .branch-row { height: 25px; width: 100%; display: flex; align-items: center; gap: 6px; padding: 0 9px 0 16px; text-align: left; white-space: nowrap; }
   .branch-row:hover { background: var(--vscode-list-hoverBackground); }
@@ -932,8 +1018,17 @@ const logStyles = String.raw`
   .subject-cell { height: 27px; display: flex; align-items: center; gap: 5px; padding-left: 0 !important; }
   canvas { flex: none; width: 72px; height: 27px; }
   canvas.graph-interactive { cursor: pointer; }
-  .refs { display: flex; gap: 3px; flex: none; max-width: 180px; overflow: hidden; }
-  .ref { padding: 1px 5px; border-radius: 8px; background: color-mix(in srgb, var(--vscode-charts-blue) 24%, transparent); color: var(--vscode-foreground); font-size: 10px; }
+  .refs { display: flex; gap: 3px; flex: none; max-width: 190px; overflow: hidden; }
+  .ref { display: inline-flex; align-items: center; gap: 3px; max-width: 132px; padding: 1px 6px 1px 4px; border-radius: 8px; background: color-mix(in srgb, var(--vscode-charts-blue) 24%, transparent); color: var(--vscode-foreground); font-size: 10px; }
+  .ref-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ref-icon { display: flex; flex: none; }
+  .ref-icon svg { width: 10px; height: 10px; }
+  .ref-remote { background: color-mix(in srgb, var(--vscode-charts-purple) 24%, transparent); }
+  .ref-tag { background: color-mix(in srgb, var(--vscode-charts-yellow) 30%, transparent); }
+  .ref-head { box-shadow: inset 0 0 0 1px var(--vscode-charts-green); font-weight: 600; }
+  .detail-refs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .detail-refs .ref { max-width: none; padding: 2px 8px 2px 6px; font-size: 11px; }
+  .detail-refs .ref-icon svg { width: 11px; height: 11px; }
   .subject { overflow: hidden; text-overflow: ellipsis; }
   .muted { color: var(--vscode-descriptionForeground); }
   .details { --message-height: 160px; display: grid; grid-template-rows: minmax(70px, 1fr) 9px var(--message-height); overflow: hidden; }
@@ -1058,6 +1153,7 @@ const logScript = String.raw`
   let state = { repositories: [], branches: [], commits: [] };
   let uiState = vscode.getState() || {};
   let search = uiState.search || '';
+  let branchFilter = uiState.branchFilter || '';
   let activeToolTab = uiState.activeToolTab || 'log';
   let selectedBranchKeys = new Set(uiState.selectedBranchKeys || []);
   let authorFilter = uiState.authorFilter || '';
@@ -1695,27 +1791,70 @@ const logScript = String.raw`
       ];
     }
     const kind = branch.kind;
-    return [
-      { icon: '+', label: "New Branch from '" + branch.name + "'…", run: () => post('contextAction', { action: 'newBranchFromRef', ref: branch.name, kind: branch.kind }) },
-      { icon: '↔', label: 'Show Diff with Working Tree', run: () => post('contextAction', { action: 'showRefDiff', ref: branch.name, kind: branch.kind }) },
-      { icon: '▣', label: "New Worktree from '" + branch.name + "'…", run: () => post('contextAction', { action: 'createWorktreeFromRef', ref: branch.name, kind: branch.kind }) },
+    const current = state.branch;
+    const isCurrent = kind === 'local' && branch.name === current;
+    const into = current ? "'" + current + "'" : 'current branch';
+    const act = action => () => post('contextAction', { action, ref: branch.name, kind: branch.kind });
+    const items = [
+      { icon: '✓', label: 'Checkout', disabled: isCurrent, run: () => post('checkout', { name: branch.name, kind: branch.kind }) },
+      { icon: '+', label: "New Branch from '" + branch.name + "'…", run: act('newBranchFromRef') },
       { separator: true },
-      { icon: '✓', label: 'Checkout', disabled: kind === 'local' && branch.name === state.branch, run: () => post('checkout', { name: branch.name, kind: branch.kind }) },
-      { icon: '⧉', label: 'Copy Branch Name', run: () => post('contextAction', { action: 'copyBranch', ref: branch.name, kind: branch.kind }) },
-      { separator: true },
-      { icon: '✎', label: 'Rename…', disabled: kind !== 'local', run: () => post('contextAction', { action: 'renameBranch', ref: branch.name, kind: branch.kind }) },
-      { icon: '×', label: 'Delete…', disabled: kind !== 'local' || branch.name === state.branch, run: () => post('contextAction', { action: 'deleteBranch', ref: branch.name, kind: branch.kind }) },
     ];
+    if (kind === 'local') items.push({ icon: '↑', label: isCurrent ? 'Push…' : "Push '" + branch.name + "'…", run: act('pushRef') });
+    if (kind === 'remote') items.push(
+      { icon: '↓', label: 'Fetch', run: act('fetchRef') },
+      { icon: '⇓', label: 'Pull into ' + into + ' using Merge', disabled: !current, run: act('pullRefMerge') },
+      { icon: '⇓', label: 'Pull into ' + into + ' using Rebase', disabled: !current, run: act('pullRefRebase') },
+    );
+    // Merging or rebasing the checked-out branch onto itself is meaningless, so leave it out
+    // entirely instead of showing a disabled self-referencing entry.
+    if (!isCurrent) items.push(
+      { icon: '⇤', label: 'Merge ' + branch.name + ' into ' + into, disabled: !current, run: act('mergeRef') },
+      { icon: '⇧', label: 'Rebase ' + into + ' onto ' + branch.name, disabled: !current, run: act('rebaseOntoRef') },
+    );
+    items.push(
+      { separator: true },
+      { icon: '↔', label: 'Show Diff with Working Tree', run: act('showRefDiff') },
+      { icon: '◇', label: "New Tag at '" + branch.name + "'…", run: act('tagFromRef') },
+      { icon: '▣', label: "New Worktree from '" + branch.name + "'…", run: act('createWorktreeFromRef') },
+      { icon: '⧉', label: kind === 'tag' ? 'Copy Tag Name' : 'Copy Branch Name', run: act('copyBranch') },
+      { separator: true },
+    );
+    if (kind === 'tag') items.push({ icon: '×', label: 'Delete Tag…', run: act('deleteTag') });
+    else items.push(
+      { icon: '✎', label: 'Rename…', disabled: kind !== 'local', run: act('renameBranch') },
+      { icon: '×', label: 'Delete…', disabled: kind !== 'local' || isCurrent, run: act('deleteBranch') },
+    );
+    return items;
   }
 
   function branchPane() {
-    const pane = node('aside', 'pane branches'); pane.id = 'branch-pane'; pane.setAttribute('role', 'listbox'); pane.setAttribute('aria-label', 'Branches'); pane.setAttribute('aria-multiselectable', 'true'); pane.append(node('div', 'pane-title', 'Branches'));
+    const pane = node('aside', 'pane branches'); pane.id = 'branch-pane'; pane.setAttribute('role', 'listbox'); pane.setAttribute('aria-label', 'Branches'); pane.setAttribute('aria-multiselectable', 'true');
+    const title = node('div', 'pane-title'); title.append(node('span', '', 'Branches'), node('span', 'spacer'));
+    title.append(
+      button('↓', 'Fetch all remotes', () => post('runCommand', { command: 'jbGit.fetch' }), 'pane-action'),
+      button('⇓', 'Pull into the current branch', () => post('runCommand', { command: 'jbGit.pull' }), 'pane-action'),
+      button('↑', 'Push the current branch', () => post('runCommand', { command: 'jbGit.push' }), 'pane-action'),
+      button('+', 'New branch', () => post('runCommand', { command: 'jbGit.createBranch' }), 'pane-action'),
+      button('⋮', 'More Git actions', () => post('runCommand', { command: 'jbGit.operationsPopup' }), 'pane-action'),
+    );
+    pane.append(title);
+    const filter = node('input', 'branch-filter'); filter.id = 'branch-filter'; filter.type = 'search'; filter.placeholder = t('Filter branches'); filter.value = branchFilter;
+    filter.setAttribute('aria-label', 'Filter branches, remotes and tags by name');
+    filter.addEventListener('input', () => { branchFilter = filter.value; saveUiState({ branchFilter }); refreshBranchPane(); });
+    pane.append(filter);
+    const needle = branchFilter.trim().toLowerCase();
+    const matches = branch => !needle || branch.name.toLowerCase().includes(needle);
     const all = button('All', 'Show all branches', () => { setBranchSelection([]); post('selectRef', {}); }, 'branch-row' + (!state.selectedRef && !selectedBranchKeys.size ? ' active' : ''));
     all.dataset.branchAll = '1';
     pane.append(all);
+    let shown = 0;
     for (const [kind, title] of [['local','Local'], ['remote','Remote'], ['tag','Tags']]) {
+      const visible = (state.branches || []).filter(item => item.kind === kind && matches(item));
+      if (!visible.length) continue;
+      shown += visible.length;
       const section = node('section', 'branch-section'); section.append(node('div', 'section-title', title));
-      for (const branch of (state.branches || []).filter(item => item.kind === kind)) {
+      for (const branch of visible) {
         const key = branchKey(branch); const selected = selectedBranchKeys.has(key);
         const row = button(branch.name, 'Filter by ' + branch.name + ' (Command/Ctrl-click to select multiple)', event => {
           if (event.metaKey || event.ctrlKey) {
@@ -1731,8 +1870,19 @@ const logScript = String.raw`
       }
       pane.append(section);
     }
+    if (!shown && needle) pane.append(node('div', 'empty', 'No branch matches the filter'));
     requestAnimationFrame(() => setupRovingRows(pane, '.branch-row'));
     return pane;
+  }
+
+  /** Re-renders only the branch column so typing in its filter cannot disturb the rest of the layout. */
+  function refreshBranchPane() {
+    const existing = document.getElementById('branch-pane');
+    if (!existing) return;
+    const replacement = branchPane();
+    existing.replaceWith(replacement);
+    const input = replacement.querySelector('.branch-filter');
+    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
   }
 
   function setupRovingRows(container, selector) {
@@ -1936,8 +2086,9 @@ const logScript = String.raw`
       row.tabIndex = selected || (!currentHash && index === 0) ? 0 : -1; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
       row.setAttribute('aria-label', (commit.subject || 'No subject') + ', ' + commit.author + ', ' + formatDate(commit.authoredAt) + ', ' + commit.hash.slice(0, 8));
       const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(virtualGraph[index]); canvas.title = 'Click a graph line to select or collapse its series'; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
-      const refs = node('div', 'refs'); for (const ref of (commit.refs || []).slice(0, 2)) refs.append(node('span', 'ref', shortRef(ref)));
-      if ((commit.refs || []).length > 2) { const more = node('span', 'ref', '+' + String(commit.refs.length - 2)); more.title = commit.refs.slice(2).map(shortRef).join('\n'); refs.append(more); }
+      const ordered = orderedRefs(commit.refs);
+      const refs = node('div', 'refs'); for (const ref of ordered.slice(0, 2)) refs.append(refChip(ref));
+      if (ordered.length > 2) { const more = node('span', 'ref', '+' + String(ordered.length - 2)); more.title = ordered.slice(2).map(shortRef).join('\n'); refs.append(more); }
       subject.append(refs, node('span', 'subject', commit.subject || '(no subject)'));
       row.append(subject, node('div', '', commit.author), node('div', 'muted', formatDate(commit.authoredAt)), node('div', 'muted', commit.hash.slice(0, 8)));
       const select = () => {
@@ -2036,6 +2187,11 @@ const logScript = String.raw`
     const commit = selection.commit; const details = node('div', 'commit-details');
     details.id = 'commit-details';
     details.append(node('div', 'detail-subject', commit.subject || '(no subject)'));
+    if ((commit.refs || []).length) {
+      const refs = node('div', 'detail-refs');
+      for (const ref of orderedRefs(commit.refs)) refs.append(refChip(ref));
+      details.append(refs);
+    }
     const meta = node('div', 'detail-meta');
     for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', new Date(commit.authoredAt).toLocaleString()], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
     details.append(meta); if (commit.body && commit.body !== commit.subject) details.append(node('div', 'detail-body', commit.body));
@@ -2354,6 +2510,42 @@ const logScript = String.raw`
   }
 
   const shortRef = ref => ref.replace(/^HEAD -> /, '').replace(/^tag: /, '');
+
+  const refIconMarkup = {
+    tag: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8.6 1.5H13.9a.6.6 0 0 1 .6.6v5.3a1 1 0 0 1-.3.7l-6 6a1 1 0 0 1-1.4 0L1.6 9.1a1 1 0 0 1 0-1.4l6-6a1 1 0 0 1 .7-.3z" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11.3" cy="4.7" r="1.15" fill="currentColor"/></svg>',
+    local: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.2" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4.5" cy="12.8" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11.5" cy="3.2" r="1.7" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 4.9v6.2M11.5 4.9v1.4a2.6 2.6 0 0 1-2.6 2.6H7.1a2.6 2.6 0 0 0-2.6 2.6" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
+    remote: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M1.9 8h12.2M8 1.9c1.9 2.1 1.9 10.1 0 12.2M8 1.9c-1.9 2.1-1.9 10.1 0 12.2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
+  };
+
+  /** Splits a git decoration such as 'HEAD -> main' or 'tag: v1.2' into a kind and a name. */
+  function refInfo(ref) {
+    const raw = String(ref).trim();
+    if (raw.startsWith('tag: ')) return { kind: 'tag', name: raw.slice(5).trim(), head: false };
+    if (raw.startsWith('HEAD -> ')) return { kind: 'local', name: raw.slice(8).trim(), head: true };
+    if (raw === 'HEAD') return { kind: 'local', name: 'HEAD', head: true };
+    const known = (state.branches || []).find(branch => branch.name === raw);
+    if (known) return { kind: known.kind, name: raw, head: false };
+    return { kind: raw.includes('/') ? 'remote' : 'local', name: raw, head: false };
+  }
+
+  /**
+   * Orders decorations so the current branch, then tags, stay visible: with limited row width a
+   * remote branch that merely mirrors a local one is the least informative chip to drop.
+   */
+  const refPriority = info => info.head ? 0 : info.kind === 'tag' ? 1 : info.kind === 'local' ? 2 : 3;
+  const orderedRefs = refs => [...(refs || [])]
+    .map(ref => ({ ref, info: refInfo(ref) }))
+    .sort((left, right) => refPriority(left.info) - refPriority(right.info))
+    .map(item => item.ref);
+
+  function refChip(ref) {
+    const info = refInfo(ref);
+    const chip = node('span', 'ref ref-' + info.kind + (info.head ? ' ref-head' : ''));
+    const icon = node('span', 'ref-icon'); icon.innerHTML = refIconMarkup[info.kind] || refIconMarkup.local;
+    chip.append(icon, node('span', 'ref-name', info.name));
+    chip.title = (info.kind === 'tag' ? 'Tag' : info.kind === 'remote' ? 'Remote branch' : info.head ? 'Current branch' : 'Local branch') + ' ' + info.name;
+    return chip;
+  }
   const formatDate = value => { const date = new Date(value); const now = new Date(); return date.toDateString() === now.toDateString() ? date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : date.toLocaleDateString(); };
   function updateSelectionWithoutRerender() {
     const selectedHash = state.selection?.commit.hash;

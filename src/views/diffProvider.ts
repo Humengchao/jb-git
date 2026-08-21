@@ -2,18 +2,31 @@ import * as vscode from "vscode";
 import { ChangeNode } from "./nodes";
 import { RepositoryManager } from "../repositoryManager";
 
-export class DiffContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
-  private readonly contents = new Map<string, string>();
+/**
+ * Serves Git revisions as a read-only file system.
+ *
+ * A `TextDocumentContentProvider` looks read-only but still accepts edits, so its documents
+ * go dirty and VS Code asks to save a diff the user only wanted to read. Registering a file
+ * system with `isReadonly` makes the editor refuse edits outright.
+ */
+export class DiffContentProvider implements vscode.FileSystemProvider, vscode.Disposable {
+  public static readonly scheme = "jb-git-diff";
+  private readonly contents = new Map<string, Uint8Array>();
+  private readonly emitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
+  public readonly onDidChangeFile = this.emitter.event;
   private sequence = 0;
   private readonly closeRegistration = vscode.workspace.onDidCloseTextDocument((document) => {
-    if (document.uri.scheme === "jb-git-diff") this.contents.delete(document.uri.toString());
+    if (document.uri.scheme === this.scheme) this.contents.delete(document.uri.toString());
   });
+
+  /** The scheme is injectable so tests can register a probe alongside the activated extension. */
+  public constructor(private readonly scheme: string = DiffContentProvider.scheme) {}
 
   public registerFile(repositoryRoot: string, label: string, filePath: string, content: string): vscode.Uri {
     const id = ++this.sequence;
     const normalizedPath = filePath.replaceAll("\\", "/").replace(/^\/+/, "");
     const uri = vscode.Uri.from({
-      scheme: "jb-git-diff",
+      scheme: this.scheme,
       authority: "revision",
       path: `/${id}/${normalizedPath}`,
       query: `repository=${encodeURIComponent(repositoryRoot)}&label=${encodeURIComponent(label)}`,
@@ -23,7 +36,7 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider, 
   }
 
   private remember(uri: vscode.Uri, content: string): void {
-    this.contents.set(uri.toString(), content);
+    this.contents.set(uri.toString(), Buffer.from(content, "utf8"));
     while (this.contents.size > 100) {
       const open = new Set(vscode.workspace.textDocuments.map((document) => document.uri.toString()));
       const oldest = [...this.contents.keys()].find((key) => !open.has(key));
@@ -32,12 +45,59 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider, 
     }
   }
 
-  public provideTextDocumentContent(uri: vscode.Uri): string {
-    return this.contents.get(uri.toString()) ?? "";
+  public stat(uri: vscode.Uri): vscode.FileStat {
+    const content = this.contents.get(uri.toString());
+    if (content) {
+      return { type: vscode.FileType.File, ctime: 0, mtime: 0, size: content.byteLength, permissions: vscode.FilePermission.Readonly };
+    }
+    const prefix = `${uri.toString()}/`;
+    if ([...this.contents.keys()].some((key) => key.startsWith(prefix))) {
+      return { type: vscode.FileType.Directory, ctime: 0, mtime: 0, size: 0, permissions: vscode.FilePermission.Readonly };
+    }
+    throw vscode.FileSystemError.FileNotFound(uri);
+  }
+
+  public readFile(uri: vscode.Uri): Uint8Array {
+    const content = this.contents.get(uri.toString());
+    if (!content) throw vscode.FileSystemError.FileNotFound(uri);
+    return content;
+  }
+
+  public readDirectory(uri: vscode.Uri): Array<[string, vscode.FileType]> {
+    const prefix = `${uri.toString()}/`;
+    const entries = new Map<string, vscode.FileType>();
+    for (const key of this.contents.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      const [segment, ...rest] = key.slice(prefix.length).split("/");
+      entries.set(segment, rest.length ? vscode.FileType.Directory : vscode.FileType.File);
+    }
+    return [...entries];
+  }
+
+  public watch(): vscode.Disposable {
+    // Revisions are immutable snapshots, so there is nothing to watch.
+    return new vscode.Disposable(() => undefined);
+  }
+
+  public createDirectory(uri: vscode.Uri): void {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+
+  public writeFile(uri: vscode.Uri): void {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+
+  public delete(uri: vscode.Uri): void {
+    throw vscode.FileSystemError.NoPermissions(uri);
+  }
+
+  public rename(uri: vscode.Uri): void {
+    throw vscode.FileSystemError.NoPermissions(uri);
   }
 
   public dispose(): void {
     this.closeRegistration.dispose();
+    this.emitter.dispose();
     this.contents.clear();
   }
 }

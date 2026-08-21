@@ -155,3 +155,73 @@ test("keeps merge lanes bounded and replaces collapsed linear history with a dot
   assert.equal(collapsed.dottedEdges.has("a>e"), true);
   assert.deepEqual(collapsed.parents.get("a"), ["e"]);
 });
+
+test("opens generated diffs read-only instead of dirty untitled editors", () => {
+  // An untitled document opens dirty, so closing a patch the user only wanted to read
+  // pops VS Code's unsaved-changes prompt.
+  assert.doesNotMatch(source, /openTextDocument\(\{\s*content/);
+  assert.doesNotMatch(source, /showDiffText/);
+  assert.match(source, /private async showReadOnlyDiff\(root: string, name: string, content: string\)/);
+  // The virtual scheme must be a readonly file system; a TextDocumentContentProvider still
+  // lets the editor accept typing.
+  const extensionSource = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(extensionSource, /registerTextDocumentContentProvider/);
+  assert.match(extensionSource, /registerFileSystemProvider\(DiffContentProvider\.scheme, diffProvider, \{\s*isCaseSensitive: true,\s*isReadonly: true,/);
+  // Anchor on each handler, not the message-type union, so the assertion covers real call sites.
+  for (const anchor of ['message.type === "showPatch"', 'message.action === "compareWithLocal"', 'message.action === "showRefDiff"', "compareRefHistory("]) {
+    const start = source.indexOf(anchor);
+    assert.ok(start > 0, `${anchor} should exist`);
+    assert.match(source.slice(start, start + 500), /this\.showReadOnlyDiff\(/, `${anchor} should use the read-only editor`);
+  }
+});
+
+test("pushes without waiting for the commit notification to be dismissed", () => {
+  const handler = source.match(/if \(message\.type === "commit"\) \{([\s\S]*?)type: "committed"/);
+  assert.ok(handler);
+  // showInformationMessage only settles once the toast closes, so awaiting it here
+  // used to delay the push until the notification went away.
+  assert.doesNotMatch(handler[1], /await vscode\.window\.showInformationMessage/);
+  assert.match(handler[1], /void vscode\.window\.showInformationMessage/);
+  assert.ok(handler[1].indexOf("manager.push") < handler[1].indexOf("void vscode.window.showInformationMessage(`Committed"));
+});
+
+test("offers IntelliJ branch operations from the branch context menu", () => {
+  assert.ok(scriptMatch);
+  const menu = scriptMatch[1].match(/function branchContextItems\(branch\) \{([\s\S]*?)\r?\n  }/);
+  assert.ok(menu);
+  for (const action of ["pushRef", "mergeRef", "rebaseOntoRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]) {
+    assert.match(menu[1], new RegExp(`act\\('${action}'\\)`), `${action} should be reachable`);
+  }
+  assert.match(menu[1], /Merge ' \+ branch\.name \+ ' into '/);
+  assert.match(menu[1], /Rebase ' \+ into \+ ' onto '/);
+  // Every new action needs a handler on the extension side.
+  for (const action of ["pushRef", "mergeRef", "rebaseOntoRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]) {
+    assert.match(source, new RegExp(`message\\.action === "${action}"`), `${action} should be handled`);
+  }
+});
+
+test("gives the branch column its own toolbar and name filter", () => {
+  assert.ok(scriptMatch);
+  const pane = scriptMatch[1].match(/function branchPane\(\) \{([\s\S]*?)\r?\n  }/);
+  assert.ok(pane);
+  for (const command of ["jbGit.fetch", "jbGit.pull", "jbGit.push", "jbGit.createBranch"]) {
+    assert.match(pane[1], new RegExp(`command: '${command}'`), `${command} should be on the branch toolbar`);
+    assert.match(source, new RegExp(`"${command}"`), `${command} must be allowed from the webview`);
+  }
+  assert.match(pane[1], /branch-filter/);
+  assert.match(scriptMatch[1], /function refreshBranchPane\(\)/);
+});
+
+test("marks branch, remote, and tag decorations with distinct icons in rows and details", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  assert.match(script, /refIconMarkup = \{[\s\S]*tag:[\s\S]*local:[\s\S]*remote:/);
+  assert.match(script, /raw\.startsWith\('tag: '\)/);
+  assert.match(script, /raw\.startsWith\('HEAD -> '\)/);
+  // Both the middle column and the details pane render the same chips.
+  assert.match(script, /refs\.append\(refChip\(ref\)\)/);
+  const details = script.match(/function detailsPane\(\) \{([\s\S]*?)\r?\n  }/);
+  assert.ok(details);
+  assert.match(details[1], /detail-refs/);
+  assert.match(details[1], /refChip\(ref\)/);
+});
