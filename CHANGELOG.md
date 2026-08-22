@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.9
+
+- fix: insert the changelog entry on a CRLF checkout
+- ci: build a release even without a marketplace token
+- ci: publish a new version on every push to main
+- fix: keep focus, scroll, and popups stable across rerenders
+- fix: keep splitters, keyboard focus, and row activation reliable
+- fix: target refs exactly and stop misreporting cancellation
+- fix: unblock push, make diffs read-only, and surface refs
+- fix a hyperlink in readme.
+- ci: publish tagged releases to the marketplace
+- chore: prepare marketplace release 0.1.4
+- fix: unstick webview filters and stale state, repair Windows CI
+- refactor: cache log refreshes, adopt IntelliJ changelists, drop dead views
+- fix: repair hunk staging, shelf integrity, and merge confirmations
+- fix: preserve new files during rollback
+- fix: refine filtering and merge editor usability
+- fix: scale history and harden diff and push flows
+- feat: expose repository management workflows
+- fix: harden repository routing and Git operation state
+- fix: stabilize Git tool window UX
+- chore: bump extension version to 0.1.1
+- …and 54 earlier commits.
+
 ## 0.1.8
 
 - Fix keyboard navigation of the commit list: holding an arrow key never scrolled a virtualised list (assigning `scrollTop` after `replaceChildren` was clamped back to 0) and dropped focus entirely once the list did move, so further arrow keys did nothing.
