@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readSource } from "./sourceText.mjs";
 
-const source = readFileSync(new URL("../src/webviews/branchComparison.ts", import.meta.url), "utf8");
+const source = readSource("../src/webviews/branchComparison.ts", import.meta.url);
 const scriptMatch = source.match(/const comparisonScript = String\.raw`([\s\S]*?)`;\r?\n$/);
 
 test("keeps the branch comparison webview script syntactically valid", () => {

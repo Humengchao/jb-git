@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readSource } from "./sourceText.mjs";
 
-const source = readFileSync(new URL("../src/webviews/logPanel.ts", import.meta.url), "utf8");
+const source = readSource("../src/webviews/logPanel.ts", import.meta.url);
 const scriptMatch = source.match(/const logScript = String\.raw`([\s\S]*?)`;\r?\n$/);
 
 function graphHarness(collapsed = []) {
@@ -164,7 +164,7 @@ test("opens generated diffs read-only instead of dirty untitled editors", () => 
   assert.match(source, /private async showReadOnlyDiff\(root: string, name: string, content: string\)/);
   // The virtual scheme must be a readonly file system; a TextDocumentContentProvider still
   // lets the editor accept typing.
-  const extensionSource = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  const extensionSource = readSource("../src/extension.ts", import.meta.url);
   assert.doesNotMatch(extensionSource, /registerTextDocumentContentProvider/);
   assert.match(extensionSource, /registerFileSystemProvider\(DiffContentProvider\.scheme, diffProvider, \{\s*isCaseSensitive: true,\s*isReadonly: true,/);
   // Anchor on each handler, not the message-type union, so the assertion covers real call sites.
@@ -227,7 +227,7 @@ test("marks branch, remote, and tag decorations with distinct icons in rows and 
 });
 
 test("routes tool-window commands to the repository the window is showing", () => {
-  const extensionSource = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  const extensionSource = readSource("../src/extension.ts", import.meta.url);
   // The webview invokes commands as executeCommand(id, root), so a command typed to take a
   // tree node silently dropped the root and re-prompted for a repository.
   for (const command of ["createBranch", "renameBranch", "deleteBranch", "checkoutBranch", "skipOperation"]) {
@@ -243,11 +243,11 @@ test("routes tool-window commands to the repository the window is showing", () =
 });
 
 test("treats a cancelled Git command as a cancellation rather than an error", () => {
-  const runnerSource = readFileSync(new URL("../src/git/runner.ts", import.meta.url), "utf8");
+  const runnerSource = readSource("../src/git/runner.ts", import.meta.url);
   assert.match(runnerSource, /export class GitAbortError extends Error/);
   assert.match(runnerSource, /export function isGitAbort/);
   assert.match(runnerSource, /terminate\(new GitAbortError\(\)\)/);
-  const extensionSource = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  const extensionSource = readSource("../src/extension.ts", import.meta.url);
   assert.equal(extensionSource.match(/if \(isGitAbort\(error\)\)/g)?.length, 2);
   assert.match(source, /if \(isGitAbort\(error\)\) return;/);
 });
@@ -255,7 +255,7 @@ test("treats a cancelled Git command as a cancellation rather than an error", ()
 test("targets refs unambiguously and guards branch operations by kind", () => {
   // git shortens a name shared by a branch and a tag to "heads/x"/"tags/x", which cannot be
   // pasted into a ref path, so operations carry the full ref.
-  assert.match(readFileSync(new URL("../src/git/types.ts", import.meta.url), "utf8"), /fullName: string/);
+  assert.match(readSource("../src/git/types.ts", import.meta.url), /fullName: string/);
   for (const call of [
     /diffAgainstWorkingTree\(branch\.fullName\)/,
     /createBranch\(root, name\.trim\(\), branch\.fullName\)/,
@@ -307,7 +307,7 @@ test("ends splitter drags even when the button is released outside the window", 
   // All three splitters go through it.
   assert.equal(script.match(/beginDrag\(splitter, event,/g)?.length, 3);
 
-  const merge = readFileSync(new URL("../src/webviews/mergeEditor.ts", import.meta.url), "utf8");
+  const merge = readSource("../src/webviews/mergeEditor.ts", import.meta.url);
   assert.doesNotMatch(merge, /window\.addEventListener\('mouseup'/);
   assert.match(merge, /splitter\.setPointerCapture\(event\.pointerId\)/);
   assert.match(merge, /splitter\.addEventListener\('lostpointercapture', up\)/);
@@ -410,7 +410,8 @@ test("navigates a non-virtual list without rebuilding it and keeps drags touch-s
   // A resize moves everything under an open menu, so it closes like native menus do.
   assert.match(script, /window\.addEventListener\('resize', \(\) => closeContextMenu\(\)\)/);
   // The Local Changes splitter re-clamps its stored size when the panel resizes.
-  const changes = script.match(/function setupChangesSplitter\([\s\S]*?\n  }\n/);
+  // \r?: the Windows runner checks out CRLF.
+  const changes = script.match(/function setupChangesSplitter\([\s\S]*?\r?\n  }\r?\n/);
   assert.ok(changes);
   assert.match(changes[0], /new ResizeObserver/);
   assert.match(changes[0], /applyStored\(\)/);

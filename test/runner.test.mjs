@@ -80,7 +80,8 @@ test("never lets a git subcommand open an interactive editor", async () => {
   const runner = new GitRunner();
   // Plain `git commit` without -m consults the editor; GIT_EDITOR=true must preempt it.
   await runner.run(["commit", "--allow-empty-message", "-m", ""], { cwd: root });
-  const { existsSync, readFileSync } = await import("node:fs");
+  const { existsSync } = await import("node:fs");
   assert.equal(existsSync(join(root, "EDITOR_RAN")), false, "the configured editor must never launch");
-  assert.match(readFileSync(new URL("../src/git/runner.ts", import.meta.url), "utf8"), /GIT_EDITOR: "true"/);
+  const { readSource } = await import("./sourceText.mjs");
+  assert.match(readSource("../src/git/runner.ts", import.meta.url), /GIT_EDITOR: "true"/);
 });

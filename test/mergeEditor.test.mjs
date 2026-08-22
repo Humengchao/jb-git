@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readSource } from "./sourceText.mjs";
 
-const source = readFileSync(new URL("../src/webviews/mergeEditor.ts", import.meta.url), "utf8");
+const source = readSource("../src/webviews/mergeEditor.ts", import.meta.url);
 const scriptMatch = source.match(/const mergeScript = String\.raw`([\s\S]*?)`;\r?\n$/);
 
 function conflictParser() {

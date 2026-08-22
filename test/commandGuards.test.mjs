@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readSource } from "./sourceText.mjs";
 
-const extension = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+const extension = readSource("../src/extension.ts", import.meta.url);
 
 test("aborts clone when no destination folder was chosen", () => {
   // `?? process.cwd()` sent the clone into the extension host's cwd (typically /) when the
@@ -43,12 +43,12 @@ test("acts on stashes by commit id and reports conflicts as conflicts", () => {
   assert.match(extension, /dropStash\(node\.repositoryRoot, node\.entry\.ref, node\.entry\.oid\)/);
   assert.match(extension, /Drop the stash '\$\{node\.entry\.message \|\| node\.entry\.ref\}'/);
   assert.match(extension, /The stash was applied with conflicts\./);
-  const repositorySource = readFileSync(new URL("../src/git/repository.ts", import.meta.url), "utf8");
+  const repositorySource = readSource("../src/git/repository.ts", import.meta.url);
   assert.match(repositorySource, /private async resolveStashRef/);
 });
 
 test("continues fetching the remaining repositories when one remote fails", () => {
-  const manager = readFileSync(new URL("../src/repositoryManager.ts", import.meta.url), "utf8");
+  const manager = readSource("../src/repositoryManager.ts", import.meta.url);
   const fetch = manager.slice(manager.indexOf("public async fetch("));
   assert.match(fetch.slice(0, 1200), /isGitAbort\(error\)/);
   assert.match(fetch.slice(0, 1200), /Fetch failed for \$\{failures\.length\} of \$\{targets\.length\}/);

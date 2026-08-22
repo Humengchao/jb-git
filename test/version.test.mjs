@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readSource } from "./sourceText.mjs";
 
 function readJson(relativePath) {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), "utf8"));
@@ -108,7 +109,7 @@ test("ships a marketplace icon the manifest can actually use", () => {
 });
 
 test("offers a status bar entry that reopens the tool window", () => {
-  const source = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  const source = readSource("../src/extension.ts", import.meta.url);
   const item = source.match(/const toolWindowStatus = [\s\S]*?toolWindowStatus\.command = "[^"]+";/);
   assert.ok(item, "the status bar entry should exist");
   assert.match(item[0], /vscode\.StatusBarAlignment\.Left/);
