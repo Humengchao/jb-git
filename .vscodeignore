@@ -10,3 +10,4 @@ coverage
 *.ts
 tsconfig.json
 package-lock.json
+assets/icon.svg

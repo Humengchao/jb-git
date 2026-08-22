@@ -79,6 +79,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     gitToolWindow,
     { webviewOptions: { retainContextWhenHidden: true } },
   );
+  const toolWindowStatus = vscode.window.createStatusBarItem("jbGit.toolWindowStatus", vscode.StatusBarAlignment.Left, 21);
+  toolWindowStatus.name = "JB Git";
+  toolWindowStatus.text = "$(source-control) JB Git";
+  toolWindowStatus.tooltip = "Open the JB Git tool window";
+  toolWindowStatus.command = "jbGit.openGitToolWindow";
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   const outputChannel = vscode.window.createOutputChannel("JB Git");
   const showOutput = (title: string, content: string): void => {
@@ -92,6 +97,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   branchStatus.tooltip = "Git Branches and Operations";
 
   const updateStatusBar = (): void => {
+    if ((vscode.workspace.workspaceFolders ?? []).length) toolWindowStatus.show();
+    else toolWindowStatus.hide();
     const first = manager.all[0];
     if (!first?.status) {
       branchStatus.hide();
@@ -254,6 +261,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       isCaseSensitive: true,
       isReadonly: true,
     }),
+    toolWindowStatus,
     branchStatus,
     outputChannel,
     manager.onDidChange(() => {

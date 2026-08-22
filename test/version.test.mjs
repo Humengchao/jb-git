@@ -90,3 +90,33 @@ test("bumps a CRLF checkout, which is what Windows gets from git", () => {
   assert.equal(JSON.parse(readFileSync(join(workspace, "package.json"), "utf8")).version, bumped);
   assert.match(readFileSync(join(workspace, "README.zh-CN.md"), "utf8"), new RegExp(`jb-git-${bumped.replace(/\./g, "\\.")}\\.vsix`));
 });
+
+test("ships a marketplace icon the manifest can actually use", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const manifest = readJson("../package.json");
+  assert.equal(manifest.icon, "assets/icon.png");
+  // The manifest cannot reference an SVG icon, so the shipped asset has to be a raster image.
+  assert.doesNotMatch(manifest.icon, /\.svg$/i);
+
+  const png = readFileSync(join(root, manifest.icon));
+  assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "must be a real PNG");
+  // IHDR is the first chunk: width and height are big-endian 32-bit at offsets 16 and 20.
+  const width = png.readUInt32BE(16);
+  const height = png.readUInt32BE(20);
+  assert.equal(width, height, "the icon must be square");
+  assert.ok(width >= 128, `the icon must be at least 128px, got ${width}`);
+});
+
+test("offers a status bar entry that reopens the tool window", () => {
+  const source = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  const item = source.match(/const toolWindowStatus = [\s\S]*?toolWindowStatus\.command = "[^"]+";/);
+  assert.ok(item, "the status bar entry should exist");
+  assert.match(item[0], /vscode\.StatusBarAlignment\.Left/);
+  assert.match(item[0], /toolWindowStatus\.command = "jbGit\.openGitToolWindow";/);
+  // Built-in codicons only: a custom icon reference would need a contributed icon font.
+  assert.match(item[0], /toolWindowStatus\.text = "\$\(source-control\) JB Git";/);
+  // Closing the panel must not strand the user, so the entry does not depend on a repository.
+  assert.match(source, /if \(\(vscode\.workspace\.workspaceFolders \?\? \[\]\)\.length\) toolWindowStatus\.show\(\);/);
+  const declared = readJson("../package.json").contributes.commands.map((entry) => entry.command);
+  assert.ok(declared.includes("jbGit.openGitToolWindow"));
+});
