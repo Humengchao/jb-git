@@ -721,3 +721,104 @@ test("creates a tracking branch when checking out a remote branch with no local 
   assert.equal(git(work, "branch", "--show-current"), "feature/nested");
   assert.equal(git(work, "config", "--get", "branch.feature/nested.remote"), "origin");
 });
+
+test("refuses a partial commit that would silently conclude a merge", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-merge-commit-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "shared.txt"), "base\n");
+  writeFileSync(join(root, "other.txt"), "other\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "base");
+  git(root, "checkout", "-qb", "feature");
+  writeFileSync(join(root, "shared.txt"), "feature\n");
+  writeFileSync(join(root, "other.txt"), "feature-side\n");
+  git(root, "commit", "-qam", "feature");
+  git(root, "checkout", "-q", "-");
+  writeFileSync(join(root, "shared.txt"), "main\n");
+  git(root, "commit", "-qam", "main");
+  assert.throws(() => git(root, "merge", "feature"), /exit|conflict|failed/i);
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  // With MERGE_HEAD present, the temp-index commit records a two-parent merge whose tree
+  // contains the conflict markers, and the follow-up reset erases the unmerged entries —
+  // the merge looks finished and the other side's staged changes are gone.
+  await assert.rejects(
+    repository.commitPaths(["shared.txt", "other.txt"], "changelist during merge"),
+    /merge is in progress/i,
+  );
+  assert.ok(existsSync(join(root, ".git", "MERGE_HEAD")), "the merge must still be in progress");
+
+  // A conflicted stash application has unmerged entries without MERGE_HEAD; committing the
+  // conflicted path would stage the markers as the resolution.
+  git(root, "merge", "--abort");
+  writeFileSync(join(root, "shared.txt"), "stash me\n");
+  git(root, "stash", "push", "-q");
+  writeFileSync(join(root, "shared.txt"), "diverged\n");
+  git(root, "commit", "-qam", "diverge");
+  try { git(root, "stash", "pop"); } catch { /* conflicts are the point */ }
+  await assert.rejects(
+    repository.commitPaths(["shared.txt"], "conflicted stash"),
+    /unresolved conflicts/i,
+  );
+});
+
+test("resolves stashes by commit id so shifted positions cannot destroy the wrong one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-stash-oid-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "a.txt"), "base\n");
+  git(root, "add", "a.txt");
+  git(root, "commit", "-qm", "base");
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  writeFileSync(join(root, "a.txt"), "first\n");
+  git(root, "stash", "push", "-qm", "first");
+  writeFileSync(join(root, "a.txt"), "second\n");
+  git(root, "stash", "push", "-qm", "second");
+
+  const captured = (await repository.stashes()).find((entry) => entry.message.includes("first"));
+  assert.ok(captured);
+  assert.equal(captured.ref, "stash@{1}");
+  // The list shifts: dropping the newer stash moves "first" to stash@{0}. Acting on the
+  // captured positional ref would now hit a different stash.
+  git(root, "stash", "drop", "-q", "stash@{0}");
+  await repository.dropStash(captured.ref, captured.oid);
+  assert.equal(git(root, "stash", "list"), "", "exactly the captured stash must be gone");
+
+  // And a stash that no longer exists is refused rather than resolved by position.
+  writeFileSync(join(root, "a.txt"), "third\n");
+  git(root, "stash", "push", "-qm", "third");
+  await assert.rejects(repository.dropStash(captured.ref, captured.oid), /no longer exists/);
+  assert.match(git(root, "stash", "list"), /third/);
+});
+
+test("routes non-UTF-8 conflicts through the binary flow instead of mangling them", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-latin1-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  // Latin-1 "café" — no NUL bytes, but 0xE9 does not survive a UTF-8 round trip.
+  const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+  writeFileSync(join(root, "text.txt"), latin1);
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "base");
+  git(root, "checkout", "-qb", "feature");
+  writeFileSync(join(root, "text.txt"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x21, 0x0a]));
+  git(root, "commit", "-qam", "feature");
+  git(root, "checkout", "-q", "-");
+  writeFileSync(join(root, "text.txt"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x3f, 0x0a]));
+  git(root, "commit", "-qam", "main");
+  try { git(root, "merge", "feature"); } catch { /* conflict expected */ }
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const versions = await repository.conflictVersions("text.txt");
+  // Editing these bytes as a JS string turns 0xE9 into U+FFFD; Apply would then write the
+  // replacement characters back. The whole-file (binary) flow avoids the text round trip.
+  assert.equal(versions.binary, true, "legacy encodings must not be edited as text");
+});

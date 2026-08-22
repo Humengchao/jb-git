@@ -75,6 +75,8 @@ export interface GitCommitOptions {
 export interface GitStashEntry {
   ref: string;
   message: string;
+  /** The stash commit. `stash@{N}` indices shift on every push/pop/drop, so actions resolve the entry by this instead. */
+  oid: string;
 }
 
 export type GitPullStrategy = "merge" | "rebase" | "ff-only";

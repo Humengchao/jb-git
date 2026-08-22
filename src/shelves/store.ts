@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GitRepository } from "../git/repository";
@@ -70,20 +71,32 @@ export class ShelfStore implements vscode.Disposable {
     // working copy is never modified without a saved shelf.
     try {
       await repository.shelveTrackedPaths(paths);
+    } catch (error) {
+      // The changes are still in the working tree, so a shelf entry would double-apply
+      // later. Roll the entry back and keep the patch bytes for manual recovery.
+      await unlinkIfPresent(metadataFile);
+      const recovery = `${patchFile}.failed`;
+      await rename(patchFile, recovery).catch(() => undefined);
+      throw new Error(`Shelving failed and the changes remain in the working tree. The patch was kept at ${recovery}. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      // The persisted recovery patch must be visible even when cleanup fails.
       this.changedEmitter.fire(repository.info.rootPath);
     }
     return entry;
   }
 
+  /** The stored path is absolute and breaks when the storage location moves; fall back to the current storage directory. */
+  private patchPath(repositoryRoot: string, entry: ShelfEntry): string {
+    if (existsSync(entry.patchFile)) return entry.patchFile;
+    return path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.patch`);
+  }
+
   public async apply(repository: GitRepository, entry: ShelfEntry): Promise<void> {
-    await repository.applyPatchFile(entry.patchFile);
+    await repository.applyPatchFile(this.patchPath(repository.info.rootPath, entry));
     this.changedEmitter.fire(repository.info.rootPath);
   }
 
   public async remove(repositoryRoot: string, entry: ShelfEntry): Promise<void> {
-    await unlinkIfPresent(entry.patchFile);
+    await unlinkIfPresent(this.patchPath(repositoryRoot, entry));
     await unlinkIfPresent(path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.json`));
     this.changedEmitter.fire(repositoryRoot);
   }

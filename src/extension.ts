@@ -216,6 +216,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const snapshot = await pickRepository(rootPath);
     if (!snapshot?.status) return;
     const changes = snapshot.status.changes.filter((change) => mode === "staged" ? change.staged : change.unstaged);
+    if (!changes.length) {
+      await vscode.window.showInformationMessage(`There are no ${mode} changes.`);
+      return undefined;
+    }
     const selected = await vscode.window.showQuickPick(
       changes.map((change) => ({ label: change.path, description: change.kind, change })),
       { title: mode === "staged" ? "Staged Changes" : "Unstaged Changes", placeHolder: "Select a changed file", matchOnDescription: true },
@@ -240,6 +244,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       { title: change.change.path, placeHolder: mode === "staged" ? "Select a hunk to unstage" : "Select a hunk to stage", matchOnDescription: true },
     );
     return selected ? new HunkNode(change.repositoryRoot, change.change.path, mode, selected.index, selected.hunk) : undefined;
+  };
+
+  // git stash apply/pop exits non-zero after writing conflict markers, and pop then keeps
+  // the entry; a raw error dialog invited running Pop again on top of the conflicts.
+  const applyStashReportingConflicts = async (node: StashNode, pop: boolean): Promise<void> => {
+    try {
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `${pop ? "Popping" : "Applying"} ${node.entry.ref}` },
+        () => manager.applyStash(node.repositoryRoot, node.entry.ref, pop, node.entry.oid),
+      );
+    } catch (error) {
+      const snapshot = manager.snapshot(node.repositoryRoot);
+      const conflicted = snapshot?.status?.changes.some((change) => change.conflicted);
+      if (!conflicted) throw error;
+      await vscode.window.showWarningMessage(
+        `The stash was applied with conflicts.${pop ? " The stash entry was kept; do not pop it again." : ""} Resolve the conflicted files in Local Changes.`,
+      );
+    }
   };
 
   context.subscriptions.push(
@@ -428,7 +450,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { placeHolder: "Clone type" },
       );
       if (!mode) return;
-      const cloneRoot = await pickWorkspaceRoot() ?? process.cwd();
+      const cloneRoot = await pickWorkspaceRoot();
+      if (!cloneRoot) return void vscode.window.showInformationMessage("Open a folder before cloning a repository.");
       const cloned = await runWithNotificationResult(
         `Cloning ${source.trim()}`,
         (signal) => manager.clone(source.trim(), destination.trim(), mode.bare, cloneRoot, signal),
@@ -444,18 +467,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(rootPath);
       if (!first) return;
-      const files = await vscode.window.showOpenDialog({ canSelectMany: false, canSelectFiles: true, canSelectFolders: false, openLabel: "Apply Patch" });
+      const files = await vscode.window.showOpenDialog({
+        canSelectMany: false, canSelectFiles: true, canSelectFolders: false, openLabel: "Apply Patch",
+        filters: { "Patch files": ["patch", "diff"], "All files": ["*"] },
+      });
       const patchFile = files?.[0];
       if (!patchFile) return;
+      if (patchFile.scheme !== "file") {
+        return void vscode.window.showWarningMessage("Patches can only be applied from the local file system.");
+      }
       await runWithNotification(`Applying ${path.basename(patchFile.fsPath)}`, () => manager.applyPatch(first.repository.info.rootPath, patchFile.fsPath));
     }),
     vscode.commands.registerCommand("jbGit.sparseCheckoutSet", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(rootPath);
       if (!first) return;
-      const input = await vscode.window.showInputBox({ prompt: "Sparse-checkout paths (comma-separated)", placeHolder: "src,docs" });
+      const input = await vscode.window.showInputBox({
+        prompt: "Sparse-checkout paths (comma-separated)",
+        placeHolder: "src,docs",
+        validateInput: (value) => value.split(",").map((item) => item.trim()).filter(Boolean).map((item) => validatePathInput(item)).find(Boolean),
+      });
       if (!input?.trim()) return;
       const paths = input.split(",").map((item) => item.trim()).filter(Boolean);
+      const confirmed = await vscode.window.showWarningMessage(
+        `Restrict the working tree to ${paths.join(", ")}?`,
+        { modal: true, detail: "Every file outside these directories is removed from the working tree until sparse checkout is disabled." },
+        "Restrict",
+      );
+      if (confirmed !== "Restrict") return;
       await runWithNotification("Configuring sparse checkout", () => manager.sparseCheckoutSet(first.repository.info.rootPath, paths));
     }),
     vscode.commands.registerCommand("jbGit.sparseCheckoutDisable", async (rootPath?: string) => {
@@ -472,9 +511,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!first) return;
       await runWithNotification("Pulling Git LFS objects", (signal) => manager.lfsPull(first.repository.info.rootPath, signal), true);
     }),
-    vscode.commands.registerCommand("jbGit.commit", async () => {
+    vscode.commands.registerCommand("jbGit.commit", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
       const message = await vscode.window.showInputBox({ prompt: "Commit message", placeHolder: "Describe the staged changes" });
       if (!message?.trim()) return;
@@ -533,10 +572,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const first = await pickRepository(rootPath);
       if (!first) return;
       const current = first.status?.branch.head;
-      const ref = await vscode.window.showQuickPick(
-        first.branches.filter((branch) => (branch.kind === "local" || branch.kind === "remote") && branch.name !== current).map((branch) => branch.name),
-        { placeHolder: "Select a branch or ref to merge" },
-      );
+      const mergeCandidates = first.branches.filter((branch) => (branch.kind === "local" || branch.kind === "remote") && branch.name !== current).map((branch) => branch.name);
+      if (!mergeCandidates.length) return void vscode.window.showInformationMessage("There is no other branch to merge.");
+      const ref = await vscode.window.showQuickPick(mergeCandidates, { placeHolder: "Select a branch or ref to merge" });
       if (!ref) return;
       await runWithNotification(`Merging ${ref}`, () => manager.merge(first.repository.info.rootPath, ref));
     }),
@@ -545,8 +583,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const first = await pickRepository(rootPath);
       if (!first) return;
       const current = first.status?.branch.head;
+      const rebaseCandidates = first.branches.filter((branch) => (branch.kind === "local" || branch.kind === "remote") && branch.name !== current).map((branch) => branch.name);
+      if (!rebaseCandidates.length) return void vscode.window.showInformationMessage("There is no other branch to rebase onto.");
       const ref = await vscode.window.showQuickPick(
-        first.branches.filter((branch) => (branch.kind === "local" || branch.kind === "remote") && branch.name !== current).map((branch) => branch.name),
+        rebaseCandidates,
         { placeHolder: "Select a branch or ref to rebase onto" },
       );
       if (!ref) return;
@@ -623,31 +663,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!good?.trim()) return;
       await runWithNotification("Starting Git bisect", () => manager.bisectStart(first.repository.info.rootPath, bad.trim(), good.trim()));
     }),
-    vscode.commands.registerCommand("jbGit.bisectGood", async () => {
+    vscode.commands.registerCommand("jbGit.bisectGood", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const ref = await vscode.window.showInputBox({ prompt: "Good revision (or HEAD)", value: "HEAD" });
       if (!ref?.trim()) return;
       await runWithNotification("Marking revision good", () => manager.bisectGood(first.repository.info.rootPath, ref.trim()));
     }),
-    vscode.commands.registerCommand("jbGit.bisectBad", async () => {
+    vscode.commands.registerCommand("jbGit.bisectBad", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const ref = await vscode.window.showInputBox({ prompt: "Bad revision (or HEAD)", value: "HEAD" });
       if (!ref?.trim()) return;
       await runWithNotification("Marking revision bad", () => manager.bisectBad(first.repository.info.rootPath, ref.trim()));
     }),
-    vscode.commands.registerCommand("jbGit.bisectSkip", async () => {
+    vscode.commands.registerCommand("jbGit.bisectSkip", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       await runWithNotification("Skipping Git bisect revision", () => manager.bisectSkip(first.repository.info.rootPath));
     }),
-    vscode.commands.registerCommand("jbGit.bisectReset", async () => {
+    vscode.commands.registerCommand("jbGit.bisectReset", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       await runWithNotification("Resetting Git bisect", () => manager.bisectReset(first.repository.info.rootPath));
     }),
@@ -673,6 +713,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const snapshot = await pickRepository(rootPath);
       if (!snapshot) return;
       const localBranches = snapshot.branches.filter((branch) => branch.kind === "local" && branch.name !== snapshot.status?.branch.head);
+      if (!localBranches.length) return void vscode.window.showInformationMessage("There is no other local branch to delete.");
       const selected = await vscode.window.showQuickPick(localBranches.map((branch) => branch.name), { placeHolder: "Select a branch to delete" });
       if (!selected) return;
       const answer = await vscode.window.showWarningMessage(`Delete branch ${selected}?`, { modal: true }, "Delete");
@@ -696,9 +737,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!options) return;
       await runWithNotification("Stashing changes", () => manager.stash(first.repository.info.rootPath, message?.trim() || undefined, options.includeUntracked, options.keepIndex));
     }),
-    vscode.commands.registerCommand("jbGit.createChangelist", async () => {
+    vscode.commands.registerCommand("jbGit.createChangelist", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const name = await vscode.window.showInputBox({ prompt: "New Changelist name", placeHolder: "Feature work" });
       if (!name?.trim()) return;
@@ -707,6 +748,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.moveToChangelist", async (node?: ChangelistChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;
       const lists = changelistStore.lists(node.repositoryRoot).filter((list) => list.id !== node.changelistId);
+      if (!lists.length) return void vscode.window.showInformationMessage("Create another Changelist first: this is the only one.");
       const target = await vscode.window.showQuickPick(lists.map((list) => ({ label: list.name, list })), { placeHolder: "Move change to Changelist" });
       if (!target) return;
       await changelistStore.assign(node.repositoryRoot, node.change.path, target.list.id);
@@ -823,10 +865,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!node) {
         const first = await pickRepository();
         if (!first) return;
+        const removable = (await manager.worktrees(first.repository.info.rootPath))
+          .filter((item) => path.normalize(item.path) !== path.normalize(first.repository.info.rootPath));
+        if (!removable.length) return void vscode.window.showInformationMessage("This repository has no linked worktrees to remove.");
         const worktree = (await vscode.window.showQuickPick(
-          (await manager.worktrees(first.repository.info.rootPath))
-            .filter((item) => path.normalize(item.path) !== path.normalize(first.repository.info.rootPath))
-            .map((item) => ({ label: item.branch ?? "detached HEAD", description: item.path, item })),
+          removable.map((item) => ({ label: item.branch ?? "detached HEAD", description: item.path, item })),
           { placeHolder: "Select a worktree to remove", matchOnDescription: true },
         ))?.item;
         if (!worktree) return;
@@ -853,8 +896,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!node) {
         const first = await pickRepository();
         if (!first) return;
+        const available = await manager.submodules(first.repository.info.rootPath);
+        if (!available.length) return void vscode.window.showInformationMessage("This repository has no Git submodules.");
         const submodule = (await vscode.window.showQuickPick(
-          (await manager.submodules(first.repository.info.rootPath)).map((item) => ({ label: item.path, description: item.status, item })),
+          available.map((item) => ({ label: item.path, description: item.status, item })),
           { placeHolder: "Select a submodule to update" },
         ))?.item;
         if (!submodule) return;
@@ -885,11 +930,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!ref?.trim()) return;
       await runWithNotification(`Creating tag ${name.trim()}`, () => manager.createTag(first.repository.info.rootPath, name.trim(), ref.trim()));
     }),
-    vscode.commands.registerCommand("jbGit.deleteTag", async () => {
+    vscode.commands.registerCommand("jbGit.deleteTag", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
-      const first = await pickRepository();
+      const first = await pickRepository(rootPath);
       if (!first) return;
       const tags = first.branches.filter((branch) => branch.kind === "tag").map((branch) => branch.name);
+      if (!tags.length) return void vscode.window.showInformationMessage("This repository has no tags.");
       const tag = await vscode.window.showQuickPick(tags, { placeHolder: "Select a tag to delete" });
       if (!tag) return;
       const answer = await vscode.window.showWarningMessage(`Delete tag ${tag}?`, { modal: true }, "Delete");
@@ -995,30 +1041,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       if (!node) {
         const first = await pickRepository(); if (!first) return;
-        const entry = (await vscode.window.showQuickPick((await manager.stashes(first.repository.info.rootPath)).map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to apply" }))?.item;
+        const entries = await manager.stashes(first.repository.info.rootPath);
+        if (!entries.length) return void vscode.window.showInformationMessage("This repository has no stashes.");
+        const entry = (await vscode.window.showQuickPick(entries.map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to apply" }))?.item;
         if (!entry) return; node = new StashNode(first.repository.info.rootPath, entry);
       }
-      await runWithNotification(`Applying ${node.entry.ref}`, () => manager.applyStash(node.repositoryRoot, node.entry.ref));
+      await applyStashReportingConflicts(node, false);
     }),
     vscode.commands.registerCommand("jbGit.popStash", async (node?: StashNode) => {
       if (!(await requireTrustedWorkspace())) return;
       if (!node) {
         const first = await pickRepository(); if (!first) return;
-        const entry = (await vscode.window.showQuickPick((await manager.stashes(first.repository.info.rootPath)).map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to pop" }))?.item;
+        const entries = await manager.stashes(first.repository.info.rootPath);
+        if (!entries.length) return void vscode.window.showInformationMessage("This repository has no stashes.");
+        const entry = (await vscode.window.showQuickPick(entries.map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to pop" }))?.item;
         if (!entry) return; node = new StashNode(first.repository.info.rootPath, entry);
       }
-      await runWithNotification(`Popping ${node.entry.ref}`, () => manager.applyStash(node.repositoryRoot, node.entry.ref, true));
+      await applyStashReportingConflicts(node, true);
     }),
     vscode.commands.registerCommand("jbGit.dropStash", async (node?: StashNode) => {
       if (!(await requireTrustedWorkspace())) return;
       if (!node) {
         const first = await pickRepository(); if (!first) return;
-        const entry = (await vscode.window.showQuickPick((await manager.stashes(first.repository.info.rootPath)).map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to drop" }))?.item;
+        const entries = await manager.stashes(first.repository.info.rootPath);
+        if (!entries.length) return void vscode.window.showInformationMessage("This repository has no stashes.");
+        const entry = (await vscode.window.showQuickPick(entries.map((item) => ({ label: item.ref, description: item.message, item })), { placeHolder: "Select a stash to drop" }))?.item;
         if (!entry) return; node = new StashNode(first.repository.info.rootPath, entry);
       }
-      const answer = await vscode.window.showWarningMessage(`Drop ${node.entry.ref}?`, { modal: true }, "Drop");
+      const answer = await vscode.window.showWarningMessage(
+        `Drop the stash '${node.entry.message || node.entry.ref}'?`,
+        { modal: true },
+        "Drop",
+      );
       if (answer !== "Drop") return;
-      await runWithNotification(`Dropping ${node.entry.ref}`, () => manager.dropStash(node.repositoryRoot, node.entry.ref));
+      await runWithNotification(`Dropping ${node.entry.ref}`, () => manager.dropStash(node.repositoryRoot, node.entry.ref, node.entry.oid));
     }),
     vscode.commands.registerCommand("jbGit.manageStashes", async (rootPath?: string) => {
       const first = await pickRepository(rootPath);
@@ -1093,7 +1149,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("jbGit.resolveConflict", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace())) return;
-      const target = node?.change.conflicted ? node : await pickConflict(manager);
+      if (node && !node.change.conflicted) {
+        return void vscode.window.showInformationMessage(`'${node.change.path}' has no merge conflict to resolve.`);
+      }
+      const target = node ?? (await pickConflict(manager));
       if (!target) return;
       await openMergeConflictEditor(manager, mergeEditor, target);
     }),

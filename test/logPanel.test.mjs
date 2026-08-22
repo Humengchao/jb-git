@@ -393,3 +393,45 @@ test("preserves details-pane scroll and re-clamps stored pane sizes", () => {
   assert.doesNotMatch(observer[0], /readColumnWidth\(workspace, 'branch'\), readColumnWidth\(workspace, 'details'\)/);
   assert.match(observer[0], /Number\(uiState\.branchPaneWidth\) \|\| 185, Number\(uiState\.detailsPaneWidth\) \|\| 300/);
 });
+
+test("navigates a non-virtual list without rebuilding it and keeps drags touch-safe", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  // Below the threshold every row exists; rebuilding up to 500 rows per arrow key was janky.
+  const navigate = script.match(/function selectVirtualCommit\([\s\S]*?\n  }/);
+  assert.ok(navigate);
+  assert.match(navigate[0], /virtualCommits\.length <= virtualThreshold/);
+  assert.match(navigate[0], /scrollIntoView\(\{ block: 'nearest' \}\)/);
+  // Touch drags on the message splitter must not turn into native panning. The rule lives
+  // in the style block, not the script.
+  assert.match(source, /\.detail-splitter \{[^}]*touch-action: none/);
+  // The `.splitter.active` guard matched nothing; only `.dragging` exists in this webview.
+  assert.doesNotMatch(script, /\.dragging, \.splitter\.active/);
+  // A resize moves everything under an open menu, so it closes like native menus do.
+  assert.match(script, /window\.addEventListener\('resize', \(\) => closeContextMenu\(\)\)/);
+  // The Local Changes splitter re-clamps its stored size when the panel resizes.
+  const changes = script.match(/function setupChangesSplitter\([\s\S]*?\n  }\n/);
+  assert.ok(changes);
+  assert.match(changes[0], /new ResizeObserver/);
+  assert.match(changes[0], /applyStored\(\)/);
+});
+
+test("keeps commit controls and selection honest while replies are pending", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  // Checkbox toggles update the count and buttons immediately; the state echo is deferred
+  // while a menu is open, so the last render's values would contradict the checkboxes.
+  assert.match(script, /function refreshCommitControls\(\)/);
+  assert.equal(script.match(/refreshCommitControls\(\)/g)?.length, 4);
+  assert.match(script, /count\.id = 'selected-count'/);
+  assert.match(script, /commit\.id = 'commit-button'/);
+  // A state push that neither answers nor invalidates an in-flight selectCommit keeps it
+  // pending instead of snapping the highlight back.
+  const apply = script.match(/function applyIncomingState\(next\) \{([\s\S]*?)\n  }/);
+  assert.ok(apply);
+  assert.match(apply[1], /const fulfilled = !pendingCommitHash/);
+  assert.match(apply[1], /if \(fulfilled\) pendingCommitHash = undefined;/);
+  assert.doesNotMatch(apply[1], /state = \{ \.\.\.state, \.\.\.next \}; pendingCommitHash = undefined;/);
+  // An error reply will never be followed by a selection, so drop the loading placeholder.
+  assert.match(script, /type === 'error'[\s\S]{0,300}pendingCommitHash = undefined; updateSelectionWithoutRerender\(\);/);
+});

@@ -1089,7 +1089,7 @@ const logStyles = String.raw`
   .detail-body { margin-top: 9px; white-space: pre-wrap; line-height: 1.45; }
   .action { height: 25px; padding: 0 7px; border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .files { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
-  .detail-splitter { position: relative; min-height: 9px; cursor: row-resize; background: transparent; outline: none; }
+  .detail-splitter { position: relative; min-height: 9px; cursor: row-resize; background: transparent; outline: none; touch-action: none; }
   .detail-splitter::before { content: ''; position: absolute; left: 0; right: 0; top: 4px; height: 1px; background: var(--vscode-panel-border); }
   .detail-splitter:hover::before, .detail-splitter.dragging::before, .detail-splitter:focus-visible::before { height: 2px; background: var(--vscode-focusBorder); }
   .file-tree-root { min-width: max-content; padding-bottom: 8px; }
@@ -1241,6 +1241,7 @@ const logScript = String.raw`
     'No local changes': '没有本地更改', 'No changes to commit': '没有可提交的更改',
     'Commit Changes': '提交更改', 'Commit Message': '提交消息', 'Amend': '修正提交',
     'Sign-off': '添加签署', 'Skip hooks': '跳过钩子', 'Commit': '提交', 'Commit & Push': '提交并推送',
+    'selected': '已选择',
     'No shelved changes': '没有已搁置的更改', 'Unshelve': '取消搁置',
     'Branch': '分支', 'User': '用户', 'Date': '日期', 'Paths': '路径',
     'All Branches': '所有分支', 'All Users': '所有用户', 'All Dates': '所有日期',
@@ -1410,13 +1411,19 @@ const logScript = String.raw`
 
   function blocksStateRender() {
     const active = document.activeElement;
-    return Boolean(composing || openMenu || document.querySelector('.dragging, .splitter.active') ||
+    return Boolean(composing || openMenu || document.querySelector('.dragging') ||
       (active && active.tagName === 'SELECT'));
   }
 
   function applyIncomingState(next) {
     const previousRoot = state.selectedRoot;
-    state = { ...state, ...next }; pendingCommitHash = undefined;
+    // Keep an in-flight selection unless this push fulfils it or removed its commit;
+    // clearing it unconditionally made the highlight jump back to the previous commit.
+    const fulfilled = !pendingCommitHash
+      || next.selection?.commit?.hash === pendingCommitHash
+      || (next.commits ? !next.commits.some(commit => commit.hash === pendingCommitHash) : false);
+    state = { ...state, ...next };
+    if (fulfilled) pendingCommitHash = undefined;
     for (const commit of next.commits || []) if (commit.author) knownAuthors.add(commit.author);
     saveUiState({ knownAuthors: [...knownAuthors].slice(-500) });
     if (previousRoot && state.selectedRoot && previousRoot !== state.selectedRoot) {
@@ -1557,7 +1564,15 @@ const logScript = String.raw`
         splitter.setAttribute('aria-orientation', 'vertical'); splitter.setAttribute('aria-valuenow', String(Math.round(size)));
       }
     };
-    applySize(compact() ? Number(uiState.commitPaneHeight) || 220 : Number(uiState.commitPaneWidth) || 340);
+    const applyStored = () => applySize(compact() ? Number(uiState.commitPaneHeight) || 220 : Number(uiState.commitPaneWidth) || 340);
+    applyStored();
+    if ('ResizeObserver' in window) {
+      const observer = new ResizeObserver(() => {
+        if (!workspace.isConnected) { observer.disconnect(); return; }
+        if (!splitter.classList.contains('dragging')) applyStored();
+      });
+      observer.observe(workspace);
+    }
     splitter.addEventListener('pointerdown', event => {
       const resize = move => { const bounds = workspace.getBoundingClientRect(); applySize(compact() ? bounds.bottom - move.clientY : bounds.right - move.clientX); };
       const started = beginDrag(splitter, event, resize, () => {
@@ -1603,6 +1618,8 @@ const logScript = String.raw`
       const allSelected = list.changes.length > 0 && list.changes.every(change => change.checked);
       header.append(button(allSelected ? 'Clear' : 'Select All', allSelected ? 'Exclude this Changelist from commit' : 'Include this Changelist in commit', event => {
         event.stopPropagation(); post('toggleAll', { checked: !allSelected, listId: list.id });
+        group.querySelectorAll('.change-row input[type="checkbox"]').forEach(box => { box.checked = !allSelected; });
+        refreshCommitControls();
       }, 'select-all'));
       const toggle = () => {
         if (collapsedLists.has(list.id)) collapsedLists.delete(list.id); else collapsedLists.add(list.id);
@@ -1621,7 +1638,7 @@ const logScript = String.raw`
     const row = node('div', 'change-row'); row.title = change.path; row.tabIndex = 0; row.setAttribute('role', 'treeitem');
     row.dataset.focusKey = 'change:' + change.path;
     const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = change.checked; checkbox.title = 'Include in commit';
-    checkbox.addEventListener('change', () => post('togglePath', { path: change.path, checked: checkbox.checked }));
+    checkbox.addEventListener('change', () => { post('togglePath', { path: change.path, checked: checkbox.checked }); refreshCommitControls(); });
     const statusClass = change.status === '?' ? 'status-q' : change.status === '!' ? 'status-bang' : 'status-' + change.status;
     const file = node('div', 'change-file'); file.append(node('span', 'file-name', change.fileName));
     if (change.directory) file.append(node('span', 'directory', change.directory));
@@ -1649,6 +1666,7 @@ const logScript = String.raw`
         event.preventDefault();
         checkbox.checked = !checkbox.checked;
         post('togglePath', { path: change.path, checked: checkbox.checked });
+        refreshCommitControls();
       }
     });
     attachContextMenu(row, [
@@ -1661,6 +1679,25 @@ const logScript = String.raw`
     return row;
   }
 
+  /**
+   * Syncs the selected count and Commit buttons with the checkboxes as rendered. The state
+   * echo for a toggle is deferred while a menu is open or a drag is running, so without this
+   * the controls contradict what the user just clicked.
+   */
+  function refreshCommitControls() {
+    const boxes = [...document.querySelectorAll('#changes-list .change-row input[type="checkbox"]')];
+    const selected = boxes.filter(box => box.checked).length;
+    state.selectedCount = selected;
+    const count = document.getElementById('selected-count');
+    if (count) count.textContent = selected + ' ' + t('selected');
+    const message = document.getElementById('commit-message');
+    const disabled = !boxes.length || !selected || !(message?.value || '').trim();
+    for (const id of ['commit-button', 'commit-push-button']) {
+      const buttonElement = document.getElementById(id);
+      if (buttonElement) buttonElement.disabled = disabled;
+    }
+  }
+
   function commitForm() {
     const form = node('div', 'commit-form');
     form.append(node('div', 'commit-form-title', 'Commit Changes'));
@@ -1670,11 +1707,12 @@ const logScript = String.raw`
     const amend = checkboxOption('Amend', 'amend', root);
     const signoff = checkboxOption('Sign-off', 'signoff', root);
     const noVerify = checkboxOption('Skip hooks', 'noVerify', root);
-    options.append(amend.label, signoff.label, noVerify.label, node('span', 'spacer'), node('span', '', (state.selectedCount || 0) + ' selected'));
+    const count = node('span', '', (state.selectedCount || 0) + ' ' + t('selected')); count.id = 'selected-count';
+    options.append(amend.label, signoff.label, noVerify.label, node('span', 'spacer'), count);
     const submit = push => post('commit', { message: message.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push });
     const actions = node('div', 'commit-actions');
-    const commit = button('Commit', 'Commit selected changes', () => submit(false), 'primary');
-    const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'secondary');
+    const commit = button('Commit', 'Commit selected changes', () => submit(false), 'primary'); commit.id = 'commit-button';
+    const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'secondary'); commitPush.id = 'commit-push-button';
     const updateEnabled = () => {
       const disabled = !state.totalChanges || !state.selectedCount || !message.value.trim(); commit.disabled = disabled; commitPush.disabled = disabled;
     };
@@ -2267,6 +2305,19 @@ const logScript = String.raw`
   function selectVirtualCommit(index, focus = false) {
     const commit = virtualCommits[index]; if (!commit) return;
     pendingCommitHash = commit.hash; post('selectCommit', { hash: commit.hash });
+    if (virtualCommits.length <= virtualThreshold) {
+      // Every row already exists; rebuilding them all made holding an arrow key janky.
+      let target;
+      document.querySelectorAll('.commit-row').forEach(item => {
+        const active = item.dataset.hash === commit.hash;
+        item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
+        item.tabIndex = active ? 0 : -1;
+        if (active) target = item;
+      });
+      target?.scrollIntoView({ block: 'nearest' });
+      if (focus) target?.focus({ preventScroll: true });
+      return;
+    }
     const scroll = document.getElementById('commit-scroll');
     const top = commitRowHeight + index * commitRowHeight;
     const needsScroll = scroll && (top < scroll.scrollTop + commitRowHeight || top + commitRowHeight > scroll.scrollTop + scroll.clientHeight);
@@ -2716,7 +2767,11 @@ const logScript = String.raw`
       const options = { ...(uiState.commitOptions || {}) }; delete options[state.selectedRoot || ''];
       saveUiState({ commitMessages: drafts, commitMessage: undefined, commitOptions: options }); render();
     }
-    if (event.data.type === 'error') { showErrorBanner(event.data.message); }
+    if (event.data.type === 'error') {
+      showErrorBanner(event.data.message);
+      // The reply for this request is not coming, so stop showing the loading placeholder.
+      if (pendingCommitHash) { pendingCommitHash = undefined; updateSelectionWithoutRerender(); }
+    }
   });
   document.addEventListener('pointerdown', event => {
     // Leave a press on the invoker alone so its own click can toggle the menu closed.
@@ -2725,6 +2780,8 @@ const logScript = String.raw`
   document.addEventListener('wheel', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
   document.addEventListener('touchmove', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
   document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(true); });
+  // A resize moves everything under the menu, so close it like native menus do.
+  window.addEventListener('resize', () => closeContextMenu());
   document.addEventListener('focusout', () => setTimeout(flushDeferredState, 0));
   post('ready', { activeTab: activeToolTab, logOptions: { order: sortMode, firstParent, noMerges, author: authorFilter || undefined, since: dateCutoff(dateFilter) } }); render();
 `;

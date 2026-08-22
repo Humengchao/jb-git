@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { discoverRepositories, discoverRepository, GitRepository } from "./git/repository";
-import { GitRunner } from "./git/runner";
+import * as path from "node:path";
+import { GitRunner, isGitAbort } from "./git/runner";
 import { GitBlameEntry, GitBranch, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
@@ -43,12 +44,15 @@ export class RepositoryManager implements vscode.Disposable {
   public async discoverAndRefresh(scanNested = true): Promise<void> {
     await this.enqueueRefresh(async () => {
       const previous = this.snapshotKeys();
-      this.repositories = await discoverRepositories(this.workspacePaths(), this.runner, undefined, scanNested);
-      const next = new Map<string, RepositorySnapshot>();
-      const snapshots = await Promise.all(this.repositories.map((repository) => this.readSnapshot(repository)));
+      const repositories = await discoverRepositories(this.workspacePaths(), this.runner, undefined, scanNested);
+      const snapshots = await Promise.all(repositories.map((repository) => this.readSnapshot(repository)));
+      if (this.disposed) return;
+      // Swap the list and its snapshots together: while the reads were in flight, commands
+      // could otherwise see a repository without a snapshot or a snapshot without its
+      // repository, turning into silent no-ops or raw "Repository not found" errors.
+      this.repositories = repositories;
       this.snapshots.clear();
-      for (const snapshot of snapshots) next.set(snapshot.repository.info.rootPath, snapshot);
-      for (const [root, snapshot] of next) this.snapshots.set(root, snapshot);
+      for (const snapshot of snapshots) this.snapshots.set(snapshot.repository.info.rootPath, snapshot);
       await this.updateContextKeys();
       if (this.snapshotsChanged(previous)) this.changeEmitter.fire();
     });
@@ -152,7 +156,19 @@ export class RepositoryManager implements vscode.Disposable {
   public async fetch(rootPath?: string, signal?: AbortSignal): Promise<void> {
     await this.mutate(rootPath, async () => {
       const targets = rootPath ? [this.requireRepository(rootPath)] : this.repositories;
-      for (const repository of targets) await repository.fetch(signal);
+      const failures: string[] = [];
+      for (const repository of targets) {
+        try {
+          await repository.fetch(signal);
+        } catch (error) {
+          // A cancellation should stop the loop; one unreachable remote should not.
+          if (isGitAbort(error) || targets.length === 1) throw error;
+          failures.push(`${path.basename(repository.info.rootPath)}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (failures.length) {
+        throw new Error(`Fetch failed for ${failures.length} of ${targets.length} repositories. ${failures.join("; ")}`);
+      }
     });
   }
 
@@ -317,12 +333,12 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).stashes();
   }
 
-  public async applyStash(rootPath: string, ref: string, pop = false): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).applyStash(ref, pop));
+  public async applyStash(rootPath: string, ref: string, pop = false, oid?: string): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).applyStash(ref, pop, oid));
   }
 
-  public async dropStash(rootPath: string, ref: string): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).dropStash(ref));
+  public async dropStash(rootPath: string, ref: string, oid?: string): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).dropStash(ref, oid));
   }
 
   public async checkout(rootPath: string, branch: string, kind?: GitBranch["kind"], fullRef?: string): Promise<void> {
@@ -337,7 +353,8 @@ export class RepositoryManager implements vscode.Disposable {
     try {
       return await operation();
     } finally {
-      await this.refresh(rootPath);
+      // Never let the follow-up refresh replace the operation's own outcome.
+      await this.refresh(rootPath).catch(() => undefined);
     }
   }
 
@@ -366,7 +383,11 @@ export class RepositoryManager implements vscode.Disposable {
   }
 
   private enqueueRefresh(operation: () => Promise<void>): Promise<void> {
-    const next = this.refreshQueue.then(operation, operation);
+    const guarded = async (): Promise<void> => {
+      if (this.disposed) return;
+      await operation();
+    };
+    const next = this.refreshQueue.then(guarded, guarded);
     this.refreshQueue = next.catch(() => undefined);
     return next;
   }

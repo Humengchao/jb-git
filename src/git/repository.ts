@@ -558,6 +558,16 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["checkout", `--${side}`, "--", pathSpec], { cwd: this.info.rootPath }));
   }
 
+  /**
+   * True when the bytes survive a UTF-8 round trip. NUL bytes mark classic binaries; a failed
+   * round trip marks legacy encodings (Latin-1, Shift-JIS, GBK) whose bytes would silently
+   * become U+FFFD replacement characters if edited as text and written back.
+   */
+  private static isEditableText(content: Buffer): boolean {
+    if (content.includes(0)) return false;
+    return Buffer.from(content.toString("utf8"), "utf8").equals(content);
+  }
+
   public async conflictVersions(pathSpec: string): Promise<GitConflictVersions> {
     await this.assertConflictedPath(pathSpec);
     const [base, ours, theirs, result] = await Promise.all([
@@ -576,7 +586,7 @@ export class GitRepository {
       theirsExists: theirs !== null,
       result: result?.toString("utf8") ?? "",
       resultExists: result !== null,
-      binary: [base, ours, theirs, result].some((content) => content?.includes(0) ?? false),
+      binary: [base, ours, theirs, result].some((content) => content !== null && !GitRepository.isEditableText(content)),
     };
   }
 
@@ -725,8 +735,20 @@ export class GitRepository {
   public async commitPaths(paths: readonly string[], message: string, options: GitCommitOptions = {}): Promise<string> {
     return this.serial(async () => {
       if (paths.length === 0) throw new Error("No paths were selected for the commit.");
+      // A partial commit during a merge, cherry-pick, or revert would conclude that operation:
+      // MERGE_HEAD turns the temp-index commit into a two-parent merge whose tree silently
+      // drops everything the operation had staged, and the trailing reset erases the unmerged
+      // entries, so the half-done merge looks finished.
+      const operation = await this.operationState();
+      if (operation.kind !== "none") {
+        throw new Error(`A ${operation.kind} is in progress. Resolve it and use a full commit; committing selected paths would ${operation.kind === "rebase" || operation.kind === "bisect" ? "interfere with it" : "conclude it and discard the other side's staged changes"}.`);
+      }
       const selected = new Set(paths);
       const status = await this.status();
+      const conflictedSelection = status.changes.find((change) => change.conflicted && selected.has(change.path));
+      if (conflictedSelection) {
+        throw new Error(`'${conflictedSelection.path}' has unresolved conflicts. Resolve them before committing.`);
+      }
       if (status.changes.some((change) => change.staged && !selected.has(change.path))) {
         throw new Error("Cannot commit selected paths while unrelated staged changes exist.");
       }
@@ -755,7 +777,8 @@ export class GitRepository {
         await this.runner.run(["reset", "--mixed", "HEAD"], { cwd: this.info.rootPath });
         return (await this.currentRevision()) ?? "";
       } finally {
-        await rm(temporaryDirectory, { recursive: true, force: true });
+        // Never let cleanup failure replace the commit's own error.
+        await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
       }
     });
   }
@@ -783,19 +806,38 @@ export class GitRepository {
   }
 
   public async stashes(): Promise<GitStashEntry[]> {
-    const output = await this.runner.text(["stash", "list", "--format=%gd%x00%gs"], { cwd: this.info.rootPath });
+    const output = await this.runner.text(["stash", "list", "--format=%gd%x00%H%x00%gs"], { cwd: this.info.rootPath });
     return output.split(/\r?\n/).filter(Boolean).map((line) => {
-      const [ref, message] = line.split("\0");
-      return { ref, message: message ?? "" };
+      const [ref, oid, message] = line.split("\0");
+      return { ref, oid: oid ?? "", message: message ?? "" };
     });
   }
 
-  public async applyStash(ref: string, pop = false): Promise<void> {
-    await this.serial(() => this.runner.run(["stash", pop ? "pop" : "apply", ref], { cwd: this.info.rootPath }));
+  /**
+   * Positional `stash@{N}` refs shift whenever the stash list changes, so a captured ref can
+   * point at a different stash by the time the user confirms. When the entry's commit is
+   * known, re-resolve the current position from it and refuse if it is gone.
+   */
+  private async resolveStashRef(ref: string, oid?: string): Promise<string> {
+    if (!oid) return ref;
+    const entries = await this.stashes();
+    const found = entries.find((entry) => entry.oid === oid);
+    if (!found) throw new Error("That stash no longer exists; the list has changed since it was read.");
+    return found.ref;
   }
 
-  public async dropStash(ref: string): Promise<void> {
-    await this.serial(() => this.runner.run(["stash", "drop", ref], { cwd: this.info.rootPath }));
+  public async applyStash(ref: string, pop = false, oid?: string): Promise<void> {
+    await this.serial(async () => {
+      const current = await this.resolveStashRef(ref, oid);
+      await this.runner.run(["stash", pop ? "pop" : "apply", current], { cwd: this.info.rootPath });
+    });
+  }
+
+  public async dropStash(ref: string, oid?: string): Promise<void> {
+    await this.serial(async () => {
+      const current = await this.resolveStashRef(ref, oid);
+      await this.runner.run(["stash", "drop", current], { cwd: this.info.rootPath });
+    });
   }
 
   public async fileContent(pathSpec: string, revision?: string): Promise<Buffer> {

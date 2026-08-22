@@ -113,10 +113,13 @@ export class ChangelistStore implements vscode.Disposable {
     let modified = false;
     for (const change of changes) {
       if (!change.originalPath) continue;
+      // The new path may already be assigned (the user moved it after the rename); in that
+      // case only drop the old path, or the file ends up in two lists at once.
+      const alreadyAssigned = repository.lists.some((list) => list.files.includes(change.path));
       for (const list of repository.lists) {
         if (!list.files.includes(change.originalPath)) continue;
         list.files = list.files.filter((file) => file !== change.originalPath);
-        if (!list.files.includes(change.path)) list.files.push(change.path);
+        if (!alreadyAssigned && !list.files.includes(change.path)) list.files.push(change.path);
         modified = true;
       }
     }

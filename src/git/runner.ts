@@ -71,7 +71,10 @@ function tracePreview(output: Buffer | string): string {
  * terminal is attached. Explicit overrides always win.
  */
 function gitProcessEnv(overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", ...overrides };
+  // GIT_EDITOR=true: nothing in this extension is interactive, and a command that opened
+  // core.editor (e.g. `rebase --continue` with `code --wait`) would block forever while
+  // holding the per-repository mutex.
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", GIT_EDITOR: "true", ...overrides };
   for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"]) {
     if (overrides?.[name] === undefined) delete env[name];
   }

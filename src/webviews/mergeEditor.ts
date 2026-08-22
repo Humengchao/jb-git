@@ -123,12 +123,15 @@ export class MergeConflictEditor implements vscode.Disposable {
     this.panels.set(key, panel);
     let allowDispose = false;
     let dirty = Boolean(restoredDraft);
+    let applying = false;
     let messageRegistration: vscode.Disposable | undefined;
     const disposeRegistration = panel.onDidDispose(() => {
       disposeRegistration.dispose();
       messageRegistration?.dispose();
       if (this.panels.get(key) === panel) this.panels.delete(key);
-      if (dirty && !allowDispose && !this.disposed) {
+      // Only promise a draft that actually exists: an oversize result or cap eviction may
+      // have removed it, and a close during Apply is resolved by the Apply's own outcome.
+      if (dirty && !allowDispose && !applying && !this.disposed && this.drafts[key]) {
         void vscode.window.showInformationMessage(
           `The unapplied merge result for ${pathSpec} was saved as a draft.`,
           "Reopen",
@@ -177,6 +180,7 @@ export class MergeConflictEditor implements vscode.Disposable {
         return;
       }
       if (message.type !== "apply" || typeof message.result !== "string") return;
+      applying = true;
       try {
         if (!vscode.workspace.isTrusted) throw new Error("Merge results cannot be applied until this workspace is trusted.");
         const latest = await this.manager.conflictVersions(rootPath, pathSpec);
@@ -196,7 +200,10 @@ export class MergeConflictEditor implements vscode.Disposable {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         await vscode.window.showErrorMessage(detail);
-        await panel.webview.postMessage({ type: "applyFailed", message: detail });
+        // The panel may have been closed while the apply was in flight.
+        await panel.webview.postMessage({ type: "applyFailed", message: detail }).then(undefined, () => undefined);
+      } finally {
+        applying = false;
       }
     });
     panel.webview.html = webviewDocument(title, mergeStyles, mergeScript);

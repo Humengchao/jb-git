@@ -71,6 +71,21 @@ async function run() {
     kind: "modified", staged: false, unstaged: true, conflicted: false,
   }]);
   assert.equal(changelists.listForFile(parent, "fresh.txt").id, feature.id, "new changes join the active changelist");
+  // A rename whose new path was already assigned elsewhere must not duplicate the file into
+  // the list that held the old path.
+  const elsewhere = await changelists.create(parent, "Elsewhere");
+  await changelists.assign(parent, "moved-old.txt", feature.id);
+  await changelists.assign(parent, "moved-new.txt", elsewhere.id);
+  await changelists.reconcile(parent, [{
+    path: "moved-new.txt", originalPath: "moved-old.txt", indexStatus: "R", workTreeStatus: " ",
+    kind: "renamed", staged: true, unstaged: false, conflicted: false,
+  }]);
+  assert.equal(changelists.listForFile(parent, "moved-new.txt").id, elsewhere.id, "the explicit assignment wins");
+  assert.equal(
+    changelists.files(parent, feature.id).includes("moved-new.txt"),
+    false,
+    "the renamed file must not appear in two changelists",
+  );
   changelists.dispose();
 
   // Generated diffs must not open as untitled documents: those start dirty, so closing a
