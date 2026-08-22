@@ -112,14 +112,22 @@ code --install-extension jb-git-0.1.8.vsix
 
 ### 自动发布到 Marketplace
 
-推送 `v*.*.*` 格式的版本标签会触发 GitHub Actions 的 `Release` 工作流：自动运行完整测试、校验标签与 `package.json` 版本一致、打包 VSIX、发布到 Visual Studio Marketplace，并创建附带 VSIX 的 GitHub Release。
+发布已完全自动化。每次推送到 `main` 都会触发 GitHub Actions 的 `Release` 工作流：
+
+1. 在 Linux、macOS、Windows 上运行核心测试，并在 VS Code 1.95.0 与 stable 上运行扩展宿主测试。
+2. 自动递增补丁版本，同步更新 `package.json`、`package-lock.json`、Changelog 和安装文档。
+3. 打包 VSIX 并发布到 Visual Studio Marketplace。
+4. 回写 `chore: release <版本>` 提交、打上 `v<版本>` 标签，并创建附带 VSIX 的 GitHub Release。
+
+全部测试通过才会发布。如果某次提交不想触发发布，在提交标题里加上 `[skip release]`：
 
 ```bash
-npm version patch        # 或 minor / major，会更新版本号并创建对应标签
-git push --follow-tags
+git commit -m "docs: 修正错别字 [skip release]"
 ```
 
-工作流依赖仓库 Secret `VSCE_PAT`（拥有 `Marketplace (Manage)` 权限的 Azure DevOps 个人访问令牌）。
+需要发布次版本或主版本时，在 Actions 页面手动运行该工作流并选择要递增的位数，其余步骤相同。
+
+工作流依赖仓库 Secret `VSCE_PAT`（拥有 `Marketplace (Manage)` 权限的 Azure DevOps 个人访问令牌）。回写提交使用内置的 `GITHUB_TOKEN`，它不会再次触发工作流，因此不会出现发布循环。
 
 ## 本地开发
 

@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Pushes to main are covered by the Release workflow, which runs the same matrix before
+  # publishing.
   push:
+    branches-ignore: [main]
   pull_request:
 
 jobs:

@@ -1,12 +1,46 @@
 name: Release
 
+# Every push to main publishes a new patch release. Add [skip release] to a commit subject to
+# land a change without publishing.
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Version part to raise
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+
+# One release at a time: concurrent runs would race for the same version number.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   verify:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip release]')
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+
+  extension-host:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip release]')
+    strategy:
+      fail-fast: true
+      matrix:
+        vscode: ["1.95.0", "stable"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,41 +49,60 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Check tag matches package version
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "Tag v$TAG_VERSION does not match package.json version $PKG_VERSION" >&2
-            exit 1
-          fi
-      - run: npm run test:unit
-      - run: xvfb-run -a npm run test:extension
+      - run: xvfb-run -a npm run test:extension -- ${{ matrix.vscode }}
 
   publish:
-    needs: verify
+    needs: [verify, extension-host]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the changelog entry can list the commits since the last release.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Ensure marketplace token is configured
-        run: |
-          if [ -z "${{ secrets.VSCE_PAT }}" ]; then
-            echo "Repository secret VSCE_PAT is not set. Add an Azure DevOps PAT with Marketplace (Manage) scope." >&2
-            exit 1
-          fi
-      - run: npm run package
-      - name: Publish to Visual Studio Marketplace
-        run: npx vsce publish --packagePath jb-git-*.vsix
+
+      - name: Ensure the marketplace token is configured
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-      - name: Create GitHub release with VSIX
-        run: gh release create "$GITHUB_REF_NAME" jb-git-*.vsix --title "JB Git $GITHUB_REF_NAME" --generate-notes
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "::error::Repository secret VSCE_PAT is not set. Add an Azure DevOps personal access token with the Marketplace (Manage) scope." >&2
+            exit 1
+          fi
+
+      - name: Raise the version
+        id: bump
+        run: node scripts/bump-version.mjs "${{ inputs.release || 'patch' }}"
+
+      - name: Package the extension
+        run: npm run package
+
+      # Record the release before publishing: if the push failed afterwards, the next run
+      # would try to publish a version the Marketplace already holds and stay stuck there.
+      - name: Commit and tag the release
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json CHANGELOG.md README.md README.zh-CN.md
+          git commit -m "chore: release $VERSION [skip release]"
+          git tag -a "v$VERSION" -m "JB Git $VERSION"
+          git push origin "HEAD:${GITHUB_REF_NAME}" --follow-tags
+
+      - name: Publish to the Visual Studio Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx vsce publish --packagePath jb-git-*.vsix
+
+      - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: gh release create "v$VERSION" jb-git-*.vsix --title "JB Git $VERSION" --generate-notes

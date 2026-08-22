@@ -35,14 +35,22 @@ Every installable update receives a new semantic version and produces a newly na
 
 ## Releasing
 
-Marketplace publishing is automated by the `Release` GitHub Actions workflow. Pushing a version tag runs the full test suite, verifies the tag matches `package.json`, packages the VSIX, publishes it to the Visual Studio Marketplace, and attaches the VSIX to a GitHub release:
+Publishing is automated. Every push to `main` runs the `Release` workflow, which:
+
+1. Runs the unit tests on Linux, macOS and Windows and the extension-host tests against VS Code 1.95.0 and stable.
+2. Raises the patch version and updates the lockfile, changelog and installation docs together.
+3. Packages the VSIX and publishes it to the Visual Studio Marketplace.
+4. Pushes a `chore: release <version>` commit, tags it `v<version>`, and attaches the VSIX to a GitHub release.
+
+Nothing is published unless the whole matrix passes. To land a change without releasing, put `[skip release]` in the commit subject:
 
 ```bash
-npm version patch        # or minor / major; updates package.json and creates the tag
-git push --follow-tags
+git commit -m "docs: fix a typo [skip release]"
 ```
 
-The workflow requires a repository secret named `VSCE_PAT` containing an Azure DevOps personal access token with the `Marketplace (Manage)` scope for the `hmc` publisher.
+For a minor or major release, run the workflow manually from the Actions tab and pick the version part to raise; the same steps apply.
+
+The workflow requires a repository secret named `VSCE_PAT` holding an Azure DevOps personal access token with the `Marketplace (Manage)` scope for the `hmc` publisher. The release commit is pushed with the built-in `GITHUB_TOKEN`, which does not start another workflow run, so releases cannot loop.
 
 ## Scope and attribution
 
