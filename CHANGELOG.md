@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.10
+
+- feat: add an extension icon and a status bar entry for the tool window
+
 ## 0.1.9
 
 - fix: insert the changelog entry on a CRLF checkout
