@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11
+
+- test: read sources with normalised line endings
+- fix: guard merges, stashes, and encodings; settle pending UI state
+
 ## 0.1.10
 
 - feat: add an extension icon and a status bar entry for the tool window
