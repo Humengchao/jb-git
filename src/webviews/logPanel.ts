@@ -1226,6 +1226,8 @@ const logScript = String.raw`
   let virtualCommits = [];
   let virtualGraph = [];
   let virtualRenderFrame;
+  let expectedScrollTop;
+  let scrollMemory = {};
   const commitRowHeight = 27;
   const virtualThreshold = 500;
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
@@ -1280,12 +1282,12 @@ const logScript = String.raw`
   });
 
   function captureScroll() {
-    const result = { positions: {}, focus: captureFocus() };
     for (const id of ['branch-pane', 'commit-scroll', 'changed-files', 'commit-details', 'changes-list', 'shelf-pane', 'console-output']) {
       const element = document.getElementById(id);
-      if (element) result.positions[id] = { top: element.scrollTop, left: element.scrollLeft };
+      if (element) scrollMemory[id] = { top: element.scrollTop, left: element.scrollLeft };
     }
-    return result;
+    // Remembered across renders, so leaving a tab and coming back keeps its scroll position.
+    return { positions: { ...scrollMemory }, focus: captureFocus() };
   }
 
   function captureFocus() {
@@ -1296,7 +1298,10 @@ const logScript = String.raw`
       hash: element.dataset?.hash || '',
       filePath: element.dataset?.filePath || '',
       branchKey: element.dataset?.branchKey || '',
+      focusKey: element.dataset?.focusKey || '',
     };
+    // Without any of these the element cannot be found again, so do not claim it can be.
+    if (!descriptor.id && !descriptor.hash && !descriptor.filePath && !descriptor.branchKey && !descriptor.focusKey) return undefined;
     if (typeof element.selectionStart === 'number') {
       descriptor.selectionStart = element.selectionStart; descriptor.selectionEnd = element.selectionEnd;
     }
@@ -1309,6 +1314,7 @@ const logScript = String.raw`
     if (!element && descriptor.hash) element = document.querySelector('[data-hash="' + CSS.escape(descriptor.hash) + '"]');
     if (!element && descriptor.filePath) element = document.querySelector('[data-file-path="' + CSS.escape(descriptor.filePath) + '"]');
     if (!element && descriptor.branchKey) element = document.querySelector('[data-branch-key="' + CSS.escape(descriptor.branchKey) + '"]');
+    if (!element && descriptor.focusKey) element = document.querySelector('[data-focus-key="' + CSS.escape(descriptor.focusKey) + '"]');
     if (!element) return;
     element.focus({ preventScroll: true });
     if (typeof descriptor.selectionStart === 'number' && typeof element.setSelectionRange === 'function') {
@@ -1318,9 +1324,17 @@ const logScript = String.raw`
 
   function restoreScroll(saved) {
     requestAnimationFrame(() => {
+      // The commit window was built while the list was still detached, so it only holds the
+      // first rows. Rebuild it for the offset about to be restored, before assigning
+      // scrollTop (which replaceChildren would otherwise clamp back to 0) and before
+      // restoring focus, whose target row would not exist yet.
+      const commitTarget = saved?.positions?.['commit-scroll']?.top;
+      if (commitTarget && virtualCommits.length > virtualThreshold) renderCommitWindow(undefined, commitTarget);
       for (const [id, position] of Object.entries(saved?.positions || {})) {
         const element = document.getElementById(id);
-        if (element) { element.scrollTop = position.top; element.scrollLeft = position.left; }
+        if (!element) continue;
+        if (id === 'commit-scroll') expectedScrollTop = position.top;
+        element.scrollTop = position.top; element.scrollLeft = position.left;
       }
       restoreFocus(saved?.focus);
     });
@@ -1366,6 +1380,7 @@ const logScript = String.raw`
       else if (event.key === 'Home') next = 0;
       else if (event.key === 'End') next = entries.length - 1;
       else if (event.key === 'Escape') { event.preventDefault(); closeContextMenu(true); return; }
+      else if (event.key === 'Tab') { closeContextMenu(); return; }
       else return;
       event.preventDefault(); entries[next]?.focus();
     });
@@ -1373,6 +1388,7 @@ const logScript = String.raw`
   }
 
   function showMenuForElement(element, items) {
+    if (openMenu && menuInvoker === element) { closeContextMenu(true); return; }
     const bounds = element.getBoundingClientRect();
     showContextMenuAt(bounds.left, bounds.bottom + 2, items, element);
   }
@@ -1449,8 +1465,9 @@ const logScript = String.raw`
     changesTab.append(node('span', 'count', String(state.totalChanges || 0)));
     const shelfTab = button('Shelf', 'Shelved Changes', () => selectToolTab('shelf'), 'tool-tab' + (activeToolTab === 'shelf' ? ' active' : ''));
     shelfTab.append(node('span', 'count', String((state.shelves || []).length)));
-    for (const [tab, active] of [[logTab, activeToolTab === 'log'], [consoleTab, activeToolTab === 'console'], [changesTab, activeToolTab === 'changes'], [shelfTab, activeToolTab === 'shelf']]) {
+    for (const [tab, active, id] of [[logTab, activeToolTab === 'log', 'log'], [consoleTab, activeToolTab === 'console', 'console'], [changesTab, activeToolTab === 'changes', 'changes'], [shelfTab, activeToolTab === 'shelf', 'shelf']]) {
       tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+      tab.dataset.tabId = id; tab.dataset.focusKey = 'tab:' + id;
     }
     tabs.append(logTab, consoleTab, changesTab, shelfTab);
     tabs.addEventListener('keydown', event => {
@@ -1458,7 +1475,11 @@ const logScript = String.raw`
       const items = [logTab, consoleTab, changesTab, shelfTab]; let index = items.indexOf(document.activeElement);
       if (event.key === 'Home') index = 0; else if (event.key === 'End') index = items.length - 1;
       else index = (index + (event.key === 'ArrowRight' ? 1 : items.length - 1)) % items.length;
-      event.preventDefault(); items[index].click(); items[index].focus();
+      event.preventDefault();
+      const target = items[index].dataset.tabId;
+      items[index].click();
+      // The click re-renders the header, so the old element is already detached.
+      requestAnimationFrame(() => document.querySelector('[data-tab-id="' + target + '"]')?.focus());
     });
     root.append(tabs);
     if (activeToolTab === 'console') {
@@ -1598,6 +1619,7 @@ const logScript = String.raw`
 
   function changeRow(change) {
     const row = node('div', 'change-row'); row.title = change.path; row.tabIndex = 0; row.setAttribute('role', 'treeitem');
+    row.dataset.focusKey = 'change:' + change.path;
     const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = change.checked; checkbox.title = 'Include in commit';
     checkbox.addEventListener('change', () => post('togglePath', { path: change.path, checked: checkbox.checked }));
     const statusClass = change.status === '?' ? 'status-q' : change.status === '!' ? 'status-bang' : 'status-' + change.status;
@@ -1620,8 +1642,14 @@ const logScript = String.raw`
       post('openDiff', { path: change.path });
     });
     row.addEventListener('keydown', event => {
-      if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
-      event.preventDefault(); post('openDiff', { path: change.path });
+      if (event.target !== row) return;
+      if (event.key === 'Enter') { event.preventDefault(); post('openDiff', { path: change.path }); return; }
+      // Space toggles inclusion, as in the IntelliJ commit tool window.
+      if (event.key === ' ') {
+        event.preventDefault();
+        checkbox.checked = !checkbox.checked;
+        post('togglePath', { path: change.path, checked: checkbox.checked });
+      }
     });
     attachContextMenu(row, [
       { icon: '↔', label: change.conflicted ? 'Open Merge Conflict Editor' : 'Show Diff', run: () => post('openDiff', { path: change.path }) },
@@ -1746,7 +1774,9 @@ const logScript = String.raw`
     if ('ResizeObserver' in window) {
       const observer = new ResizeObserver(() => {
         if (!workspace.isConnected) { observer.disconnect(); return; }
-        setColumnWidths(workspace, readColumnWidth(workspace, 'branch'), readColumnWidth(workspace, 'details'), false);
+        // Re-clamp the stored preference, not the current width: feeding the clamped value
+        // back in made every shrink permanent, so widening never restored the user's size.
+        setColumnWidths(workspace, Number(uiState.branchPaneWidth) || 185, Number(uiState.detailsPaneWidth) || 300, false);
       });
       observer.observe(workspace);
     }
@@ -1987,6 +2017,10 @@ const logScript = String.raw`
     const scroll = node('div', 'commit-scroll'); scroll.id = 'commit-scroll';
     const list = node('div', 'commit-list'); list.id = 'commit-list'; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Git commits');
     scroll.addEventListener('scroll', () => {
+      // Ignore the event caused by our own scroll assignment; matching on the position keeps
+      // this self-healing when no event is delivered at all.
+      if (expectedScrollTop !== undefined && Math.abs(scroll.scrollTop - expectedScrollTop) < 1) { expectedScrollTop = undefined; return; }
+      expectedScrollTop = undefined;
       if (virtualCommits.length <= virtualThreshold || virtualRenderFrame) return;
       virtualRenderFrame = requestAnimationFrame(() => { virtualRenderFrame = undefined; renderCommitWindow(list); });
     });
@@ -2147,12 +2181,13 @@ const logScript = String.raw`
     renderCommitWindow(list);
   }
 
-  function renderCommitWindow(existing) {
+  function renderCommitWindow(existing, scrollTopOverride) {
     const list = existing || document.getElementById('commit-list'); if (!list || !virtualCommits.length) return;
     const scroll = list.parentElement;
     const virtual = virtualCommits.length > virtualThreshold;
     const visibleHeight = Math.max(270, scroll?.clientHeight || 600);
-    const first = virtual ? Math.max(0, Math.floor(Math.max(0, (scroll?.scrollTop || 0) - commitRowHeight) / commitRowHeight) - 18) : 0;
+    const offset = scrollTopOverride === undefined ? (scroll?.scrollTop || 0) : scrollTopOverride;
+    const first = virtual ? Math.max(0, Math.floor(Math.max(0, offset - commitRowHeight) / commitRowHeight) - 18) : 0;
     const last = virtual ? Math.min(virtualCommits.length, first + Math.ceil(visibleHeight / commitRowHeight) + 36) : virtualCommits.length;
     const currentHash = pendingCommitHash || state.selection?.commit?.hash;
     list.replaceChildren();
@@ -2234,15 +2269,39 @@ const logScript = String.raw`
     pendingCommitHash = commit.hash; post('selectCommit', { hash: commit.hash });
     const scroll = document.getElementById('commit-scroll');
     const top = commitRowHeight + index * commitRowHeight;
-    if (scroll && (top < scroll.scrollTop + commitRowHeight || top + commitRowHeight > scroll.scrollTop + scroll.clientHeight)) {
-      scroll.scrollTop = Math.max(0, top - Math.floor(scroll.clientHeight / 2));
+    const needsScroll = scroll && (top < scroll.scrollTop + commitRowHeight || top + commitRowHeight > scroll.scrollTop + scroll.clientHeight);
+    const target = needsScroll ? Math.max(0, top - Math.floor(scroll.clientHeight / 2)) : undefined;
+    // Render the window for the intended offset first: replaceChildren empties the scroller,
+    // so assigning scrollTop beforehand is clamped back to 0 and the list never moves.
+    renderCommitWindow(undefined, target);
+    if (scroll && target !== undefined) {
+      // The assignment fires the scroll listener, which would rebuild the window a frame later
+      // and destroy the row focused below.
+      expectedScrollTop = target;
+      scroll.scrollTop = target;
     }
-    renderCommitWindow();
-    if (focus) requestAnimationFrame(() => document.querySelector('.commit-row[data-hash="' + CSS.escape(commit.hash) + '"]')?.focus({ preventScroll: true }));
+    if (focus) document.querySelector('.commit-row[data-hash="' + CSS.escape(commit.hash) + '"]')?.focus({ preventScroll: true });
   }
 
   function refreshDetailsForFilter() {
-    const current = document.getElementById('details-pane'); if (current) current.replaceWith(detailsPane());
+    const current = document.getElementById('details-pane');
+    if (current) replaceDetailsPane(current);
+  }
+
+  /** Swaps the details pane while keeping the scroll positions inside it. */
+  function replaceDetailsPane(current) {
+    const saved = {};
+    for (const id of ['changed-files', 'commit-details']) {
+      const element = document.getElementById(id);
+      if (element) saved[id] = { top: element.scrollTop, left: element.scrollLeft };
+    }
+    current.replaceWith(detailsPane());
+    requestAnimationFrame(() => {
+      for (const [id, position] of Object.entries(saved)) {
+        const element = document.getElementById(id);
+        if (element) { element.scrollTop = position.top; element.scrollLeft = position.left; }
+      }
+    });
   }
 
   function selectCommitByHash(hash) {
@@ -2636,7 +2695,7 @@ const logScript = String.raw`
       item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
     });
     const current = document.getElementById('details-pane');
-    if (current) current.replaceWith(detailsPane());
+    if (current) replaceDetailsPane(current);
   }
 
   window.addEventListener('message', event => {
@@ -2659,7 +2718,10 @@ const logScript = String.raw`
     }
     if (event.data.type === 'error') { showErrorBanner(event.data.message); }
   });
-  document.addEventListener('pointerdown', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); });
+  document.addEventListener('pointerdown', event => {
+    // Leave a press on the invoker alone so its own click can toggle the menu closed.
+    if (openMenu && !openMenu.contains(event.target) && !menuInvoker?.contains(event.target)) closeContextMenu();
+  });
   document.addEventListener('wheel', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
   document.addEventListener('touchmove', event => { if (openMenu && !openMenu.contains(event.target)) closeContextMenu(); }, { capture: true, passive: true });
   document.addEventListener('keydown', event => { if (event.key === 'Escape') closeContextMenu(true); });

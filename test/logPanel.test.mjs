@@ -329,5 +329,67 @@ test("opens a change diff from anywhere on the row", () => {
   assert.doesNotMatch(row[1], /file\.addEventListener\('dblclick'/);
   assert.match(row[1], /row\.addEventListener\('dblclick'/);
   assert.match(row[1], /event\.target\.closest\('button, input'\)/);
-  assert.match(row[1], /event\.key !== 'Enter' && event\.key !== ' '/);
+  // Enter opens the diff, Space toggles inclusion, as in the IntelliJ commit tool window.
+  assert.match(row[1], /event\.key === 'Enter'.*openDiff/s);
+  assert.match(row[1], /event\.key === ' '[\s\S]*?togglePath/);
+});
+
+test("keeps keyboard focus and scroll position through virtual-list rebuilds", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  // replaceChildren empties the scroller, so the browser clamps scrollTop to 0: the window has
+  // to be rendered for the intended offset before the offset is assigned.
+  assert.match(script, /function renderCommitWindow\(existing, scrollTopOverride\)/);
+  assert.match(script, /renderCommitWindow\(undefined, target\)/);
+  const navigate = script.match(/function selectVirtualCommit\([\s\S]*?\n  }/);
+  assert.ok(navigate);
+  assert.ok(navigate[0].indexOf("renderCommitWindow(undefined, target)") < navigate[0].indexOf("scroll.scrollTop = target"));
+  // The programmatic scroll must not trigger a rebuild that destroys the row just focused.
+  assert.match(script, /expectedScrollTop = target/);
+  assert.match(script, /Math\.abs\(scroll\.scrollTop - expectedScrollTop\) < 1/);
+  // A render builds the list detached, so restoring focus has to wait for the real window.
+  const restore = script.match(/function restoreScroll\(saved\) \{([\s\S]*?)\n  }/);
+  assert.ok(restore);
+  assert.ok(restore[1].indexOf("renderCommitWindow(undefined, commitTarget)") < restore[1].indexOf("restoreFocus"));
+});
+
+test("remembers scroll positions and focusable identities across renders", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  // Positions used to be captured per render, so leaving a tab dropped its scroll offsets.
+  assert.match(script, /scrollMemory\[id\] = \{ top: element\.scrollTop, left: element\.scrollLeft \}/);
+  assert.match(script, /positions: \{ \.\.\.scrollMemory \}/);
+  // Elements with no id and no dataset key cannot be found again, so do not claim they can.
+  assert.match(script, /focusKey: element\.dataset\?\.focusKey \|\| ''/);
+  assert.match(script, /!descriptor\.branchKey && !descriptor\.focusKey\) return undefined/);
+  assert.match(script, /data-focus-key="' \+ CSS\.escape\(descriptor\.focusKey\)/);
+  assert.match(script, /tab\.dataset\.focusKey = 'tab:' \+ id/);
+  assert.match(script, /row\.dataset\.focusKey = 'change:' \+ change\.path/);
+  // Clicking a tab re-renders the header, so the old element is detached before focus() runs.
+  assert.match(script, /document\.querySelector\('\[data-tab-id="' \+ target \+ '"\]'\)\?\.focus\(\)/);
+});
+
+test("toggles filter popups and never leaves an orphaned menu", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  // The document pointerdown closed the menu before the invoker's click could reopen it, so
+  // filter popups flickered instead of toggling closed.
+  assert.match(script, /!menuInvoker\?\.contains\(event\.target\)\) closeContextMenu\(\)/);
+  assert.match(script, /if \(openMenu && menuInvoker === element\) \{ closeContextMenu\(true\); return; \}/);
+  // An open menu defers state updates, so tabbing away must not leave one open.
+  assert.match(script, /event\.key === 'Tab'\) \{ closeContextMenu\(\); return; \}/);
+});
+
+test("preserves details-pane scroll and re-clamps stored pane sizes", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  assert.match(script, /function replaceDetailsPane\(current\)/);
+  // Two call sites plus the definition; the raw swap survives only inside the helper.
+  assert.equal(script.match(/replaceDetailsPane\(current\)/g)?.length, 3);
+  assert.equal(script.match(/replaceWith\(detailsPane\(\)\)/g)?.length, 1);
+  // Feeding the clamped width back through the clamp made every shrink permanent.
+  const observer = script.match(/function setupWorkspaceColumns[\s\S]*?\n  }/);
+  assert.ok(observer);
+  assert.doesNotMatch(observer[0], /readColumnWidth\(workspace, 'branch'\), readColumnWidth\(workspace, 'details'\)/);
+  assert.match(observer[0], /Number\(uiState\.branchPaneWidth\) \|\| 185, Number\(uiState\.detailsPaneWidth\) \|\| 300/);
 });

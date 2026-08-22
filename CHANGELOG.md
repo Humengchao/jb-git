@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.8
+
+- Fix keyboard navigation of the commit list: holding an arrow key never scrolled a virtualised list (assigning `scrollTop` after `replaceChildren` was clamped back to 0) and dropped focus entirely once the list did move, so further arrow keys did nothing.
+- Fix focus and scroll being lost after a background refresh: the commit window was rebuilt only after focus had been restored, so a row far down a large history could not be found; changed rows and tool tabs carried no identity at all and lost focus on every refresh.
+- Fix arrow-key tab switching leaving focus on the document body, because activating a tab re-renders the header and detaches the element that was about to be focused.
+- Fix scroll positions being dropped when switching tool tabs: they are now remembered per pane across renders.
+- Fix Branch, User, Date, and sort popups not closing when their own button is clicked again — the press closed the popup and the click immediately reopened it.
+- Fix tabbing out of a context menu leaving it open, which also silently suspended every background refresh for as long as it stayed open.
+- Fix the Changed Files tree jumping to the top on every keystroke in the commit filter.
+- Fix panel resizing permanently shrinking the details column and commit-message pane: the clamped width was fed back as the new preference, so widening never restored the size you set.
+- Space on a file in Local Changes now toggles whether it is included in the commit, matching the IntelliJ commit tool window; Enter still opens the diff.
+
 ## 0.1.7
 
 - Fix splitters sticking to the cursor: releasing the mouse button outside the window delivered no `mouseup`, so the branch, commit, commit-message, and merge-editor panes kept resizing when the pointer came back. Drags now use pointer capture, which always delivers an end event.
