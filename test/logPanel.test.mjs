@@ -44,7 +44,7 @@ test("does not render the removed five-button commit detail action strip", () =>
 test("uses one commit scroll area and a mouse-and-keyboard resizable details pane", () => {
   assert.ok(scriptMatch);
   assert.match(scriptMatch[1], /scroll\.append\(head, list\)/);
-  assert.match(scriptMatch[1], /splitter\.addEventListener\('mousedown'/);
+  assert.match(scriptMatch[1], /splitter\.addEventListener\('pointerdown'/);
   assert.match(scriptMatch[1], /event\.key !== 'ArrowUp'/);
   assert.match(scriptMatch[1], /aria-valuenow/);
 });
@@ -290,4 +290,44 @@ test("never guesses a remote for a branch that has no matching one", () => {
   assert.match(picker[0], /branch\.upstream/);
   assert.match(picker[0], /showQuickPick/, "multiple remotes without origin must be offered, not refused");
   assert.match(source, /pushRemote\(root, remote, branch\.name, false, signal, !branch\.upstream\)/);
+});
+
+test("ends splitter drags even when the button is released outside the window", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  // A window-level mouseup is never dispatched when the release happens outside the window,
+  // which left the splitter following the cursor afterwards.
+  assert.doesNotMatch(script, /addEventListener\('mousedown'/);
+  assert.doesNotMatch(script, /window\.addEventListener\('mousemove'/);
+  assert.doesNotMatch(script, /window\.addEventListener\('mouseup'/);
+  assert.match(script, /function beginDrag\(handle, event, onMove, onEnd\)/);
+  assert.match(script, /handle\.setPointerCapture\(event\.pointerId\)/);
+  assert.match(script, /handle\.addEventListener\('pointercancel', finish\)/);
+  assert.match(script, /handle\.addEventListener\('lostpointercapture', finish\)/);
+  // All three splitters go through it.
+  assert.equal(script.match(/beginDrag\(splitter, event,/g)?.length, 3);
+
+  const merge = readFileSync(new URL("../src/webviews/mergeEditor.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(merge, /window\.addEventListener\('mouseup'/);
+  assert.match(merge, /splitter\.setPointerCapture\(event\.pointerId\)/);
+  assert.match(merge, /splitter\.addEventListener\('lostpointercapture', up\)/);
+});
+
+test("always leaves one commit row reachable by Tab", () => {
+  assert.ok(scriptMatch);
+  // Rows are only tabbable when selected, so scrolling the selected commit out of the
+  // virtualised window used to leave the whole list unreachable by keyboard.
+  assert.match(scriptMatch[1], /if \(!list\.querySelector\('\.commit-row\[tabindex="0"\]'\)\) \{/);
+});
+
+test("opens a change diff from anywhere on the row", () => {
+  assert.ok(scriptMatch);
+  const row = scriptMatch[1].match(/function changeRow\(change\) \{([\s\S]*?)\r?\n  }/);
+  assert.ok(row);
+  // The listener used to sit on the file-name element, so double-clicking the status letter
+  // or the empty part of the row did nothing.
+  assert.doesNotMatch(row[1], /file\.addEventListener\('dblclick'/);
+  assert.match(row[1], /row\.addEventListener\('dblclick'/);
+  assert.match(row[1], /event\.target\.closest\('button, input'\)/);
+  assert.match(row[1], /event\.key !== 'Enter' && event\.key !== ' '/);
 });

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7
+
+- Fix splitters sticking to the cursor: releasing the mouse button outside the window delivered no `mouseup`, so the branch, commit, commit-message, and merge-editor panes kept resizing when the pointer came back. Drags now use pointer capture, which always delivers an end event.
+- Fix the commit list becoming unreachable with Tab: rows were only tab-focusable while selected, so scrolling the selected commit out of the virtualised window left no tab stop in the list at all.
+- Fix double-clicking a file in Local Changes only working on the file name: the status letter, the staged marker, and the empty part of the row did nothing. The whole row now opens the diff, and Space activates it like Enter.
+
 ## 0.1.6
 
 - Fix checking out a remote branch that already has a local counterpart: it ran `git switch --track origin/<b>` and failed with "a branch named '<b>' already exists", because the local branch was looked for under the remote-prefixed name. Checking out a branch or tag whose short name is shared (git reports those as `heads/x` and `tags/x`) also failed, since neither `git switch heads/x` nor `refs/tags/tags/x` is a usable reference; every ref-targeted operation now carries the full ref path.

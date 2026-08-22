@@ -1537,18 +1537,16 @@ const logScript = String.raw`
       }
     };
     applySize(compact() ? Number(uiState.commitPaneHeight) || 220 : Number(uiState.commitPaneWidth) || 340);
-    splitter.addEventListener('mousedown', event => {
-      if (event.button !== 0) return;
-      event.preventDefault(); splitter.focus(); splitter.classList.add('dragging');
+    splitter.addEventListener('pointerdown', event => {
       const resize = move => { const bounds = workspace.getBoundingClientRect(); applySize(compact() ? bounds.bottom - move.clientY : bounds.right - move.clientX); };
-      resize(event);
-      const finish = () => {
-        window.removeEventListener('mousemove', resize); window.removeEventListener('mouseup', finish); splitter.classList.remove('dragging');
+      const started = beginDrag(splitter, event, resize, () => {
+        splitter.classList.remove('dragging');
         const value = Number(splitter.getAttribute('aria-valuenow'));
         saveUiState(compact() ? { commitPaneHeight: value } : { commitPaneWidth: value });
         flushDeferredState();
-      };
-      window.addEventListener('mousemove', resize); window.addEventListener('mouseup', finish);
+      });
+      if (!started) return;
+      splitter.focus(); splitter.classList.add('dragging'); resize(event);
     });
     splitter.addEventListener('keydown', event => {
       const valid = compact() ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight']; if (!valid.includes(event.key)) return;
@@ -1606,7 +1604,7 @@ const logScript = String.raw`
     const file = node('div', 'change-file'); file.append(node('span', 'file-name', change.fileName));
     if (change.directory) file.append(node('span', 'directory', change.directory));
     if (change.staged) file.append(node('span', 'stage-mark', 'staged'));
-    file.addEventListener('dblclick', () => post('openDiff', { path: change.path }));
+
     const actions = node('div', 'row-actions');
     actions.append(button('↔', change.conflicted ? 'Open Merge Conflict Editor' : 'Show Diff', () => post('openDiff', { path: change.path }), 'row-action'));
     if (change.staged && !change.unstaged) actions.append(button('−', 'Unstage', () => post('unstage', { path: change.path }), 'row-action'));
@@ -1616,7 +1614,15 @@ const logScript = String.raw`
       button('↶', 'Rollback', () => post('discard', { path: change.path }), 'row-action'),
     );
     row.append(checkbox, node('span', 'change-status ' + statusClass, change.status), file, actions);
-    row.addEventListener('keydown', event => { if (event.target === row && event.key === 'Enter') { event.preventDefault(); post('openDiff', { path: change.path }); } });
+    row.addEventListener('dblclick', event => {
+      // Row actions and the checkbox handle their own clicks.
+      if (event.target.closest('button, input')) return;
+      post('openDiff', { path: change.path });
+    });
+    row.addEventListener('keydown', event => {
+      if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
+      event.preventDefault(); post('openDiff', { path: change.path });
+    });
     attachContextMenu(row, [
       { icon: '↔', label: change.conflicted ? 'Open Merge Conflict Editor' : 'Show Diff', run: () => post('openDiff', { path: change.path }) },
       { icon: change.staged && !change.unstaged ? '−' : '+', label: change.staged && !change.unstaged ? 'Unstage' : 'Stage', run: () => post(change.staged && !change.unstaged ? 'unstage' : 'stage', { path: change.path }) },
@@ -1746,6 +1752,34 @@ const logScript = String.raw`
     }
   }
 
+  /**
+   * Runs a drag that is guaranteed to end. Pointer capture retargets pointermove/pointerup to
+   * the handle and always delivers an end event, whereas a window mouseup is never dispatched
+   * when the button is released outside the window, leaving the splitter stuck to the cursor.
+   */
+  function beginDrag(handle, event, onMove, onEnd) {
+    if (event.button !== 0) return false;
+    event.preventDefault();
+    let done = false;
+    try { handle.setPointerCapture(event.pointerId); } catch (error) { /* capture is best effort */ }
+    const move = moveEvent => onMove(moveEvent);
+    const finish = () => {
+      if (done) return;
+      done = true;
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', finish);
+      handle.removeEventListener('pointercancel', finish);
+      handle.removeEventListener('lostpointercapture', finish);
+      try { handle.releasePointerCapture(event.pointerId); } catch (error) { /* already released */ }
+      onEnd();
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+    handle.addEventListener('lostpointercapture', finish);
+    return true;
+  }
+
   function setupColumnSplitter(workspace, splitter) {
     const side = splitter.dataset.side;
     const resize = event => {
@@ -1755,16 +1789,13 @@ const logScript = String.raw`
       const right = side === 'details' ? requested : readColumnWidth(workspace, 'details');
       setColumnWidths(workspace, left, right, false);
     };
-    splitter.addEventListener('mousedown', event => {
-      if (event.button !== 0) return;
-      event.preventDefault(); splitter.focus(); splitter.classList.add('dragging'); resize(event);
-      const move = moveEvent => resize(moveEvent);
-      const finish = () => {
-        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', finish);
+    splitter.addEventListener('pointerdown', event => {
+      const started = beginDrag(splitter, event, resize, () => {
         splitter.classList.remove('dragging'); persistColumnWidths(workspace);
         flushDeferredState();
-      };
-      window.addEventListener('mousemove', move); window.addEventListener('mouseup', finish);
+      });
+      if (!started) return;
+      splitter.focus(); splitter.classList.add('dragging'); resize(event);
     });
     splitter.addEventListener('dblclick', () => {
       setColumnWidths(workspace, side === 'branch' ? 185 : readColumnWidth(workspace, 'branch'), side === 'details' ? 300 : readColumnWidth(workspace, 'details'), true);
@@ -2175,6 +2206,10 @@ const logScript = String.raw`
       });
       list.append(row);
     }
+    if (!list.querySelector('.commit-row[tabindex="0"]')) {
+      const first = list.querySelector('.commit-row');
+      if (first) first.tabIndex = 0;
+    }
     if (last < virtualCommits.length) {
       const spacer = node('div', 'virtual-spacer'); spacer.style.height = String((virtualCommits.length - last) * commitRowHeight) + 'px'; spacer.setAttribute('role', 'presentation'); list.append(spacer);
     }
@@ -2365,17 +2400,14 @@ const logScript = String.raw`
       const bounds = pane.getBoundingClientRect();
       setMessagePaneHeight(pane, bounds.bottom - event.clientY, false);
     };
-    splitter.addEventListener('mousedown', event => {
-      if (event.button !== 0) return;
-      event.preventDefault(); splitter.focus(); splitter.classList.add('dragging'); resize(event);
-      const move = moveEvent => resize(moveEvent);
-      const finish = () => {
-        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', finish);
+    splitter.addEventListener('pointerdown', event => {
+      const started = beginDrag(splitter, event, resize, () => {
         splitter.classList.remove('dragging');
         saveUiState({ messagePaneHeight: parseFloat(getComputedStyle(pane).getPropertyValue('--message-height')) });
         flushDeferredState();
-      };
-      window.addEventListener('mousemove', move); window.addEventListener('mouseup', finish);
+      });
+      if (!started) return;
+      splitter.focus(); splitter.classList.add('dragging'); resize(event);
     });
     splitter.addEventListener('dblclick', () => setMessagePaneHeight(pane, 160, true));
     splitter.addEventListener('keydown', event => {

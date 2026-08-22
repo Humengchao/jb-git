@@ -95,13 +95,13 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 1. 在 VS Code 中打开扩展视图。
 2. 点击扩展视图右上角的 `...` 菜单。
 3. 选择“从 VSIX 安装…”。
-4. 选择项目生成的 `jb-git-0.1.6.vsix`。
+4. 选择项目生成的 `jb-git-0.1.7.vsix`。
 5. 根据提示重新加载 VS Code。
 
 也可以通过命令行安装：
 
 ```bash
-code --install-extension jb-git-0.1.6.vsix
+code --install-extension jb-git-0.1.7.vsix
 ```
 
 ### 版本号规则

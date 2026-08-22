@@ -592,18 +592,30 @@ const mergeScript = String.raw`
       previous.style.flex = '0 0 ' + String(previousWidth) + 'px';
       next.style.flex = '0 0 ' + String(total - previousWidth) + 'px';
     };
-    splitter.addEventListener('mousedown', (event) => {
+    splitter.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
       event.preventDefault();
       splitter.classList.add('active');
       let lastX = event.clientX;
+      let done = false;
+      // Pointer capture always delivers an end event; a window mouseup is never dispatched
+      // when the button is released outside the window, which left the pane stuck to the cursor.
+      try { splitter.setPointerCapture(event.pointerId); } catch (error) { /* capture is best effort */ }
       const move = (moveEvent) => { resizeBy(moveEvent.clientX - lastX); lastX = moveEvent.clientX; };
       const up = () => {
+        if (done) return;
+        done = true;
         splitter.classList.remove('active');
-        window.removeEventListener('mousemove', move);
-        window.removeEventListener('mouseup', up);
+        splitter.removeEventListener('pointermove', move);
+        splitter.removeEventListener('pointerup', up);
+        splitter.removeEventListener('pointercancel', up);
+        splitter.removeEventListener('lostpointercapture', up);
+        try { splitter.releasePointerCapture(event.pointerId); } catch (error) { /* already released */ }
       };
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
+      splitter.addEventListener('pointermove', move);
+      splitter.addEventListener('pointerup', up);
+      splitter.addEventListener('pointercancel', up);
+      splitter.addEventListener('lostpointercapture', up);
     });
     splitter.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
