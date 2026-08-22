@@ -127,7 +127,11 @@ git commit -m "docs: 修正错别字 [skip release]"
 
 需要发布次版本或主版本时，在 Actions 页面手动运行该工作流并选择要递增的位数，其余步骤相同。
 
-工作流依赖仓库 Secret `VSCE_PAT`（拥有 `Marketplace (Manage)` 权限的 Azure DevOps 个人访问令牌）。回写提交使用内置的 `GITHUB_TOKEN`，它不会再次触发工作流，因此不会出现发布循环。
+发布到 Marketplace 需要仓库 Secret `VSCE_PAT`：一个 Azure DevOps 个人访问令牌，Organization 选 **All accessible organizations**，Scope 勾选 `Marketplace (Manage)`，并且必须用拥有 `hmc` 发布者的那个 Microsoft 账号创建。创建令牌需要先有 Azure DevOps 组织，请访问 <https://aex.dev.azure.com/>——不要用 Azure Portal，它不接受个人 Microsoft 账号。
+
+没有配置该 Secret 时工作流依然会运行：测试、升版本、打标签、把 VSIX 附加到 GitHub Release，并提示已跳过市场上传，可以在发布者页面手动上传。
+
+回写提交使用内置的 `GITHUB_TOKEN`，它不会再次触发工作流，因此不会出现发布循环。
 
 ## 本地开发
 

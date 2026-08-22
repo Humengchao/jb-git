@@ -50,7 +50,11 @@ git commit -m "docs: fix a typo [skip release]"
 
 For a minor or major release, run the workflow manually from the Actions tab and pick the version part to raise; the same steps apply.
 
-The workflow requires a repository secret named `VSCE_PAT` holding an Azure DevOps personal access token with the `Marketplace (Manage)` scope for the `hmc` publisher. The release commit is pushed with the built-in `GITHUB_TOKEN`, which does not start another workflow run, so releases cannot loop.
+Marketplace publishing needs a repository secret named `VSCE_PAT`: an Azure DevOps personal access token scoped to **All accessible organizations** with the `Marketplace (Manage)` scope, created from the Microsoft account that owns the `hmc` publisher. Creating one requires an Azure DevOps organization, so visit <https://aex.dev.azure.com/> — not the Azure portal, which rejects personal Microsoft accounts.
+
+Without that secret the workflow still runs: it tests, versions, tags, and attaches the VSIX to a GitHub release, and warns that the Marketplace upload was skipped so it can be done by hand from the publisher page.
+
+The release commit is pushed with the built-in `GITHUB_TOKEN`, whose pushes do not start another workflow run, so releases cannot loop.
 
 ## Scope and attribution
 

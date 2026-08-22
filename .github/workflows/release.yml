@@ -67,13 +67,18 @@ jobs:
           cache: npm
       - run: npm ci
 
-      - name: Ensure the marketplace token is configured
+      # Without a token the release is still built, versioned, tagged and attached to a
+      # GitHub release; only the Marketplace upload is left for a human.
+      - name: Check for a marketplace token
+        id: token
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          if [ -z "$VSCE_PAT" ]; then
-            echo "::error::Repository secret VSCE_PAT is not set. Add an Azure DevOps personal access token with the Marketplace (Manage) scope." >&2
-            exit 1
+          if [ -n "$VSCE_PAT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::VSCE_PAT is not set, so this release will NOT be published to the Marketplace. Upload the VSIX from the GitHub release, or add the secret to publish automatically."
           fi
 
       - name: Raise the version
@@ -97,6 +102,7 @@ jobs:
           git push origin "HEAD:${GITHUB_REF_NAME}" --follow-tags
 
       - name: Publish to the Visual Studio Marketplace
+        if: steps.token.outputs.present == 'true'
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx vsce publish --packagePath jb-git-*.vsix
@@ -106,3 +112,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.bump.outputs.version }}
         run: gh release create "v$VERSION" jb-git-*.vsix --title "JB Git $VERSION" --generate-notes
+
+      - name: Summarise the release
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          PUBLISHED: ${{ steps.token.outputs.present }}
+        run: |
+          {
+            echo "## JB Git $VERSION"
+            if [ "$PUBLISHED" = "true" ]; then
+              echo "Published to the Visual Studio Marketplace."
+            else
+              echo "**Not published**: \`VSCE_PAT\` is not configured."
+              echo "Download \`jb-git-$VERSION.vsix\` from the [release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/v$VERSION) and upload it at <https://marketplace.visualstudio.com/manage/publishers/hmc>."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
