@@ -85,14 +85,23 @@ if (bumped.version !== next || lockfile.version !== next || lockfile.packages?.[
   process.exit(1);
 }
 
-// CHANGELOG.md: a new section directly under the title.
+// CHANGELOG.md: a new section directly under the title. The anchor and the inserted text
+// have to follow the file's own line endings, or a CRLF checkout silently gains no entry.
 const changelog = read("CHANGELOG.md");
-if (!changelog.startsWith("# Changelog")) {
-  console.error("CHANGELOG.md no longer starts with '# Changelog'; refusing to guess where the entry goes.");
+const newline = changelog.includes("\r\n") ? "\r\n" : "\n";
+const heading = /^# Changelog(\r?\n)+/;
+if (!heading.test(changelog)) {
+  console.error("CHANGELOG.md no longer starts with a '# Changelog' heading; refusing to guess where the entry goes.");
   process.exit(1);
 }
-const entry = `## ${next}\n\n${changesSinceLastRelease().map((line) => `- ${line}`).join("\n")}\n\n`;
-write("CHANGELOG.md", changelog.replace(/^# Changelog\n+/, `# Changelog\n\n${entry}`));
+const bullets = changesSinceLastRelease().map((line) => `- ${line}`).join(newline);
+const entry = `## ${next}${newline}${newline}${bullets}${newline}${newline}`;
+const withEntry = changelog.replace(heading, `# Changelog${newline}${newline}${entry}`);
+if (withEntry === changelog) {
+  console.error("Failed to insert the changelog entry.");
+  process.exit(1);
+}
+write("CHANGELOG.md", withEntry);
 
 // Installation docs reference the packaged file by name.
 const docs = ["README.zh-CN.md", "README.md"];
