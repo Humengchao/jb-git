@@ -1,6 +1,5 @@
 import { Changelist } from "../changelists/store";
-import { GitBranch, GitChange, GitDiffHunk, GitRemote, GitStashEntry, GitSubmodule, GitWorktree } from "../git/types";
-import { RepositorySnapshot } from "../repositoryManager";
+import { GitChange, GitDiffHunk, GitRemote, GitStashEntry, GitSubmodule, GitWorktree } from "../git/types";
 import { ShelfEntry } from "../shelves/store";
 
 /**
@@ -10,14 +9,6 @@ import { ShelfEntry } from "../shelves/store";
  */
 
 export type ChangeViewMode = "staged" | "unstaged";
-
-export class RepositoryNode {
-  public constructor(public readonly snapshot: RepositorySnapshot) {}
-}
-
-export class BranchNode {
-  public constructor(public readonly repositoryRoot: string, public readonly branch: GitBranch) {}
-}
 
 export class ChangeNode {
   public constructor(

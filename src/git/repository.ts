@@ -349,6 +349,7 @@ export class GitRepository {
           : "local";
       branches.push({
         name,
+        fullName: refName,
         oid,
         kind,
         upstream: upstream || undefined,
@@ -391,8 +392,14 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["fetch", ...(prune ? ["--prune"] : []), name], { cwd: this.info.rootPath, signal }));
   }
 
-  public async pushRemote(name: string, branch?: string, forceWithLease = false, signal?: AbortSignal): Promise<void> {
-    await this.serial(() => this.runner.run(["push", ...(forceWithLease ? ["--force-with-lease"] : []), name, ...(branch ? [branch] : [])], { cwd: this.info.rootPath, signal }));
+  public async pushRemote(name: string, branch?: string, forceWithLease = false, signal?: AbortSignal, setUpstream = false): Promise<void> {
+    await this.serial(() => this.runner.run([
+      "push",
+      ...(setUpstream && branch ? ["--set-upstream"] : []),
+      ...(forceWithLease ? ["--force-with-lease"] : []),
+      name,
+      ...(branch ? [branch] : []),
+    ], { cwd: this.info.rootPath, signal }));
   }
 
   public async createTag(name: string, ref = "HEAD"): Promise<void> {
@@ -810,19 +817,33 @@ export class GitRepository {
     }
   }
 
-  public async checkout(branch: string, kind?: GitBranch["kind"]): Promise<void> {
+  /**
+   * Checks out a ref.
+   *
+   * `fullRef` is preferred because `%(refname:short)` disambiguates a name shared by a branch
+   * and a tag by lengthening it ("heads/v1"), and neither `git switch heads/v1` nor
+   * `refs/tags/tags/v1` is a usable reference.
+   */
+  public async checkout(branch: string, kind?: GitBranch["kind"], fullRef?: string): Promise<void> {
     await this.serial(async () => {
-      const isTag = kind === "tag" || (kind === undefined && await this.hasRef(`refs/tags/${branch}`));
+      const tagRef = fullRef?.startsWith("refs/tags/") ? fullRef : undefined;
+      const isTag = kind === "tag" || Boolean(tagRef) || (kind === undefined && !fullRef && await this.hasRef(`refs/tags/${branch}`));
       if (isTag) {
-        await this.runner.run(["switch", "--detach", `refs/tags/${branch}`], { cwd: this.info.rootPath });
+        await this.runner.run(["switch", "--detach", tagRef ?? `refs/tags/${branch}`], { cwd: this.info.rootPath });
         return;
       }
-      const isRemote = await this.hasRef(`refs/remotes/${branch}`);
-      const hasLocal = await this.hasRef(`refs/heads/${branch}`);
-      await this.runner.run(
-        isRemote && !hasLocal ? ["switch", "--track", branch] : ["switch", branch],
-        { cwd: this.info.rootPath },
-      );
+      const isRemote = fullRef ? fullRef.startsWith("refs/remotes/") : await this.hasRef(`refs/remotes/${branch}`);
+      const remoteName = fullRef?.startsWith("refs/remotes/") ? fullRef.slice("refs/remotes/".length) : branch;
+      // git switch takes a branch name, so drop the ref namespace and, for a remote-tracking
+      // ref, the remote itself: `origin/main` is checked out as the local branch `main`.
+      const localName = fullRef?.startsWith("refs/heads/")
+        ? fullRef.slice("refs/heads/".length)
+        : isRemote ? remoteName.split("/").slice(1).join("/") : branch;
+      if (isRemote && !(await this.hasRef(`refs/heads/${localName}`))) {
+        await this.runner.run(["switch", "--track", remoteName], { cwd: this.info.rootPath });
+        return;
+      }
+      await this.runner.run(["switch", localName], { cwd: this.info.rootPath });
     });
   }
 

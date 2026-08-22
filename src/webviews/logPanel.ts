@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { ChangelistStore } from "../changelists/store";
 import { GitBranch, GitChange, GitCommit, GitCommitFile, GitLogOptions } from "../git/types";
-import { GitTraceEvent } from "../git/runner";
+import { GitTraceEvent, isGitAbort } from "../git/runner";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
 import { ChangeNode } from "../views/nodes";
@@ -431,7 +431,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
               await this.branchComparisons.open(snapshot.repository, left, right);
               return;
             }
-            const content = await snapshot.repository.compareRefHistory(left.name, right.name);
+            const content = await snapshot.repository.compareRefHistory(left.fullName, right.fullName);
             await this.showReadOnlyDiff(root, `${left.name}...${right.name}`, content);
             return;
           }
@@ -460,7 +460,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             return;
           }
           if (message.action === "showRefDiff") {
-            const diff = await snapshot.repository.diffAgainstWorkingTree(branch.name);
+            const diff = await snapshot.repository.diffAgainstWorkingTree(branch.fullName);
             await this.showReadOnlyDiff(root, `${branch.name} vs working tree`, diff);
             return;
           }
@@ -468,43 +468,64 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           if (message.action === "mergeRef" || message.action === "rebaseOntoRef" || message.action === "pullRefMerge" || message.action === "pullRefRebase") {
             const head = snapshot.status?.branch.head;
             if (!head) return void vscode.window.showWarningMessage("Check out a branch before merging or rebasing.");
-            if (branch.kind === "local" && branch.name === head) return;
+            if (branch.kind === "tag") return;
+            if (branch.name === head && branch.kind === "local") return;
+            const pull = message.action === "pullRefMerge" || message.action === "pullRefRebase";
+            const rebase = message.action === "rebaseOntoRef" || message.action === "pullRefRebase";
+            if (pull && branch.kind !== "remote") return;
+            if (rebase) {
+              // Rebasing rewrites the checked-out branch, so confirm like every other
+              // history-rewriting action in this panel.
+              const confirmed = await vscode.window.showWarningMessage(
+                `Rebase '${head}' onto ${branch.name}?`,
+                { modal: true, detail: "Commits on the current branch are rewritten." },
+                "Rebase",
+              );
+              if (confirmed !== "Rebase") return;
+            }
             // IDEA's "Pull into <current>" is a fetch followed by an integration of the
             // remote-tracking ref, so run it as those two verified steps.
-            if (message.action === "pullRefMerge" || message.action === "pullRefRebase") {
-              const remote = await this.remoteForBranch(root, branch.name);
-              if (!remote) return void vscode.window.showWarningMessage(`Could not determine the remote for '${branch.name}'.`);
+            if (pull) {
+              const remote = await this.remoteForBranch(root, branch);
+              if (!remote) return void vscode.window.showWarningMessage(`'${branch.name}' does not belong to a configured remote.`);
               await this.withCancellableProgress(`Fetching ${remote}`, (signal) => this.manager.fetchRemote(root, remote, signal));
             }
-            const rebase = message.action === "rebaseOntoRef" || message.action === "pullRefRebase";
-            if (rebase) await this.manager.rebase(root, branch.name);
-            else await this.manager.merge(root, branch.name);
+            await vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title: `${rebase ? "Rebasing onto" : "Merging"} ${branch.name}` },
+              () => rebase ? this.manager.rebase(root, branch.fullName) : this.manager.merge(root, branch.fullName),
+            );
             return;
           }
           if (message.action === "fetchRef") {
-            const remote = await this.remoteForBranch(root, branch.name);
-            if (!remote) return void vscode.window.showWarningMessage(`Could not determine the remote for '${branch.name}'.`);
+            if (branch.kind !== "remote") return;
+            const remote = await this.remoteForBranch(root, branch);
+            if (!remote) return void vscode.window.showWarningMessage(`'${branch.name}' does not belong to a configured remote.`);
             await this.withCancellableProgress(`Fetching ${remote}`, (signal) => this.manager.fetchRemote(root, remote, signal));
             return;
           }
           if (message.action === "pushRef") {
             if (branch.kind !== "local") return;
+            // push() honours the branch's own upstream and establishes one when missing,
+            // so only a branch that is not checked out needs an explicit destination.
             if (branch.name === snapshot.status?.branch.head) {
               await this.withCancellableProgress(`Pushing ${branch.name}`, (signal) => this.manager.push(root, false, signal));
               return;
             }
-            const remotes = await this.manager.remotes(root);
-            const remote = remotes.find((item) => item.name === "origin") ?? (remotes.length === 1 ? remotes[0] : undefined);
-            if (!remote) return void vscode.window.showWarningMessage("This repository has no remote to push to.");
+            const remote = await this.pickPushRemote(root, branch);
+            if (!remote) return;
             await this.withCancellableProgress(
-              `Pushing ${branch.name} to ${remote.name}`,
-              (signal) => this.manager.pushRemote(root, remote.name, branch.name, false, signal),
+              `Pushing ${branch.name} to ${remote}`,
+              (signal) => this.manager.pushRemote(root, remote, branch.name, false, signal, !branch.upstream),
             );
             return;
           }
           if (message.action === "tagFromRef") {
             const name = await vscode.window.showInputBox({ title: `New Tag at '${branch.name}'`, prompt: "Tag name", validateInput: (value) => validateGitRefName(value) });
-            if (name?.trim()) await this.manager.createTag(root, name.trim(), branch.name);
+            if (!name?.trim()) return;
+            await vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title: `Creating tag ${name.trim()}` },
+              () => this.manager.createTag(root, name.trim(), branch.fullName),
+            );
             return;
           }
           if (message.action === "deleteTag") {
@@ -515,7 +536,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           if (message.action === "newBranchFromRef") {
             const name = await vscode.window.showInputBox({ title: `New Branch from '${branch.name}'`, prompt: "Branch name", validateInput: (value) => validateGitRefName(value) });
-            if (name?.trim()) await this.manager.createBranch(root, name.trim(), branch.name);
+            if (name?.trim()) await this.manager.createBranch(root, name.trim(), branch.fullName);
             return;
           }
           if (message.action === "createWorktreeFromRef") {
@@ -809,7 +830,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "checkout") {
         const branch = snapshot.branches.find((item) => item.name === message.name && item.kind === message.kind);
-        if (branch) await this.manager.checkout(root, branch.name, branch.kind);
+        if (branch) await this.manager.checkout(root, branch.name, branch.kind, branch.fullName);
         return;
       }
       if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
@@ -846,6 +867,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
     } catch (error) {
+      if (isGitAbort(error)) return;
       await vscode.window.showErrorMessage(formatError(error));
       await this.view?.webview.postMessage({ type: "error", message: formatError(error) });
     }
@@ -856,13 +878,41 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     for (const disposable of this.disposables.splice(0)) disposable.dispose();
   }
 
-  /** Resolves the remote a remote-tracking branch belongs to, longest name first so `origin/sub/main` beats `origin`. */
-  private async remoteForBranch(root: string, branchName: string): Promise<string | undefined> {
+  /**
+   * Resolves the remote a remote-tracking branch belongs to, longest name first so
+   * `origin/sub/main` beats `origin`. Returns undefined rather than guessing: refs left behind
+   * by `git remote remove` still look remote, and fetching some other remote would silently
+   * integrate stale commits.
+   */
+  private async remoteForBranch(root: string, branch: GitBranch): Promise<string | undefined> {
+    if (branch.kind !== "remote") return undefined;
+    const prefix = branch.fullName.replace(/^refs\/remotes\//, "");
     const remotes = await this.manager.remotes(root);
     return [...remotes]
       .sort((left, right) => right.name.length - left.name.length)
-      .find((remote) => branchName.startsWith(`${remote.name}/`))?.name
-      ?? (remotes.length === 1 ? remotes[0].name : undefined);
+      .find((remote) => prefix.startsWith(`${remote.name}/`))?.name;
+  }
+
+  /** Picks the remote to push a branch that is not checked out to, preferring its upstream. */
+  private async pickPushRemote(root: string, branch: GitBranch): Promise<string | undefined> {
+    const remotes = await this.manager.remotes(root);
+    if (!remotes.length) {
+      await vscode.window.showWarningMessage("This repository has no remote. Add a remote before pushing.");
+      return undefined;
+    }
+    const upstreamRemote = branch.upstream
+      ? [...remotes].sort((left, right) => right.name.length - left.name.length)
+        .find((remote) => branch.upstream?.startsWith(`${remote.name}/`))?.name
+      : undefined;
+    if (upstreamRemote) return upstreamRemote;
+    if (remotes.length === 1) return remotes[0].name;
+    const origin = remotes.find((remote) => remote.name === "origin");
+    if (origin) return origin.name;
+    const picked = await vscode.window.showQuickPick(
+      remotes.map((remote) => ({ label: remote.name, description: remote.fetchUrl })),
+      { title: `Push '${branch.name}' to`, placeHolder: "Select a remote" },
+    );
+    return picked?.label;
   }
 
   private async withCancellableProgress(title: string, operation: (signal: AbortSignal) => Promise<void>): Promise<void> {
@@ -1808,7 +1858,7 @@ const logScript = String.raw`
     );
     // Merging or rebasing the checked-out branch onto itself is meaningless, so leave it out
     // entirely instead of showing a disabled self-referencing entry.
-    if (!isCurrent) items.push(
+    if (!isCurrent && kind !== 'tag') items.push(
       { icon: '⇤', label: 'Merge ' + branch.name + ' into ' + into, disabled: !current, run: act('mergeRef') },
       { icon: '⇧', label: 'Rebase ' + into + ' onto ' + branch.name, disabled: !current, run: act('rebaseOntoRef') },
     );

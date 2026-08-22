@@ -225,3 +225,69 @@ test("marks branch, remote, and tag decorations with distinct icons in rows and 
   assert.match(details[1], /detail-refs/);
   assert.match(details[1], /refChip\(ref\)/);
 });
+
+test("routes tool-window commands to the repository the window is showing", () => {
+  const extensionSource = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  // The webview invokes commands as executeCommand(id, root), so a command typed to take a
+  // tree node silently dropped the root and re-prompted for a repository.
+  for (const command of ["createBranch", "renameBranch", "deleteBranch", "checkoutBranch", "skipOperation"]) {
+    assert.match(
+      extensionSource,
+      new RegExp(`registerCommand\\("jbGit\\.${command}", async \\(rootPath\\?: string\\)`),
+      `${command} should accept a repository root`,
+    );
+  }
+  assert.match(extensionSource, /"jbGit\.skipOperation"[\s\S]{0,200}pickRepository\(rootPath\)/);
+  // The node classes those signatures referenced were never constructed.
+  assert.doesNotMatch(extensionSource, /RepositoryNode|BranchNode/);
+});
+
+test("treats a cancelled Git command as a cancellation rather than an error", () => {
+  const runnerSource = readFileSync(new URL("../src/git/runner.ts", import.meta.url), "utf8");
+  assert.match(runnerSource, /export class GitAbortError extends Error/);
+  assert.match(runnerSource, /export function isGitAbort/);
+  assert.match(runnerSource, /terminate\(new GitAbortError\(\)\)/);
+  const extensionSource = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+  assert.equal(extensionSource.match(/if \(isGitAbort\(error\)\)/g)?.length, 2);
+  assert.match(source, /if \(isGitAbort\(error\)\) return;/);
+});
+
+test("targets refs unambiguously and guards branch operations by kind", () => {
+  // git shortens a name shared by a branch and a tag to "heads/x"/"tags/x", which cannot be
+  // pasted into a ref path, so operations carry the full ref.
+  assert.match(readFileSync(new URL("../src/git/types.ts", import.meta.url), "utf8"), /fullName: string/);
+  for (const call of [
+    /diffAgainstWorkingTree\(branch\.fullName\)/,
+    /createBranch\(root, name\.trim\(\), branch\.fullName\)/,
+    /createTag\(root, name\.trim\(\), branch\.fullName\)/,
+    /rebase\(root, branch\.fullName\)/,
+    /merge\(root, branch\.fullName\)/,
+    /compareRefHistory\(left\.fullName, right\.fullName\)/,
+    /checkout\(root, branch\.name, branch\.kind, branch\.fullName\)/,
+  ]) assert.match(source, call);
+
+  const handler = source.slice(source.indexOf('message.action === "mergeRef"'));
+  assert.match(handler.slice(0, 900), /if \(branch\.kind === "tag"\) return;/);
+  assert.match(handler.slice(0, 1200), /if \(pull && branch\.kind !== "remote"\) return;/);
+  assert.match(source.slice(source.indexOf('message.action === "fetchRef"')).slice(0, 300), /branch\.kind !== "remote"/);
+  // Rebase rewrites the current branch, so it must confirm like the other rewriting actions.
+  assert.match(handler.slice(0, 1200), /showWarningMessage\(\s*`Rebase/);
+
+  const menu = scriptMatch[1].match(/function branchContextItems\(branch\) \{([\s\S]*?)\r?\n  }/);
+  assert.ok(menu);
+  assert.match(menu[1], /if \(!isCurrent && kind !== 'tag'\) items\.push\(/);
+});
+
+test("never guesses a remote for a branch that has no matching one", () => {
+  const resolver = source.match(/private async remoteForBranch\([\s\S]*?\n  }/);
+  assert.ok(resolver);
+  // A ref left behind by `git remote remove` still looks remote; fetching some other remote
+  // would silently integrate stale commits.
+  assert.doesNotMatch(resolver[0], /remotes\.length === 1/);
+  assert.match(resolver[0], /branch\.kind !== "remote"/);
+  const picker = source.match(/private async pickPushRemote\([\s\S]*?\n  }/);
+  assert.ok(picker);
+  assert.match(picker[0], /branch\.upstream/);
+  assert.match(picker[0], /showQuickPick/, "multiple remotes without origin must be offered, not refused");
+  assert.match(source, /pushRemote\(root, remote, branch\.name, false, signal, !branch\.upstream\)/);
+});

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { discoverRepositories, discoverRepository, logPathspec } from "../dist/git/repository.js";
-import { GitRunner } from "../dist/git/runner.js";
+import { GitRunner, isGitAbort } from "../dist/git/runner.js";
 
 function git(cwd, ...args) {
   const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -584,4 +584,140 @@ test("pushes a branch that has no upstream and then pushes follow-up commits", a
   git(work, "commit", "-qm", "second");
   await repository.push();
   assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(work, "rev-parse", "HEAD"));
+});
+
+test("exposes an unambiguous ref path because git resolves a short name to a tag first", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-ambiguous-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "a.txt"), "one\n");
+  git(root, "add", "a.txt");
+  git(root, "commit", "-qm", "first");
+  const first = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "a.txt"), "two\n");
+  git(root, "commit", "-qam", "second");
+  const second = git(root, "rev-parse", "HEAD");
+
+  // A tag and a branch may share a short name; git's disambiguation tries refs/tags first,
+  // so operating on the short name would silently target the tag.
+  git(root, "tag", "shared", first);
+  git(root, "branch", "shared", second);
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const branches = await repository.branches();
+  const tag = branches.find((item) => item.fullName === "refs/tags/shared");
+  const local = branches.find((item) => item.fullName === "refs/heads/shared");
+  assert.ok(tag && local);
+  assert.equal(tag.fullName, "refs/tags/shared");
+  assert.equal(local.fullName, "refs/heads/shared");
+  assert.equal(tag.oid, first);
+  assert.equal(local.oid, second);
+  assert.equal(git(root, "rev-parse", "shared"), first, "the short name resolves to the tag");
+
+  // git shortens an ambiguous name to "heads/shared"/"tags/shared", and neither
+  // `git switch heads/shared` nor `refs/tags/tags/shared` is a usable reference.
+  assert.equal(tag.name, "tags/shared");
+  assert.equal(local.name, "heads/shared");
+  await repository.checkout(tag.name, tag.kind, tag.fullName);
+  assert.equal(git(root, "rev-parse", "HEAD"), first, "checking out the tag detaches at its commit");
+  await repository.checkout(local.name, local.kind, local.fullName);
+  assert.equal(git(root, "branch", "--show-current"), "shared");
+  assert.equal(git(root, "rev-parse", "HEAD"), second, "checking out the branch lands on the branch tip");
+});
+
+test("reports a cancelled Git command as an abort rather than a failure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-abort-"));
+  git(root, "init", "-q");
+  const runner = new GitRunner();
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    runner.text(["status"], { cwd: root, signal: controller.signal }),
+    (error) => isGitAbort(error),
+    "an aborted command must be recognisable so the UI does not show an error dialog",
+  );
+});
+
+test("sets upstream when pushing a branch that has none", async () => {
+  const base = mkdtempSync(join(tmpdir(), "jb-git-push-remote-"));
+  const remote = join(base, "remote.git");
+  const work = join(base, "work");
+  execFileSync("git", ["init", "--bare", "-q", "remote.git"], { cwd: base });
+  mkdirSync(work);
+  git(work, "init", "-q");
+  git(work, "config", "user.name", "JB Git Test");
+  git(work, "config", "user.email", "jb-git-test@example.invalid");
+  git(work, "remote", "add", "origin", remote);
+  writeFileSync(join(work, "a.txt"), "one\n");
+  git(work, "add", "a.txt");
+  git(work, "commit", "-qm", "first");
+  git(work, "branch", "side");
+
+  const repository = await discoverRepository(work, new GitRunner());
+  assert.ok(repository);
+  await repository.pushRemote("origin", "side", false, undefined, true);
+  assert.equal(git(remote, "rev-parse", "refs/heads/side"), git(work, "rev-parse", "side"));
+  assert.equal(git(work, "config", "--get", "branch.side.remote"), "origin");
+});
+
+test("checks out a remote branch that already has a local counterpart", async () => {
+  const base = mkdtempSync(join(tmpdir(), "jb-git-remote-checkout-"));
+  const remote = join(base, "remote.git");
+  const work = join(base, "work");
+  execFileSync("git", ["init", "--bare", "-q", "remote.git"], { cwd: base });
+  mkdirSync(work);
+  git(work, "init", "-q");
+  git(work, "config", "user.name", "JB Git Test");
+  git(work, "config", "user.email", "jb-git-test@example.invalid");
+  git(work, "remote", "add", "origin", remote);
+  writeFileSync(join(work, "a.txt"), "one\n");
+  git(work, "add", "a.txt");
+  git(work, "commit", "-qm", "first");
+  const branch = git(work, "branch", "--show-current");
+  git(work, "push", "-q", "--set-upstream", "origin", branch);
+  git(work, "checkout", "-qb", "side");
+
+  const repository = await discoverRepository(work, new GitRunner());
+  assert.ok(repository);
+  const tracking = (await repository.branches()).find((item) => item.fullName === `refs/remotes/origin/${branch}`);
+  assert.ok(tracking);
+  // `git switch --track origin/<b>` fails with "a branch named '<b>' already exists", so the
+  // local counterpart has to be detected by its own name, not by the remote-prefixed one.
+  await repository.checkout(tracking.name, tracking.kind, tracking.fullName);
+  assert.equal(git(work, "branch", "--show-current"), branch);
+});
+
+test("creates a tracking branch when checking out a remote branch with no local counterpart", async () => {
+  const base = mkdtempSync(join(tmpdir(), "jb-git-track-"));
+  const remote = join(base, "remote.git");
+  const seed = join(base, "seed");
+  const work = join(base, "work");
+  execFileSync("git", ["init", "--bare", "-q", "remote.git"], { cwd: base });
+  mkdirSync(seed);
+  git(seed, "init", "-q");
+  git(seed, "config", "user.name", "JB Git Test");
+  git(seed, "config", "user.email", "jb-git-test@example.invalid");
+  git(seed, "remote", "add", "origin", remote);
+  writeFileSync(join(seed, "a.txt"), "one\n");
+  git(seed, "add", "a.txt");
+  git(seed, "commit", "-qm", "first");
+  git(seed, "push", "-q", "origin", "HEAD");
+  git(seed, "checkout", "-qb", "feature/nested");
+  writeFileSync(join(seed, "b.txt"), "two\n");
+  git(seed, "add", "b.txt");
+  git(seed, "commit", "-qm", "second");
+  git(seed, "push", "-q", "origin", "feature/nested");
+
+  execFileSync("git", ["clone", "-q", remote, "work"], { cwd: base });
+  git(work, "config", "user.name", "JB Git Test");
+  git(work, "config", "user.email", "jb-git-test@example.invalid");
+  const repository = await discoverRepository(work, new GitRunner());
+  assert.ok(repository);
+  const tracking = (await repository.branches()).find((item) => item.fullName === "refs/remotes/origin/feature/nested");
+  assert.ok(tracking);
+  await repository.checkout(tracking.name, tracking.kind, tracking.fullName);
+  assert.equal(git(work, "branch", "--show-current"), "feature/nested");
+  assert.equal(git(work, "config", "--get", "branch.feature/nested.remote"), "origin");
 });

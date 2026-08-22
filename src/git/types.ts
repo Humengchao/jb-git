@@ -58,6 +58,8 @@ export interface GitRepositoryInfo {
 
 export interface GitBranch {
   name: string;
+  /** Full ref path, e.g. `refs/tags/v1`. Short names are ambiguous: git resolves `v1` to a tag before a branch of the same name. */
+  fullName: string;
   kind: "local" | "remote" | "tag";
   oid: string;
   upstream?: string;

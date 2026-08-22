@@ -272,8 +272,8 @@ export class RepositoryManager implements vscode.Disposable {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).fetchRemote(name, true, signal));
   }
 
-  public async pushRemote(rootPath: string, name: string, branch?: string, forceWithLease = false, signal?: AbortSignal): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).pushRemote(name, branch, forceWithLease, signal));
+  public async pushRemote(rootPath: string, name: string, branch?: string, forceWithLease = false, signal?: AbortSignal, setUpstream = false): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).pushRemote(name, branch, forceWithLease, signal, setUpstream));
   }
 
   public async worktrees(rootPath: string): Promise<GitWorktree[]> {
@@ -325,8 +325,8 @@ export class RepositoryManager implements vscode.Disposable {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).dropStash(ref));
   }
 
-  public async checkout(rootPath: string, branch: string, kind?: GitBranch["kind"]): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).checkout(branch, kind));
+  public async checkout(rootPath: string, branch: string, kind?: GitBranch["kind"], fullRef?: string): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).checkout(branch, kind, fullRef));
   }
 
   /**

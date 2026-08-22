@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6
+
+- Fix checking out a remote branch that already has a local counterpart: it ran `git switch --track origin/<b>` and failed with "a branch named '<b>' already exists", because the local branch was looked for under the remote-prefixed name. Checking out a branch or tag whose short name is shared (git reports those as `heads/x` and `tags/x`) also failed, since neither `git switch heads/x` nor `refs/tags/tags/x` is a usable reference; every ref-targeted operation now carries the full ref path.
+- Fix the branch column's "New branch" button, and the Skip button during a rebase or cherry-pick, re-asking which repository to use: those commands were typed to take a tree node and silently dropped the repository root the tool window passes. The tree-node types they referenced were dead code and are gone.
+- Stop reporting a cancelled fetch, pull, or push as an error dialog; a deliberate cancellation is no longer indistinguishable from a Git failure.
+- Fix "Fetch" and "Pull into <current>" silently fetching the wrong remote for refs left behind by `git remote remove`: the remote is now resolved from the ref itself instead of falling back to the only configured remote.
+- Fix pushing a branch that is not checked out: it targeted `origin` even when the branch tracked another remote, claimed "no remote to push to" when several remotes existed without an `origin`, and left a new branch untracked. It now prefers the branch's upstream, offers a picker, and sets upstream.
+- Confirm before "Rebase <current> onto <branch>", show progress for merge, rebase, and tag creation, and drop Merge/Rebase from tag context menus to match the command palette.
+
 ## 0.1.5
 
 - Fix "Commit & Push" appearing to skip the push: the push was gated on the commit notification, which only settles when the toast is dismissed, so it could sit idle for as long as the notification stayed up.

@@ -78,6 +78,20 @@ function gitProcessEnv(overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
+/** Marks the error raised when an AbortSignal stops a Git command, so callers can tell a deliberate cancellation from a failure. */
+export class GitAbortError extends Error {
+  public constructor() {
+    super("Git command aborted");
+    this.name = "GitAbortError";
+  }
+}
+
+/** True when the user cancelled the operation rather than Git failing. */
+export function isGitAbort(error: unknown): boolean {
+  if (error instanceof GitAbortError) return true;
+  return error instanceof GitCommandError && error.cause instanceof GitAbortError;
+}
+
 export class GitCommandError extends Error {
   public readonly exitCode: number | null;
   public readonly stderr: string;
@@ -182,7 +196,7 @@ export class GitRunner {
       });
 
       const abort = (): void => {
-        terminate(new Error("Git command aborted"));
+        terminate(new GitAbortError());
       };
       if (options.signal) {
         if (options.signal.aborted) {
