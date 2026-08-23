@@ -81,6 +81,20 @@ jobs:
             echo "::warning::VSCE_PAT is not set, so this release will NOT be published to the Marketplace. Upload the VSIX from the GitHub release, or add the secret to publish automatically."
           fi
 
+      # Cursor, Windsurf and VSCodium install from Open VSX rather than the
+      # Marketplace, so a release that skips it is invisible to those editors.
+      - name: Check for an Open VSX token
+        id: ovsx
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -n "$OVSX_PAT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::OVSX_PAT is not set, so this release will NOT reach Open VSX (Cursor, Windsurf, VSCodium). Create the namespace once with 'npx ovsx create-namespace hmc -p <token>', then add the secret."
+          fi
+
       - name: Raise the version
         id: bump
         run: node scripts/bump-version.mjs "${{ inputs.release || 'patch' }}"
@@ -107,6 +121,14 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx vsce publish --packagePath jb-git-*.vsix
 
+      - name: Publish to Open VSX
+        if: steps.ovsx.outputs.present == 'true'
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        # The namespace is created once by hand; publishing into an existing one
+        # must not fail the release, so a duplicate version is reported, not fatal.
+        run: npx ovsx publish jb-git-*.vsix -p "$OVSX_PAT" || echo "::warning::Open VSX publish failed; upload the VSIX manually at https://open-vsx.org"
+
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,9 +139,15 @@ jobs:
         env:
           VERSION: ${{ steps.bump.outputs.version }}
           PUBLISHED: ${{ steps.token.outputs.present }}
+          OPEN_VSX: ${{ steps.ovsx.outputs.present }}
         run: |
           {
             echo "## JB Git $VERSION"
+            if [ "$OPEN_VSX" = "true" ]; then
+              echo "Published to Open VSX (Cursor, Windsurf, VSCodium)."
+            else
+              echo "**Not on Open VSX**: \`OVSX_PAT\` is not configured."
+            fi
             if [ "$PUBLISHED" = "true" ]; then
               echo "Published to the Visual Studio Marketplace."
             else

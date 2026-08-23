@@ -324,7 +324,12 @@ const mergeStyles = String.raw`
   .token-string { color: var(--vscode-debugTokenExpression-string, #ce9178); }
   .token-number { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
   .token-keyword { color: var(--vscode-symbolIcon-keywordForeground, #c586c0); }
-  .token-conflict { color: var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 14%, transparent); }
+  .token-conflict { color: color-mix(in srgb, var(--vscode-errorForeground) 62%, var(--vscode-descriptionForeground)); background: transparent; opacity: 0.75; }
+  /* IDEA marks each side of a conflict with a coloured band instead of a text
+     selection, which stays readable and shows every block at once. */
+  .band { background: color-mix(in srgb, var(--vscode-charts-blue) 15%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--vscode-charts-blue) 15%, transparent); }
+  .band-conflict { background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent); }
+  .band-current { background: color-mix(in srgb, var(--vscode-errorForeground) 22%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--vscode-errorForeground) 22%, transparent); }
   .footer-group { display: flex; align-items: center; gap: 8px; }
   .hint { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 850px) { .non-conflicting, .hint { display: none; } .toolbar button { padding-left: 7px; padding-right: 7px; } }
@@ -476,21 +481,64 @@ const mergeScript = String.raw`
     return keywords.has(token) ? 'token-keyword' : '';
   }
 
+  function tokenizeInto(parent, text) {
+    const pattern = /^(?:<{7,}|={7,}|>{7,})[^\r\n]*|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|#[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*\b/gm;
+    let cursor = 0; let match;
+    while ((match = pattern.exec(text))) {
+      if (match.index > cursor) parent.append(document.createTextNode(text.slice(cursor, match.index)));
+      const className = tokenClass(match[0]);
+      if (className) { const span = document.createElement('span'); span.className = className; span.textContent = match[0]; parent.append(span); }
+      else parent.append(document.createTextNode(match[0]));
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
+  }
+
+  /**
+   * Ranges to shade in one pane. The result pane bands every conflict; the side
+   * panes band the text that conflict took from them, located by a forward scan
+   * so an unmatched side simply stays unbanded rather than shading the wrong lines.
+   */
+  function bandsFor(index) {
+    if (!conflicts.length) return [];
+    if (index === 1) {
+      return conflicts.map((entry, position) => ({
+        start: entry.start,
+        end: entry.end,
+        className: position === currentConflict ? 'band-current' : 'band-conflict',
+      }));
+    }
+    const text = editors[index].value;
+    const key = index === 0 ? 'ours' : 'theirs';
+    const bands = []; let from = 0;
+    for (const entry of conflicts) {
+      const section = entry[key];
+      if (!section) continue;
+      const at = text.indexOf(section, from);
+      if (at < 0) continue;
+      bands.push({ start: at, end: at + section.length, className: 'band' });
+      from = at + section.length;
+    }
+    return bands;
+  }
+
   function updateHighlight(index) {
     const editor = editors[index]; const target = highlights[index];
     if (editor.value.length > 1000000) {
       editor.classList.remove('syntax-enabled'); target.replaceChildren(); return;
     }
-    const pattern = /^(?:<{7,}|={7,}|>{7,})[^\r\n]*|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|#[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*\b/gm;
-    const fragment = document.createDocumentFragment(); let cursor = 0; let match;
-    while ((match = pattern.exec(editor.value))) {
-      if (match.index > cursor) fragment.append(document.createTextNode(editor.value.slice(cursor, match.index)));
-      const className = tokenClass(match[0]);
-      if (className) { const span = document.createElement('span'); span.className = className; span.textContent = match[0]; fragment.append(span); }
-      else fragment.append(document.createTextNode(match[0]));
-      cursor = match.index + match[0].length;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    for (const band of bandsFor(index)) {
+      if (band.start < cursor) continue;
+      if (band.start > cursor) tokenizeInto(fragment, editor.value.slice(cursor, band.start));
+      const shaded = document.createElement('span');
+      shaded.className = band.className;
+      tokenizeInto(shaded, editor.value.slice(band.start, band.end));
+      fragment.append(shaded);
+      cursor = band.end;
     }
-    if (cursor < editor.value.length) fragment.append(document.createTextNode(editor.value.slice(cursor)));
+    if (cursor < editor.value.length) tokenizeInto(fragment, editor.value.slice(cursor));
     target.replaceChildren(fragment); editor.classList.add('syntax-enabled');
     target.style.transform = 'translate(' + String(-editor.scrollLeft) + 'px,' + String(-editor.scrollTop) + 'px)';
   }
@@ -534,8 +582,9 @@ const mergeScript = String.raw`
     updateNumbers(); editors.forEach((_editor, index) => updateHighlight(index));
     if (selectCurrent && conflicts.length) {
       const selected = conflicts[currentConflict];
-      result.focus();
-      result.setSelectionRange(selected.start, selected.end);
+      // Deliberately no setSelectionRange: the textarea paints its text
+      // transparently over the syntax layer, so a selection would cover the
+      // conflict with a solid block. The band highlight marks it instead.
       const line = result.value.slice(0, selected.start).split(/\r\n|\r|\n/).length - 1;
       const lineHeight = Number.parseFloat(getComputedStyle(result).lineHeight) || 20;
       result.scrollTop = Math.max(0, line * lineHeight - result.clientHeight / 3);
