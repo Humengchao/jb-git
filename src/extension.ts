@@ -507,6 +507,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { label: "$(git-merge) Merge…", command: "jbGit.merge" },
         { label: "$(git-compare) Rebase…", command: "jbGit.rebase" },
         { label: "$(list-ordered) Interactively Rebase…", command: "jbGit.interactiveRebase" },
+        { label: "$(merge) Resolve Simple Conflicts", command: "jbGit.resolveSimpleConflicts" },
         { label: "$(git-commit) Cherry-pick…", command: "jbGit.cherryPick" },
         { label: "$(discard) Revert…", command: "jbGit.revert" },
         { label: "$(debug-restart) Reset HEAD…", command: "jbGit.reset" },
@@ -706,6 +707,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       if (!ref) return;
       await runWithNotification(`Rebasing onto ${ref}`, () => manager.rebase(first.repository.info.rootPath, ref));
+    }),
+    vscode.commands.registerCommand("jbGit.resolveSimpleConflicts", async (rootPath?: string) => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = await pickRepository(rootPath);
+      if (!first) return;
+      const root = first.repository.info.rootPath;
+      const conflicted = (first.status?.changes ?? []).filter((change) => change.conflicted).map((change) => change.path);
+      if (!conflicted.length) return void vscode.window.showInformationMessage("There are no conflicted files to resolve.");
+
+      const sides = await conflictSideLabels(first);
+      const labels = { ours: sides.ours, base: "base", theirs: sides.theirs };
+      let resolved = 0;
+      let remaining = 0;
+      const skipped: string[] = [];
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Resolving simple conflicts in ${conflicted.length} file(s)` },
+        async () => {
+          for (const pathSpec of conflicted) {
+            try {
+              const outcome = await manager.resolveSimpleConflicts(root, pathSpec, labels);
+              resolved += outcome.resolved;
+              remaining += outcome.remaining;
+            } catch (error) {
+              // A binary, symlink, or marker-carrying file cannot be analysed;
+              // it is reported rather than silently left out of the totals.
+              skipped.push(`${pathSpec}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+        },
+      );
+
+      const detail = skipped.length ? ` ${skipped.length} file(s) could not be analysed.` : "";
+      if (resolved === 0) {
+        await vscode.window.showInformationMessage(`No conflict could be resolved mechanically; ${remaining} still need a decision.${detail}`);
+      } else {
+        await vscode.window.showInformationMessage(
+          `Resolved ${resolved} conflict(s) that had only one possible outcome. ${remaining} still need a decision.${detail}`,
+        );
+      }
+      if (skipped.length) outputChannel.appendLine(`Simple conflict resolution skipped:\n${skipped.join("\n")}`);
     }),
     vscode.commands.registerCommand("jbGit.interactiveRebase", async (rootPath?: string, fromCommit?: string) => {
       if (!(await requireTrustedWorkspace())) return;

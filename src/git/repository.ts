@@ -6,6 +6,7 @@ import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
 import { parseUnifiedDiff, patchForHunk } from "./patch";
 import { buildRebaseTodo, shellQuote, type RebaseStep } from "../interactiveRebase";
+import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
 import {
   GitBranch,
   GitCommitOptions,
@@ -639,6 +640,59 @@ export class GitRepository {
     return Buffer.from(content.toString("utf8"), "utf8").equals(content);
   }
 
+  /**
+   * Recomputes the merge in `diff3` style so every conflict carries the base
+   * text it started from.
+   *
+   * Git's working-tree conflict shows only the two sides, which cannot say
+   * whether a side changed the text or simply kept it. The merge is replayed on
+   * temporary copies of the three stages, so the user's in-progress edits in the
+   * working tree are never touched.
+   */
+  public async conflictAnalysis(pathSpec: string): Promise<MergeBlock[]> {
+    await this.assertConflictedPath(pathSpec);
+    const stageModes = await this.conflictStageModes(pathSpec);
+    const [base, ours, theirs] = await Promise.all([
+      this.conflictStage(pathSpec, 1, stageModes),
+      this.conflictStage(pathSpec, 2, stageModes),
+      this.conflictStage(pathSpec, 3, stageModes),
+    ]);
+    for (const side of [base, ours, theirs]) {
+      if (side !== null && !GitRepository.isEditableText(side)) {
+        throw new Error(`${pathSpec} is not a text file, so its conflict cannot be analysed line by line.`);
+      }
+    }
+
+    const directory = await mkdtemp(path.join(tmpdir(), "jb-git-merge-"));
+    try {
+      const files = { ours: path.join(directory, "ours"), base: path.join(directory, "base"), theirs: path.join(directory, "theirs") };
+      // A missing stage is an add/add or delete/modify conflict; an empty file
+      // is exactly how merge-file represents "this side has nothing here".
+      await Promise.all([
+        writeFile(files.ours, ours ?? Buffer.alloc(0)),
+        writeFile(files.base, base ?? Buffer.alloc(0)),
+        writeFile(files.theirs, theirs ?? Buffer.alloc(0)),
+      ]);
+      const merged = await this.runner.run([
+        "merge-file", "-p", "--diff3",
+        "-L", "ours", "-L", "base", "-L", "theirs",
+        files.ours, files.base, files.theirs,
+      ], {
+        cwd: this.info.rootPath,
+        // merge-file reports the number of remaining conflicts as its exit code,
+        // so anything up to the marker limit is a normal result, not a failure.
+        allowExitCodes: Array.from({ length: 128 }, (_, index) => index + 1),
+      });
+      const parsed = parseDiff3(merged.stdout.toString("utf8"));
+      if (parsed.ambiguous) {
+        throw new Error(`${pathSpec} contains conflict-marker lines of its own, so its conflict cannot be framed reliably.`);
+      }
+      return parsed.blocks;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
   public async conflictVersions(pathSpec: string): Promise<GitConflictVersions> {
     await this.assertConflictedPath(pathSpec);
     const stageModes = await this.conflictStageModes(pathSpec);
@@ -685,6 +739,36 @@ export class GitRepository {
         await this.writeConflictResult(target, pathSpec, content);
       }
       await this.runner.run(["add", "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
+    });
+  }
+
+  /**
+   * Resolves the conflicts in a file that only have one sensible outcome once
+   * the base is known, and leaves the rest for the user.
+   *
+   * The file is staged only when nothing is left to decide: staging a file that
+   * still carries markers would tell Git the conflict was settled.
+   */
+  public async resolveSimpleConflicts(
+    pathSpec: string,
+    labels: Diff3Labels,
+  ): Promise<{ resolved: number; remaining: number }> {
+    return this.serial(async () => {
+      const blocks = await this.conflictAnalysis(pathSpec);
+      const stageModes = await this.conflictStageModes(pathSpec);
+      if ([...stageModes.values()].some((mode) => mode !== "100644" && mode !== "100755")) {
+        throw new Error(`${pathSpec} is a symbolic-link or special-file conflict; resolve it by accepting ours or theirs.`);
+      }
+      const outcome = resolveSimpleConflicts(blocks, labels);
+      if (outcome.resolved === 0) return { resolved: 0, remaining: outcome.remaining };
+
+      const target = this.worktreePath(pathSpec);
+      await this.assertSafeConflictParent(target);
+      await this.writeConflictResult(target, pathSpec, outcome.text);
+      if (outcome.remaining === 0) {
+        await this.runner.run(["add", "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
+      }
+      return { resolved: outcome.resolved, remaining: outcome.remaining };
     });
   }
 

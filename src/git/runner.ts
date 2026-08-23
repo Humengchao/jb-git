@@ -9,6 +9,12 @@ export interface GitRunOptions {
   maxOutputBytes?: number;
   /** Maximum total command runtime in milliseconds. Defaults to 10 minutes. */
   timeoutMs?: number;
+  /**
+   * Non-zero exit codes to treat as success. Some Git commands report a count
+   * rather than a failure: `merge-file` exits with the number of conflicts, and
+   * reading that from a thrown error would mean parsing redacted output.
+   */
+  allowExitCodes?: readonly number[];
 }
 
 export interface GitResult {
@@ -278,7 +284,7 @@ export class GitRunner {
         }
         finish(() => {
           this.emitTrace(args, options.cwd, startedAt, started, result.exitCode, result.stdout, result.stderr);
-          if (result.exitCode === 0) {
+          if (result.exitCode === 0 || options.allowExitCodes?.includes(result.exitCode)) {
             resolve(result);
           } else {
             reject(new GitCommandError(args, result));

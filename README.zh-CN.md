@@ -20,7 +20,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 | 带本地修改的分支切换 | 已实现 | Smart Checkout 把已跟踪、已暂存和未跟踪修改保存到临时 Stash，以不可变 OID 定位，切换后恢复 Working Tree 与 Index。切换或恢复失败时 Stash 会保留供恢复。 |
 | Push 安全流程 | 已实现 | Push 前先 Fetch，预览并执行精确的“本地 ref → 远端 ref”目标及 outgoing commits，并支持首次设置 upstream。目标分支命中可配置的 protected branch pattern 时禁用强推，其他目标只提供 Force with Lease；当前检出分支向既有 upstream 推送遇到 non-fast-forward rejection 时，可选择 Pull with Rebase/Merge 后重新预览。 |
 | SHA-1 / SHA-256 对象 ID | 已实现 | Log 选择与消息校验接受完整的 40 位和 64 位十六进制对象 ID，最终对象解析仍交由 Git 校验。 |
-| 合并冲突解决 | 部分实现 | 文本冲突具备可调宽的左/结果/右三栏、可编辑结果、逐块或整文件取舍、冲突导航、草稿恢复、外部修改防覆盖和 Apply 后暂存。Rebase 中会正确标为 **Rebase Target** 与 **Replayed Commit**，不会把 stage 2/3 错标成普通 ours/theirs。当前仍不是 IDEA 完整的、以 Base 为中心的三方 Merge：Base/Result 比较、完整语义对齐及全部 simple/non-conflicting 控制仍有差距。 |
+| 合并冲突解决 | 部分实现 | 文本冲突具备可调宽的左/结果/右三栏、可编辑结果、逐块或整文件取舍、冲突导航、草稿恢复、外部修改防覆盖和 Apply 后暂存。Rebase 中会正确标为 **Rebase Target** 与 **Replayed Commit**，不会把 stage 2/3 错标成普通 ours/theirs。`JB Git: Resolve Simple Conflicts` 会在三个 stage 的副本上以 `diff3` 重放合并，使每个冲突块都带上 base，并自动解决只有唯一合理结果的块：两侧改动相同、仅一侧改动了 base，或两侧只有空白差异。只解决了一部分的文件会刻意保持未暂存；文件自身含冲突标记时直接拒绝而不靠猜测分块。编辑器尚未逐块展示 base，Base/Result 比较模式仍有差距。 |
 | Merge / Rebase / Cherry-pick / Revert / Reset | 部分实现 | 启动操作及 Continue/Abort/Skip 已实现，但历史编辑深度仍低于 IDEA。 |
 | Interactive Rebase 编辑器 | 已实现 | `JB Git: Interactively Rebase from Commit` 会打开可视化序列编辑器，支持重排以及 `pick`、`reword`、`squash`、`fixup`、`drop`。改写消息的动作会降级为 Git 可无人值守执行的 todo，因此不会启动任何编辑器；冲突暂停后 `Continue` 仍会正确应用 reword 的消息。相比 IDEA 更窄：起始提交必须是 HEAD 的祖先，范围内含 merge 时直接拒绝而不是压平，工作区有改动时拒绝而不是 autostash，且不提供 `exec`/`break` 行。 |
 | File History 与 Blame | 部分实现 | File History 和命令输出式 Blame 已实现，并能安全处理特殊路径。 |

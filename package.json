@@ -149,6 +149,10 @@
         "title": "JB Git: Interactively Rebase from Commit"
       },
       {
+        "command": "jbGit.resolveSimpleConflicts",
+        "title": "JB Git: Resolve Simple Conflicts"
+      },
+      {
         "command": "jbGit.cherryPick",
         "title": "JB Git: Cherry-pick Commit"
       },

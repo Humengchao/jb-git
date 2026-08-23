@@ -3,6 +3,7 @@ import { discoverRepositories, discoverRepository, GitRepository } from "./git/r
 import * as path from "node:path";
 import { GitRunner, isGitAbort } from "./git/runner";
 import { RebaseStep } from "./interactiveRebase";
+import { Diff3Labels } from "./mergeAnalysis";
 import { GitBlameEntry, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
@@ -153,6 +154,14 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async resolveConflict(rootPath: string, pathSpec: string, side: "ours" | "theirs"): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).resolveConflict(pathSpec, side));
+  }
+
+  public async resolveSimpleConflicts(
+    rootPath: string,
+    pathSpec: string,
+    labels: Diff3Labels,
+  ): Promise<{ resolved: number; remaining: number }> {
+    return this.mutate(rootPath, () => this.requireRepository(rootPath).resolveSimpleConflicts(pathSpec, labels));
   }
 
   public async conflictVersions(rootPath: string, pathSpec: string): Promise<GitConflictVersions> {
