@@ -328,9 +328,11 @@ const mergeStyles = String.raw`
   /* IDEA separates the panes with wide strips that draw each change as a
      coloured shape connecting its side chunk to the result region, and put the
      per-change apply/ignore actions on that shape. */
-  .splitter { flex: 0 0 34px; position: relative; cursor: col-resize; background: var(--vscode-editor-background); border-left: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); }
+  .splitter { flex: 0 0 38px; position: relative; cursor: col-resize; background: var(--vscode-editor-background); border-left: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); }
   .splitter.active { background: color-mix(in srgb, var(--vscode-sash-hoverBorder) 18%, var(--vscode-editor-background)); }
-  .splitter svg { position: absolute; left: 0; right: 0; top: 34px; width: 100%; height: calc(100% - 34px); display: block; pointer-events: none; }
+  /* Only the strip's own connector canvas stretches; a descendant selector here
+     would also stretch the icon inside every gutter button. */
+  .splitter > svg { position: absolute; left: 0; right: 0; top: 34px; width: 100%; height: calc(100% - 34px); display: block; pointer-events: none; }
   .splitter polygon { pointer-events: auto; cursor: pointer; stroke-width: 1; }
   .connector-conflict { fill: color-mix(in srgb, var(--merge-conflict) 15%, transparent); stroke: color-mix(in srgb, var(--merge-conflict) 45%, transparent); }
   .connector-current { fill: color-mix(in srgb, var(--merge-conflict) 30%, transparent); stroke: color-mix(in srgb, var(--merge-conflict) 85%, transparent); stroke-width: 1.5; }
@@ -338,10 +340,19 @@ const mergeStyles = String.raw`
   .connector-manual { fill: color-mix(in srgb, var(--merge-edited) 15%, transparent); stroke: color-mix(in srgb, var(--merge-edited) 45%, transparent); }
   .connector-ignored { fill: color-mix(in srgb, var(--merge-muted) 13%, transparent); stroke: color-mix(in srgb, var(--merge-muted) 40%, transparent); }
   .strip-buttons { position: absolute; left: 0; right: 0; top: 34px; bottom: 0; overflow: hidden; pointer-events: none; }
-  .chunk-action { pointer-events: auto; position: absolute; width: 15px; height: 15px; min-height: 0; min-width: 0; padding: 0; display: flex; align-items: center; justify-content: center; font-size: 13px; line-height: 1; border: 1px solid transparent; border-radius: 3px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); background: transparent; cursor: pointer; }
-  .chunk-action:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-button-secondaryHoverBackground)); border-color: var(--vscode-contrastActiveBorder, transparent); }
-  .chunk-action.accept { color: var(--merge-applied); font-weight: 700; }
-  .chunk-action.ignore { color: var(--merge-muted); }
+  /* Gutter actions read as small chips outlined in their own action colour and
+     filled on hover, so they stay legible on top of a shaded connector without
+     competing with the code in either pane. */
+  .chunk-action { --action: var(--merge-muted); pointer-events: auto; position: absolute; width: 16px; height: 16px; min-height: 0; min-width: 0; padding: 0; display: flex; align-items: center; justify-content: center; border: 1px solid color-mix(in srgb, var(--action) 45%, transparent); border-radius: 4px; color: var(--action); background: color-mix(in srgb, var(--action) 12%, var(--vscode-editor-background)); cursor: pointer; }
+  .chunk-action:hover { border-color: color-mix(in srgb, var(--action) 90%, transparent); background: color-mix(in srgb, var(--action) 26%, var(--vscode-editor-background)); }
+  .chunk-action:active { background: color-mix(in srgb, var(--action) 40%, var(--vscode-editor-background)); }
+  .chunk-action:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+  .chunk-action svg { display: block; width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .chunk-action.accept { --action: var(--merge-applied); }
+  .chunk-action.ignore { --action: var(--merge-muted); }
+  /* Neutral, not the edited blue: blue already means "hand edited" on a band,
+     and only the action that changes the result earns a colour. */
+  .chunk-action.revert { --action: var(--merge-muted); }
   .code-shell { display: grid; grid-template-columns: 48px minmax(0, 1fr); min-height: 0; overflow: hidden; }
   .line-numbers { margin: 0; padding: 10px 8px 30px 4px; overflow: hidden; user-select: none; text-align: right; color: var(--vscode-editorLineNumber-foreground); background: var(--vscode-editorGutter-background); font: var(--vscode-editor-font-size, 13px) / var(--vscode-editor-line-height, 20px) var(--vscode-editor-font-family, monospace); }
   .editor-stack { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--vscode-editor-background); }
@@ -389,6 +400,7 @@ const mergeScript = String.raw`
     'Apply this change to the result': '将此更改应用到结果',
     'Keep both: append this side too': '两者都保留：再追加此侧',
     'Ignore this change and keep the result text': '忽略此更改，保留当前结果文本',
+    'Revert this change to unresolved': '撤销此更改，恢复为未解决',
     'Abort': '中止', 'Apply': '应用', 'All changes processed': '所有更改已处理',
     'Resolved as deleted': '已解决为删除', 'Applying merge result…': '正在应用合并结果…',
   };
@@ -612,7 +624,7 @@ const mergeScript = String.raw`
         const geom = geometry[Number(action.dataset.index)];
         const range = geom && (strip.side === 0 ? geom.left : geom.right);
         const y = range ? yOf(strip.side, range[0]) : -1;
-        if (y < 0 || y > height - 15) { action.style.display = 'none'; continue; }
+        if (y < 0 || y > height - 16) { action.style.display = 'none'; continue; }
         action.style.display = 'flex';
         action.style.top = String(Math.round(y)) + 'px';
       }
@@ -624,12 +636,32 @@ const mergeScript = String.raw`
     overlayFrame = requestAnimationFrame(() => { overlayFrame = undefined; renderOverlays(); });
   }
 
-  function chunkAction(index, glyph, kind, x, title, handler) {
+  // Stroked 12x12 icons: text glyphs like » and × render at a different weight
+  // and baseline in every font the themes pick, which is what made the gutter
+  // look ragged.
+  const ACTION_ICONS = {
+    'apply-right': 'M2.4 6h5.3M6 3.7L8.3 6 6 8.3',
+    'apply-left': 'M9.6 6H4.3M6 3.7L3.7 6 6 8.3',
+    ignore: 'M3.6 3.6l4.8 4.8M8.4 3.6L3.6 8.4',
+    revert: 'M4.7 3.3L2.5 5.5l2.2 2.2M2.5 5.5h4.4a2.6 2.6 0 1 1 0 5.2H5.7',
+  };
+
+  function actionIcon(name) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 12 12');
+    svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', ACTION_ICONS[name]);
+    svg.append(path);
+    return svg;
+  }
+
+  function chunkAction(index, icon, kind, x, title, handler) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'chunk-action ' + kind;
     button.dataset.index = String(index);
-    button.textContent = glyph;
+    button.append(actionIcon(icon));
     button.title = mt(title);
     button.setAttribute('aria-label', mt(title));
     button.style.left = String(x) + 'px';
@@ -639,25 +671,32 @@ const mergeScript = String.raw`
     return button;
   }
 
-  /** IDEA's per-change gutter actions: an arrow applies the side, × ignores it. */
+  /**
+   * IDEA's per-change gutter actions, as a pair on each strip so no change is
+   * ever left with an empty gutter: the arrow applies that side, and the outer
+   * slot holds × while the change is open and the revert arrow once it is
+   * settled. Applying one side must not strand the other, so the side that has
+   * not been taken keeps its arrow and "keep both" stays one click away.
+   */
   function rebuildStripButtons() {
     for (const strip of strips) {
       const fromLeft = strip.side === 0;
+      const near = fromLeft ? 3 : 19;
+      const far = fromLeft ? 19 : 3;
       const fragment = document.createDocumentFragment();
       model.regions.forEach((region, index) => {
-        // After one side was applied, the other side's arrow stays: IDEA
-        // resolves a conflict as "both" by applying the two sides in turn.
         const crossSide = fromLeft ? 'theirs' : 'ours';
         if (region.resolution === undefined || region.resolution === crossSide) {
           const both = region.resolution === crossSide;
-          fragment.append(chunkAction(index, fromLeft ? '»' : '«', 'accept', fromLeft ? 1 : 17,
+          fragment.append(chunkAction(index, fromLeft ? 'apply-right' : 'apply-left', 'accept', near,
             both ? 'Keep both: append this side too' : 'Apply this change to the result',
             () => resolveAs(index, both ? 'both' : (fromLeft ? 'ours' : 'theirs'))));
         }
-        if (region.resolution === undefined) {
-          fragment.append(chunkAction(index, '×', 'ignore', fromLeft ? 17 : 1,
-            'Ignore this change and keep the result text', () => ignoreAt(index)));
-        }
+        fragment.append(region.resolution === undefined
+          ? chunkAction(index, 'ignore', 'ignore', far,
+            'Ignore this change and keep the result text', () => ignoreAt(index))
+          : chunkAction(index, 'revert', 'revert', far,
+            'Revert this change to unresolved', () => resetAt(index)));
       });
       strip.buttons.replaceChildren(fragment);
     }
@@ -800,6 +839,17 @@ const mergeScript = String.raw`
     if (!model.regions[index]) return;
     model = MergeRegions.ignoreRegion(model, index);
     advanceFrom(index);
+    saveDraft();
+    updateControls(false);
+  }
+
+  /** Undoes one change's resolution, leaving every other decision alone. */
+  function resetAt(index) {
+    if (!model.regions[index]) return;
+    model = MergeRegions.resetRegion(model, index);
+    setResultText(model.text);
+    resultDeleted = false;
+    currentConflict = index;
     saveDraft();
     updateControls(false);
   }

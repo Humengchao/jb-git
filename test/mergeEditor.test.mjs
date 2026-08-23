@@ -31,6 +31,7 @@ test("shares the tested region model with the sandboxed script instead of a copy
   assert.match(scriptMatch[1], /MergeRegions\.applyEdit\(model\.regions, MergeRegions\.textDelta/);
   assert.match(scriptMatch[1], /MergeRegions\.resolveRegion/);
   assert.match(scriptMatch[1], /MergeRegions\.ignoreRegion/);
+  assert.match(scriptMatch[1], /MergeRegions\.resetRegion/);
   assert.match(scriptMatch[1], /MergeRegions\.unresolved/);
   // Drafts round-trip through the marker form so recovery keeps working.
   assert.match(scriptMatch[1], /MergeRegions\.toMarkerText\(model, markerLabels\)/);
@@ -67,8 +68,17 @@ test("offers IDEA-style per-change gutter actions and pane connectors", () => {
   assert.match(scriptMatch[1], /rebuildStripButtons/);
   assert.match(scriptMatch[1], /chunk-action/);
   assert.match(scriptMatch[1], /connector-' \+ geom\.state/);
-  assert.match(scriptMatch[1], /fromLeft \? '»' : '«'/);
+  assert.match(scriptMatch[1], /fromLeft \? 'apply-right' : 'apply-left'/);
   assert.match(scriptMatch[1], /Ignore this change and keep the result text/);
+  // Stroked icons, not text glyphs, so the gutter keeps one weight in every theme.
+  assert.match(scriptMatch[1], /createElementNS\('http:\/\/www\.w3\.org\/2000\/svg', 'path'\)/);
+  // Applying one side must not strand the other: the outer slot always holds an
+  // action, × while the change is open and revert once it is settled.
+  assert.match(scriptMatch[1], /region\.resolution === undefined\r?\n\s*\? chunkAction\(index, 'ignore'/);
+  assert.match(scriptMatch[1], /chunkAction\(index, 'revert', 'revert', far/);
+  assert.match(source, /\.chunk-action\.revert/);
+  // A descendant selector here would stretch the icon inside every button.
+  assert.match(source, /\.splitter > svg \{/);
   // Applying the second side of a conflict keeps both, the way IDEA resolves it.
   assert.match(scriptMatch[1], /both \? 'both' : \(fromLeft \? 'ours' : 'theirs'\)/);
   assert.match(source, /\.connector-conflict/);

@@ -4,6 +4,7 @@ import {
   applyEdit,
   buildModel,
   ignoreRegion,
+  resetRegion,
   resolveRegion,
   textDelta,
   toMarkerText,
@@ -122,6 +123,26 @@ test("ignoring a change keeps the text and stops counting it", () => {
   // Ignore answers an open question only; a handled region keeps its resolution.
   const applied = resolveRegion(model, 0, "theirs");
   assert.equal(ignoreRegion(applied, 0), applied);
+});
+
+test("reverting one change restores it without touching the others", () => {
+  const model = buildModel(`a\n${conflicted("m1\n", "t1\n")}b\n${conflicted("m2\n", "t2\n")}c\n`);
+  const applied = resolveRegion(resolveRegion(model, 0, "both"), 1, "theirs");
+  const reverted = resetRegion(applied, 0);
+  assert.equal(reverted.text, "a\nm1\nb\nt2\nc\n");
+  assert.equal(reverted.regions[0].resolution, undefined);
+  assert.equal(unresolved(reverted.regions), 1);
+  // The later change keeps its own decision and still points at its own text.
+  assert.equal(reverted.regions[1].resolution, "theirs");
+  assert.equal(reverted.text.slice(reverted.regions[1].start, reverted.regions[1].end), "t2\n");
+  // A reverted region carries no resolution at all, so it is indistinguishable
+  // from a freshly parsed one: it can be decided again, and a draft carries its
+  // markers back to Git.
+  assert.deepEqual(reverted.regions[0], { start: 2, end: 5, ours: "m1\n", theirs: "t1\n" });
+  assert.equal(toMarkerText(reverted, LABELS), `a\n${conflicted("m1\n", "t1\n")}b\nt2\nc\n`);
+  assert.equal(resolveRegion(reverted, 0, "theirs").text, "a\nt1\nb\nt2\nc\n");
+  // Reverting an open change would have nothing to undo.
+  assert.equal(resetRegion(model, 0), model);
 });
 
 test("rebuilds marker text for a result that still has conflicts", () => {

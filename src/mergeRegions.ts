@@ -154,6 +154,28 @@ export function ignoreRegion(model: MergeModel, index: number): MergeModel {
   };
 }
 
+/**
+ * Puts a region back to unresolved, showing our side again.
+ *
+ * This is IDEA's revert gutter action, and the only way back into a change
+ * after a wrong button: without it a mis-click is only undoable by resetting
+ * the whole file, which throws away every other decision as well.
+ */
+export function resetRegion(model: MergeModel, index: number): MergeModel {
+  const region = model.regions[index];
+  if (!region || region.resolution === undefined) return model;
+  const text = model.text.slice(0, region.start) + region.ours + model.text.slice(region.end);
+  const shift = region.ours.length - (region.end - region.start);
+  const regions = model.regions.map((other, position) => {
+    // Rebuilt without a resolution rather than spread, so the region is
+    // indistinguishable from one buildModel just produced.
+    if (position === index) return { start: other.start, end: other.start + region.ours.length, ours: other.ours, theirs: other.theirs };
+    if (other.start >= region.end) return { ...other, start: other.start + shift, end: other.end + shift };
+    return other;
+  });
+  return { text, regions };
+}
+
 /** Keeps both sides, adding the separator Git would have needed between them. */
 function joinSides(ours: string, theirs: string): string {
   if (!ours || !theirs) return ours + theirs;
