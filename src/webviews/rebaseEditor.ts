@@ -125,6 +125,7 @@ function editorDocument(): string {
 
 function styles(): string {
   return `
+    :root { color-scheme: light dark; }
     body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; }
     #app { padding: 12px 16px 72px; }
     h1 { font-size: 1.1em; margin: 0 0 4px; }

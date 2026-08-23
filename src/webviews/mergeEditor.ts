@@ -300,6 +300,7 @@ function mergeRegionsScript(): Promise<string> {
 
 const mergeStyles = String.raw`
   * { box-sizing: border-box; }
+  :root { color-scheme: light dark; }
   html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
   body { color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); }
   button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 1px solid transparent; border-radius: 2px; min-height: 28px; padding: 3px 12px; cursor: pointer; }
@@ -333,12 +334,15 @@ const mergeStyles = String.raw`
   /* Only the strip's own connector canvas stretches; a descendant selector here
      would also stretch the icon inside every gutter button. */
   .splitter > svg { position: absolute; left: 0; right: 0; top: 34px; width: 100%; height: calc(100% - 34px); display: block; pointer-events: none; }
-  .splitter polygon { pointer-events: auto; cursor: pointer; stroke-width: 1; }
-  .connector-conflict { fill: color-mix(in srgb, var(--merge-conflict) 15%, transparent); stroke: color-mix(in srgb, var(--merge-conflict) 45%, transparent); }
-  .connector-current { fill: color-mix(in srgb, var(--merge-conflict) 30%, transparent); stroke: color-mix(in srgb, var(--merge-conflict) 85%, transparent); stroke-width: 1.5; }
-  .connector-applied { fill: color-mix(in srgb, var(--merge-applied) 15%, transparent); stroke: color-mix(in srgb, var(--merge-applied) 45%, transparent); }
-  .connector-manual { fill: color-mix(in srgb, var(--merge-edited) 15%, transparent); stroke: color-mix(in srgb, var(--merge-edited) 45%, transparent); }
-  .connector-ignored { fill: color-mix(in srgb, var(--merge-muted) 13%, transparent); stroke: color-mix(in srgb, var(--merge-muted) 40%, transparent); }
+  .splitter polygon { pointer-events: auto; cursor: pointer; }
+  /* One colour per change state, carried in --state, so the current change can
+     be emphasised in any state the way IDEA outlines the one you are on. */
+  .state-conflict { --state: var(--merge-conflict); }
+  .state-applied { --state: var(--merge-applied); }
+  .state-manual { --state: var(--merge-edited); }
+  .state-ignored { --state: var(--merge-muted); }
+  .connector { --fill: 15%; --line: 45%; fill: color-mix(in srgb, var(--state) var(--fill), transparent); stroke: color-mix(in srgb, var(--state) var(--line), transparent); stroke-width: 1; }
+  .connector.is-current { --fill: 30%; --line: 90%; stroke-width: 1.5; }
   .strip-buttons { position: absolute; left: 0; right: 0; top: 34px; bottom: 0; overflow: hidden; pointer-events: none; }
   /* Gutter actions read as small chips outlined in their own action colour and
      filled on hover, so they stay legible on top of a shaded connector without
@@ -354,6 +358,12 @@ const mergeStyles = String.raw`
      and only the action that changes the result earns a colour. */
   .chunk-action.revert { --action: var(--merge-muted); }
   .code-shell { display: grid; grid-template-columns: 48px minmax(0, 1fr); min-height: 0; overflow: hidden; }
+  /* IDEA's marker strip: every change at its place in the whole file, so a long
+     merge shows where the work is left without scrolling for it. */
+  .pane.result .code-shell { grid-template-columns: 48px minmax(0, 1fr) 12px; }
+  .ruler { position: relative; overflow: hidden; background: var(--vscode-editorGutter-background); border-left: 1px solid var(--vscode-panel-border); cursor: pointer; }
+  .ruler-mark { position: absolute; left: 2px; right: 2px; height: 3px; border-radius: 1px; background: color-mix(in srgb, var(--state) 70%, transparent); }
+  .ruler-mark.is-current { left: 1px; right: 1px; height: 5px; background: var(--state); }
   .line-numbers { margin: 0; padding: 10px 8px 30px 4px; overflow: hidden; user-select: none; text-align: right; color: var(--vscode-editorLineNumber-foreground); background: var(--vscode-editorGutter-background); font: var(--vscode-editor-font-size, 13px) / var(--vscode-editor-line-height, 20px) var(--vscode-editor-font-family, monospace); }
   .editor-stack { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--vscode-editor-background); }
   .syntax-layer, textarea { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 10px 12px 30px; border: 0; outline: 0; overflow: auto; white-space: pre; tab-size: var(--vscode-editor-tab-size, 4); font: var(--vscode-editor-font-size, 13px) / var(--vscode-editor-line-height, 20px) var(--vscode-editor-font-family, monospace); }
@@ -371,15 +381,13 @@ const mergeStyles = String.raw`
   .token-conflict { color: color-mix(in srgb, var(--vscode-errorForeground) 62%, var(--vscode-descriptionForeground)); background: transparent; opacity: 0.75; }
   /* IDEA marks each change with a coloured band instead of a text selection:
      red while a conflict is unresolved, green once a side was applied, blue for
-     text the user rewrote, grey for a change that was looked at and ignored. */
-  .band-conflict { background: color-mix(in srgb, var(--merge-conflict) 13%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-conflict) 13%, transparent); }
-  .band-current { background: color-mix(in srgb, var(--merge-conflict) 26%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-conflict) 26%, transparent); }
-  .band-applied { background: color-mix(in srgb, var(--merge-applied) 14%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-applied) 14%, transparent); }
-  .band-manual { background: color-mix(in srgb, var(--merge-edited) 14%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-edited) 14%, transparent); }
-  .band-ignored { background: color-mix(in srgb, var(--merge-muted) 12%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-muted) 12%, transparent); }
-  .band-side { background: color-mix(in srgb, var(--merge-conflict) 11%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-conflict) 11%, transparent); }
-  .band-side-current { background: color-mix(in srgb, var(--merge-conflict) 22%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-conflict) 22%, transparent); }
-  .band-side-done { background: color-mix(in srgb, var(--merge-muted) 10%, transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--merge-muted) 10%, transparent); }
+     text the user rewrote, grey for a change that was looked at and ignored.
+     The side panes shade the same change more faintly, so the result stays the
+     pane that reads loudest. */
+  .band { background: color-mix(in srgb, var(--state) var(--alpha, 13%), transparent); box-shadow: -8px 0 0 0 color-mix(in srgb, var(--state) var(--alpha, 13%), transparent); }
+  .band.is-current { --alpha: 27%; }
+  .band.side { --alpha: 10%; }
+  .band.side.is-current { --alpha: 22%; }
   .footer-group { display: flex; align-items: center; gap: 8px; }
   .hint { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 850px) { .non-conflicting, .hint { display: none; } .toolbar button { padding-left: 7px; padding-right: 7px; } }
@@ -401,6 +409,8 @@ const mergeScript = String.raw`
     'Keep both: append this side too': '两者都保留：再追加此侧',
     'Ignore this change and keep the result text': '忽略此更改，保留当前结果文本',
     'Revert this change to unresolved': '撤销此更改，恢复为未解决',
+    ' · draft restored': ' · 已恢复草稿', 'Draft restored · ready to apply': '已恢复草稿 · 可以应用',
+    'Could not apply the merge result': '无法应用合并结果',
     'Abort': '中止', 'Apply': '应用', 'All changes processed': '所有更改已处理',
     'Resolved as deleted': '已解决为删除', 'Applying merge result…': '正在应用合并结果…',
   };
@@ -428,7 +438,7 @@ const mergeScript = String.raw`
         '<div id="strip-left" class="splitter" role="separator" aria-orientation="vertical" tabindex="0"><svg aria-hidden="true"></svg><div class="strip-buttons"></div></div>',
         '<section id="result-pane" class="pane result">',
           '<div id="result-title" class="pane-title">Result</div>',
-          '<div class="code-shell"><pre id="result-lines" class="line-numbers" aria-hidden="true"></pre><div class="editor-stack"><pre id="result-highlight" class="syntax-layer" aria-hidden="true"></pre><textarea id="result" spellcheck="false" aria-label="Editable merge result"></textarea></div></div>',
+          '<div class="code-shell"><pre id="result-lines" class="line-numbers" aria-hidden="true"></pre><div class="editor-stack"><pre id="result-highlight" class="syntax-layer" aria-hidden="true"></pre><textarea id="result" spellcheck="false" aria-label="Editable merge result"></textarea></div><div id="ruler" class="ruler" title="Changes in this file"></div></div>',
         '</section>',
         '<div id="strip-right" class="splitter" role="separator" aria-orientation="vertical" tabindex="0"><svg aria-hidden="true"></svg><div class="strip-buttons"></div></div>',
         '<section id="right-pane" class="pane">',
@@ -458,6 +468,7 @@ const mergeScript = String.raw`
   const result = document.getElementById('result');
   const right = document.getElementById('right');
   const counter = document.getElementById('counter');
+  const ruler = document.getElementById('ruler');
   const apply = document.getElementById('apply');
   const conflictButtons = ['previous', 'next', 'take-left', 'take-both', 'take-right'].map((id) => document.getElementById(id));
   const wholeFileButtons = ['accept-left', 'accept-right', 'reset'].map((id) => document.getElementById(id));
@@ -483,6 +494,9 @@ const mergeScript = String.raw`
   let applying = false;
   let loaded = false;
   let synchronizing = false;
+  const HIGHLIGHT_MARGIN = 40;
+  let highlightWindows = [undefined, undefined, undefined];
+  let highlightFrame;
   let updateFrame;
   let overlayFrame;
   let draftTimer;
@@ -533,8 +547,8 @@ const mergeScript = String.raw`
     if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
   }
 
-  function regionState(region, index) {
-    if (region.resolution === undefined) return index === currentConflict ? 'current' : 'conflict';
+  function regionState(region) {
+    if (region.resolution === undefined) return 'conflict';
     if (region.resolution === 'manual') return 'manual';
     if (region.resolution === 'ignored') return 'ignored';
     return 'applied';
@@ -584,7 +598,7 @@ const mergeScript = String.raw`
     geometry = model.regions.map((region, index) => {
       const res = resultSpans[index];
       return {
-        state: regionState(region, index),
+        state: regionState(region),
         res,
         left: leftSpans[index] || alignedSpan(0, res[0]),
         right: rightSpans[index] || alignedSpan(2, res[0]),
@@ -602,7 +616,7 @@ const mergeScript = String.raw`
     const lineHeights = editors.map((editor) => Number.parseFloat(getComputedStyle(editor).lineHeight) || 20);
     const yOf = (index, line) => EDITOR_PADDING + line * lineHeights[index] - editors[index].scrollTop;
     for (const strip of strips) {
-      const width = strip.svg.clientWidth || 32;
+      const width = strip.svg.clientWidth || 38;
       const height = strip.svg.clientHeight;
       let shapes = '';
       geometry.forEach((geom, index) => {
@@ -615,7 +629,8 @@ const mergeScript = String.raw`
         const leftBottom = Math.max(yOf(leftIndex, leftRange[1]), leftTop + 2);
         const rightBottom = Math.max(yOf(rightIndex, rightRange[1]), rightTop + 2);
         if (Math.max(leftBottom, rightBottom) < 0 || Math.min(leftTop, rightTop) > height) return;
-        shapes += '<polygon class="connector-' + geom.state + '" data-index="' + String(index) + '" points="0,'
+        shapes += '<polygon class="connector state-' + geom.state + (index === currentConflict ? ' is-current' : '')
+          + '" data-index="' + String(index) + '" points="0,'
           + String(Math.round(leftTop)) + ' ' + String(width) + ',' + String(Math.round(rightTop)) + ' '
           + String(width) + ',' + String(Math.round(rightBottom)) + ' 0,' + String(Math.round(leftBottom)) + '"></polygon>';
       });
@@ -629,6 +644,19 @@ const mergeScript = String.raw`
         action.style.top = String(Math.round(y)) + 'px';
       }
     }
+  }
+
+  /** One tick per change, placed by its share of the file, like IDEA's strip. */
+  function renderRuler() {
+    const total = Math.max(1, lineCount(result.value) - 1);
+    const fragment = document.createDocumentFragment();
+    geometry.forEach((geom, index) => {
+      const mark = document.createElement('div');
+      mark.className = 'ruler-mark state-' + geom.state + (index === currentConflict ? ' is-current' : '');
+      mark.style.top = String(Math.min(99, (geom.res[0] / total) * 100)) + '%';
+      fragment.append(mark);
+    });
+    ruler.replaceChildren(fragment);
   }
 
   function scheduleOverlays() {
@@ -702,12 +730,17 @@ const mergeScript = String.raw`
     }
   }
 
+  function bandClass(region, position, side) {
+    return 'band state-' + regionState(region) + (side ? ' side' : '')
+      + (position === currentConflict ? ' is-current' : '');
+  }
+
   /** Ranges to shade in one pane, coloured by each change's state like IDEA. */
   function bandsFor(index) {
     if (!model.regions.length) return [];
     if (index === 1) {
       return model.regions
-        .map((region, position) => ({ start: region.start, end: region.end, className: 'band-' + regionState(region, position) }))
+        .map((region, position) => ({ start: region.start, end: region.end, className: bandClass(region, position, false) }))
         .filter((band) => band.end > band.start);
     }
     const offsets = chunkOffsets[index] || [];
@@ -715,32 +748,87 @@ const mergeScript = String.raw`
     model.regions.forEach((region, position) => {
       const chunk = offsets[position];
       if (!chunk || chunk.end <= chunk.start) return;
-      const className = region.resolution !== undefined ? 'band-side-done'
-        : position === currentConflict ? 'band-side-current' : 'band-side';
-      bands.push({ start: chunk.start, end: chunk.end, className });
+      bands.push({ start: chunk.start, end: chunk.end, className: bandClass(region, position, true) });
     });
     return bands;
   }
 
+  function lineHeightOf(index) {
+    return Number.parseFloat(getComputedStyle(editors[index]).lineHeight) || 20;
+  }
+
+  /**
+   * The slice of a pane to paint: the lines on screen plus a margin.
+   *
+   * Painting the whole file cost ~115ms of every keystroke on a 3,000-line
+   * merge, because each one re-tokenised all three panes into tens of
+   * thousands of nodes. The syntax layer only has to be right where it is
+   * visible, so it renders a window and is translated into place.
+   */
+  function highlightWindow(index) {
+    const text = editors[index].value;
+    const lineHeight = lineHeightOf(index);
+    const first = Math.max(0, Math.floor(editors[index].scrollTop / lineHeight) - HIGHLIGHT_MARGIN);
+    const count = Math.ceil(editors[index].clientHeight / lineHeight) + HIGHLIGHT_MARGIN * 2;
+    let start = 0; let line = 0;
+    while (line < first && start < text.length) { if (text.charCodeAt(start) === 10) line += 1; start += 1; }
+    let end = start; let seen = 0;
+    while (end < text.length && seen < count) { if (text.charCodeAt(end) === 10) seen += 1; end += 1; }
+    return { first: first, last: first + seen, start: start, end: end };
+  }
+
+  /** Puts the rendered window under the text it highlights. */
+  function positionHighlight(index) {
+    const view = highlightWindows[index];
+    const top = (view ? view.first * lineHeightOf(index) : 0) - editors[index].scrollTop;
+    highlights[index].style.transform = 'translate(' + String(-editors[index].scrollLeft) + 'px,' + String(top) + 'px)';
+  }
+
+  /** True once the pane is scrolled close to the edge of what was painted. */
+  function highlightStale(index) {
+    const view = highlightWindows[index];
+    if (!view) return false;
+    const lineHeight = lineHeightOf(index);
+    const top = editors[index].scrollTop / lineHeight;
+    return (view.first > 0 && top < view.first + 4)
+      || (view.end < editors[index].value.length && top + editors[index].clientHeight / lineHeight > view.last - 4);
+  }
+
+  function scheduleHighlights() {
+    if (highlightFrame) return;
+    highlightFrame = requestAnimationFrame(() => {
+      highlightFrame = undefined;
+      editors.forEach((_editor, index) => { if (highlightStale(index)) updateHighlight(index); });
+    });
+  }
+
   function updateHighlight(index) {
     const editor = editors[index]; const target = highlights[index];
-    if (editor.value.length > 1000000) {
-      editor.classList.remove('syntax-enabled'); target.replaceChildren(); return;
+    if (editor.value.length > 8000000) {
+      editor.classList.remove('syntax-enabled'); target.replaceChildren(); highlightWindows[index] = undefined; return;
     }
+    // A window that opens inside a block comment or a template string cannot
+    // know it, so the first construct on screen may lose its colour until the
+    // pane is scrolled; nothing is mispositioned by it.
+    const view = highlightWindow(index);
     const fragment = document.createDocumentFragment();
-    let cursor = 0;
+    let cursor = view.start;
     for (const band of bandsFor(index)) {
-      if (band.start < cursor) continue;
-      if (band.start > cursor) tokenizeInto(fragment, editor.value.slice(cursor, band.start));
+      if (band.end <= cursor || band.start >= view.end) continue;
+      const start = Math.max(band.start, cursor);
+      const end = Math.min(band.end, view.end);
+      if (end <= start) continue;
+      if (start > cursor) tokenizeInto(fragment, editor.value.slice(cursor, start));
       const shaded = document.createElement('span');
       shaded.className = band.className;
-      tokenizeInto(shaded, editor.value.slice(band.start, band.end));
+      tokenizeInto(shaded, editor.value.slice(start, end));
       fragment.append(shaded);
-      cursor = band.end;
+      cursor = end;
     }
-    if (cursor < editor.value.length) tokenizeInto(fragment, editor.value.slice(cursor));
+    if (cursor < view.end) tokenizeInto(fragment, editor.value.slice(cursor, view.end));
     target.replaceChildren(fragment); editor.classList.add('syntax-enabled');
-    target.style.transform = 'translate(' + String(-editor.scrollLeft) + 'px,' + String(-editor.scrollTop) + 'px)';
+    highlightWindows[index] = view;
+    positionHighlight(index);
   }
 
   function alignmentAnchors(source, target) {
@@ -768,7 +856,7 @@ const mergeScript = String.raw`
     return before[1] + (after[1] - before[1]) * ratio;
   }
 
-  function updateControls(selectCurrent) {
+  function updateControls(reveal) {
     const total = model.regions.length;
     currentConflict = total === 0 ? 0 : Math.max(0, Math.min(currentConflict, total - 1));
     const remaining = MergeRegions.unresolved(model.regions);
@@ -784,21 +872,34 @@ const mergeScript = String.raw`
     editors.forEach((_editor, index) => updateHighlight(index));
     rebuildStripButtons();
     renderOverlays();
-    if (selectCurrent && total) {
-      const selected = model.regions[currentConflict];
-      // Deliberately no setSelectionRange: the textarea paints its text
-      // transparently over the syntax layer, so a selection would cover the
-      // conflict with a solid block. The band highlight marks it instead.
-      const line = result.value.slice(0, selected.start).split(/\r\n|\r|\n/).length - 1;
-      const lineHeight = Number.parseFloat(getComputedStyle(result).lineHeight) || 20;
-      result.scrollTop = Math.max(0, line * lineHeight - result.clientHeight / 3);
-      syncFrom(result);
-    }
+    renderRuler();
+    if (reveal) showCurrent(reveal);
   }
 
-  function scheduleUpdate(selectCurrent = false) {
+  /**
+   * Brings the current change into view. Navigation always jumps; an action
+   * only scrolls when the change it moved on to has left the viewport, since
+   * applying a side you can see should not jerk the pane out from under you.
+   *
+   * Deliberately no setSelectionRange: the textarea paints its text
+   * transparently over the syntax layer, so a selection would cover the change
+   * with a solid block. The band marks it instead.
+   */
+  function showCurrent(mode) {
+    if (!model.regions.length) return;
+    const selected = model.regions[currentConflict];
+    const line = result.value.slice(0, selected.start).split(/\r\n|\r|\n/).length - 1;
+    const lineHeight = lineHeightOf(1);
+    const top = result.scrollTop / lineHeight;
+    const bottom = top + result.clientHeight / lineHeight;
+    if (mode === 'reveal' && line >= top + 1 && line <= bottom - 2) return;
+    result.scrollTop = Math.max(0, line * lineHeight - result.clientHeight / 3);
+    syncFrom(result);
+  }
+
+  function scheduleUpdate(reveal) {
     if (updateFrame) cancelAnimationFrame(updateFrame);
-    updateFrame = requestAnimationFrame(() => { updateFrame = undefined; updateControls(selectCurrent); });
+    updateFrame = requestAnimationFrame(() => { updateFrame = undefined; updateControls(reveal); });
   }
 
   function serializeResult() {
@@ -832,7 +933,7 @@ const mergeScript = String.raw`
     resultDeleted = false;
     advanceFrom(index);
     saveDraft();
-    updateControls(false);
+    updateControls('reveal');
   }
 
   function ignoreAt(index) {
@@ -840,7 +941,7 @@ const mergeScript = String.raw`
     model = MergeRegions.ignoreRegion(model, index);
     advanceFrom(index);
     saveDraft();
-    updateControls(false);
+    updateControls('reveal');
   }
 
   /** Undoes one change's resolution, leaving every other decision alone. */
@@ -851,14 +952,15 @@ const mergeScript = String.raw`
     resultDeleted = false;
     currentConflict = index;
     saveDraft();
-    updateControls(false);
+    updateControls('reveal');
   }
 
   function syncFrom(source) {
     const sourceIndex = editors.indexOf(source);
     gutters[sourceIndex].scrollTop = source.scrollTop;
-    highlights[sourceIndex].style.transform = 'translate(' + String(-source.scrollLeft) + 'px,' + String(-source.scrollTop) + 'px)';
+    positionHighlight(sourceIndex);
     scheduleOverlays();
+    scheduleHighlights();
     if (synchronizing) return;
     synchronizing = true;
     const sourceLineHeight = Number.parseFloat(getComputedStyle(source).lineHeight) || 20;
@@ -869,7 +971,7 @@ const mergeScript = String.raw`
       editor.scrollTop = alignedLine(sourceIndex, index, topLine) * targetLineHeight;
       editor.scrollLeft = source.scrollLeft;
       gutters[index].scrollTop = editor.scrollTop;
-      highlights[index].style.transform = 'translate(' + String(-editor.scrollLeft) + 'px,' + String(-editor.scrollTop) + 'px)';
+      positionHighlight(index);
     });
     requestAnimationFrame(() => { synchronizing = false; });
   }
@@ -882,21 +984,21 @@ const mergeScript = String.raw`
     resultDeleted = false;
     alignmentCache.clear();
     saveDraft();
-    scheduleUpdate(false);
+    scheduleUpdate();
   });
   result.addEventListener('click', () => {
     const index = model.regions.findIndex((region) => result.selectionStart >= region.start && result.selectionStart <= region.end);
-    if (index >= 0) { currentConflict = index; updateControls(false); }
+    if (index >= 0) { currentConflict = index; updateControls(); }
   });
   document.getElementById('previous').addEventListener('click', () => {
     if (!model.regions.length) return;
     currentConflict = (currentConflict + model.regions.length - 1) % model.regions.length;
-    updateControls(true);
+    updateControls('jump');
   });
   document.getElementById('next').addEventListener('click', () => {
     if (!model.regions.length) return;
     currentConflict = (currentConflict + 1) % model.regions.length;
-    updateControls(true);
+    updateControls('jump');
   });
   document.getElementById('take-left').addEventListener('click', () => resolveAs(currentConflict, 'ours'));
   document.getElementById('take-both').addEventListener('click', () => resolveAs(currentConflict, 'both'));
@@ -906,9 +1008,21 @@ const mergeScript = String.raw`
     strip.svg.addEventListener('click', (event) => {
       if (event.target.nodeName !== 'polygon') return;
       const index = Number(event.target.getAttribute('data-index'));
-      if (Number.isInteger(index) && model.regions[index]) { currentConflict = index; updateControls(false); }
+      if (Number.isInteger(index) && model.regions[index]) { currentConflict = index; updateControls(); }
     });
   }
+  // Clicking the strip goes to the change nearest that point in the file.
+  ruler.addEventListener('click', (event) => {
+    if (!geometry.length) return;
+    const fraction = (event.clientY - ruler.getBoundingClientRect().top) / Math.max(1, ruler.clientHeight);
+    const target = fraction * Math.max(1, lineCount(result.value) - 1);
+    let nearest = 0;
+    geometry.forEach((geom, index) => {
+      if (Math.abs(geom.res[0] - target) < Math.abs(geometry[nearest].res[0] - target)) nearest = index;
+    });
+    currentConflict = nearest;
+    updateControls('jump');
+  });
   window.addEventListener('resize', scheduleOverlays);
   // window.confirm() is disabled in the webview sandbox; confirmations are
   // delegated to the host, which answers with a 'confirmed' message.
@@ -920,7 +1034,7 @@ const mergeScript = String.raw`
     resultDeleted = initialResultDeleted;
     currentConflict = 0;
     saveDraft();
-    updateControls(true);
+    updateControls('jump');
   });
   document.getElementById('cancel').addEventListener('click', () => {
     if (serializeResult() === initialSerialized && resultDeleted === initialResultDeleted) {
@@ -934,7 +1048,7 @@ const mergeScript = String.raw`
     if (MergeRegions.unresolved(model.regions) !== 0 || applying) return;
     if (draftTimer) clearTimeout(draftTimer);
     applying = true;
-    updateControls(false);
+    updateControls();
     counter.textContent = mt('Applying merge result…');
     vscode.postMessage({ type: 'apply', result: model.text, deleted: resultDeleted });
   });
@@ -947,6 +1061,13 @@ const mergeScript = String.raw`
     if (event.key === 'F7' && model.regions.length) {
       event.preventDefault();
       document.getElementById(event.shiftKey ? 'previous' : 'next').click();
+      return;
+    }
+    // Escape closes the dialog in IDEA; the Abort handler still asks before
+    // dropping a result that was worked on.
+    if (event.key === 'Escape' && !applying) {
+      event.preventDefault();
+      document.getElementById('cancel').click();
     }
   });
   window.addEventListener('beforeunload', () => {
@@ -1015,10 +1136,12 @@ const mergeScript = String.raw`
       document.getElementById('result-title').textContent = message.labels.result;
       document.getElementById('right-title').textContent = message.labels.theirs + (message.versions.theirsExists ? '' : ' (deleted)');
       currentConflict = 0;
-      updateControls(true);
+      updateControls('jump');
       if (message.restoredDraft) {
         counter.className = 'counter';
-        counter.textContent = model.regions.length ? counter.textContent + ' · draft restored' : 'Draft restored · ready to apply';
+        counter.textContent = model.regions.length
+          ? counter.textContent + mt(' · draft restored')
+          : mt('Draft restored · ready to apply');
       }
       return;
     }
@@ -1027,12 +1150,12 @@ const mergeScript = String.raw`
         model = { text: left.value, regions: [] };
         setResultText(model.text);
         resultDeleted = !window.mergeVersions.oursExists;
-        saveDraft(); updateControls(false);
+        saveDraft(); updateControls();
       } else if (message.action === 'acceptRight') {
         model = { text: right.value, regions: [] };
         setResultText(model.text);
         resultDeleted = !window.mergeVersions.theirsExists;
-        saveDraft(); updateControls(false);
+        saveDraft(); updateControls();
       } else if (message.action === 'cancel') {
         if (draftTimer) clearTimeout(draftTimer);
         vscode.postMessage({ type: 'cancel' });
@@ -1041,9 +1164,9 @@ const mergeScript = String.raw`
     }
     if (message.type === 'applyFailed') {
       applying = false;
-      updateControls(false);
+      updateControls();
       counter.className = 'counter error';
-      counter.textContent = message.message || 'Could not apply the merge result';
+      counter.textContent = message.message || mt('Could not apply the merge result');
     }
     if (message.type === 'draftWarning') {
       counter.className = 'counter error'; counter.textContent = message.message;

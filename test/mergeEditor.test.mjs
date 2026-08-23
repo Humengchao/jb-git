@@ -67,7 +67,7 @@ test("offers IDEA-style per-change gutter actions and pane connectors", () => {
   // anchored on coloured shapes joining the side chunk to the result region.
   assert.match(scriptMatch[1], /rebuildStripButtons/);
   assert.match(scriptMatch[1], /chunk-action/);
-  assert.match(scriptMatch[1], /connector-' \+ geom\.state/);
+  assert.match(scriptMatch[1], /'<polygon class="connector state-' \+ geom\.state/);
   assert.match(scriptMatch[1], /fromLeft \? 'apply-right' : 'apply-left'/);
   assert.match(scriptMatch[1], /Ignore this change and keep the result text/);
   // Stroked icons, not text glyphs, so the gutter keeps one weight in every theme.
@@ -81,8 +81,63 @@ test("offers IDEA-style per-change gutter actions and pane connectors", () => {
   assert.match(source, /\.splitter > svg \{/);
   // Applying the second side of a conflict keeps both, the way IDEA resolves it.
   assert.match(scriptMatch[1], /both \? 'both' : \(fromLeft \? 'ours' : 'theirs'\)/);
-  assert.match(source, /\.connector-conflict/);
-  assert.match(source, /\.band-applied/);
+  assert.match(source, /\.state-conflict \{ --state: var\(--merge-conflict\); }/);
+  assert.match(source, /\.state-applied \{ --state: var\(--merge-applied\); }/);
+});
+
+test("marks the change you are on in whatever state it is already in", () => {
+  // Resolving a change must not make it stop being the current one: IDEA keeps
+  // the current change emphasised after it turns green, grey or blue.
+  assert.match(scriptMatch[1], /function regionState\(region\) \{/);
+  assert.match(scriptMatch[1], /position === currentConflict \? ' is-current' : ''/);
+  assert.match(scriptMatch[1], /index === currentConflict \? ' is-current' : ''/);
+  assert.match(source, /\.band\.is-current \{ --alpha: 27%; }/);
+  assert.match(source, /\.connector\.is-current \{/);
+});
+
+test("paints only the visible slice of each pane", () => {
+  // Highlighting the whole file cost ~115ms of every keystroke on a 3,000-line
+  // merge; the layer renders a window and is translated into place instead.
+  assert.match(scriptMatch[1], /function highlightWindow\(index\)/);
+  assert.match(scriptMatch[1], /HIGHLIGHT_MARGIN/);
+  assert.match(scriptMatch[1], /function positionHighlight\(index\)/);
+  assert.match(scriptMatch[1], /function highlightStale\(index\)/);
+  // Scrolling repaints only once the window is nearly used up.
+  assert.match(scriptMatch[1], /scheduleHighlights\(\);/);
+  assert.match(scriptMatch[1], /view\.first \* lineHeightOf\(index\)/);
+});
+
+test("keeps the change an action moved to on screen, and closes on Escape", () => {
+  // Applying a side used to leave the next change off screen with no feedback:
+  // the counter dropped but nothing moved.
+  assert.match(scriptMatch[1], /function showCurrent\(mode\)/);
+  assert.match(scriptMatch[1], /if \(mode === 'reveal' && line >= top \+ 1 && line <= bottom - 2\) return;/);
+  assert.match(scriptMatch[1], /updateControls\('reveal'\)/);
+  assert.match(scriptMatch[1], /updateControls\('jump'\)/);
+  assert.match(scriptMatch[1], /event\.key === 'Escape'/);
+  // Every user-visible string goes through the translator.
+  assert.match(scriptMatch[1], /mt\(' · draft restored'\)/);
+  assert.match(scriptMatch[1], /mt\('Could not apply the merge result'\)/);
+});
+
+test("shows every change on a marker strip that jumps to it", () => {
+  // IDEA's strip: a long merge shows where the work is left without scrolling.
+  assert.match(scriptMatch[1], /function renderRuler\(\)/);
+  assert.match(scriptMatch[1], /'ruler-mark state-' \+ geom\.state/);
+  assert.match(scriptMatch[1], /ruler\.addEventListener\('click'/);
+  assert.match(source, /\.pane\.result \.code-shell \{ grid-template-columns: 48px minmax\(0, 1fr\) 12px; }/);
+});
+
+test("every webview declares the colour scheme it is painted in", () => {
+  // Without this Chromium paints light scrollbars and form controls over a dark
+  // theme; the merge and rebase editors were the two that had not said so.
+  for (const name of ["mergeEditor", "rebaseEditor", "logPanel", "branchComparison"]) {
+    assert.match(
+      readSource(`../src/webviews/${name}.ts`, import.meta.url),
+      /color-scheme: light dark;/,
+      `${name} should declare its colour scheme`,
+    );
+  }
 });
 
 test("labels rebase conflict sides by replay semantics instead of generic ours and theirs", () => {
