@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 
 export interface GitRunOptions {
   cwd: string;
@@ -7,6 +7,8 @@ export interface GitRunOptions {
   input?: string | Buffer;
   /** Maximum combined stdout/stderr retained in memory. Defaults to 64 MiB. */
   maxOutputBytes?: number;
+  /** Maximum total command runtime in milliseconds. Defaults to 10 minutes. */
+  timeoutMs?: number;
 }
 
 export interface GitResult {
@@ -25,15 +27,26 @@ export interface GitTraceEvent {
   stderr: string;
 }
 
-const SENSITIVE_OPTION = /^(?:--?(?:password|passwd|token|access-token|auth|authorization|oauth-token|private-key))(?:=|$)/i;
+const SENSITIVE_OPTION = /^(?:--?(?:password|passwd|token|access-token|auth|authorization|proxy-authorization|oauth-token|private-token|api-key|client-secret|private-key|credential))(?:=|$)/i;
+
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s?#@]+@/gi;
+const SENSITIVE_QUERY_VALUE = /([?&#;](?:access[_-]?token|oauth[_-]?token|id[_-]?token|refresh[_-]?token|private[_-]?token|api[_-]?key|client[_-]?secret|password|passwd|token|auth|authorization|signature|x-amz-signature)=)[^&#;\s"'<>]+/gi;
+const AUTHORIZATION_HEADER = /(\b(?:proxy-authorization|authorization)\b\s*[:=]\s*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*/gi;
+const AUTH_SCHEME_VALUE = /(\b(?:bearer|basic)\s+)[a-z0-9._~+/=-]+/gi;
+const SENSITIVE_KEY_VALUE = /((?:["']?)(?:password|passwd|access[_-]?token|oauth[_-]?token|id[_-]?token|refresh[_-]?token|private[_-]?token|api[_-]?key|client[_-]?secret|token|credential|auth|authorization|proxy-authorization)(?:["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|(?:bearer|basic)\s+[^\s,;&#]+|[^\s,;&#]+)/gi;
 
 /** Removes credentials from command arguments and Git output before they reach UI or logs. */
 export function redactGitText(value: string): string {
   return value
-    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+@/gi, "$1***@")
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+@/gi, "$1***@")
-    .replace(/([?&](?:access_?token|auth|authorization|oauth_?token|password)=)[^&#\s]+/gi, "$1***")
-    .replace(/((?:authorization|password|access[_-]?token|oauth[_-]?token)\s*[:=]\s*)(?!\*\*\*)[^\s,;]+/gi, "$1***");
+    // A username can itself be a personal access token, so redact the complete
+    // URL userinfo rather than preserving the part before a colon.
+    .replace(URL_USERINFO, "$1***@")
+    .replace(SENSITIVE_QUERY_VALUE, "$1***")
+    // Header values may contain an authentication scheme followed by the real
+    // secret. Redact the complete header, including obsolete folded lines.
+    .replace(AUTHORIZATION_HEADER, "$1***")
+    .replace(SENSITIVE_KEY_VALUE, "$1***")
+    .replace(AUTH_SCHEME_VALUE, "$1***");
 }
 
 export function redactGitArgs(args: readonly string[]): string[] {
@@ -53,6 +66,10 @@ export function redactGitArgs(args: readonly string[]): string[] {
 
 /** Bytes of process output decoded for a trace preview before redaction. */
 const TRACE_PREVIEW_BYTES = 16_000;
+const DEFAULT_GIT_TIMEOUT_MS = 10 * 60 * 1_000;
+const TERMINATION_GRACE_MS = 2_000;
+const TERMINATION_SETTLE_MS = 5_000;
+const MAX_TIMER_MS = 2_147_483_647;
 
 /** Decodes only a small prefix for tracing so multi-megabyte output never runs through the redaction regexes. */
 function tracePreview(output: Buffer | string): string {
@@ -105,7 +122,7 @@ export class GitCommandError extends Error {
     const safeArgs = redactGitArgs(args);
     const stderr = redactGitText(result.stderr?.toString("utf8") ?? "");
     const stdout = redactGitText(result.stdout?.toString("utf8") ?? "");
-    const detail = cause instanceof Error ? cause.message : stderr.trim() || stdout.trim() || "Git command failed";
+    const detail = redactGitText(cause instanceof Error ? cause.message : stderr.trim() || stdout.trim() || "Git command failed");
     super(`git ${safeArgs.join(" ")}: ${detail}`);
     this.name = "GitCommandError";
     this.exitCode = result.exitCode ?? null;
@@ -131,38 +148,106 @@ export class GitRunner {
 
   public run(args: readonly string[], options: GitRunOptions): Promise<GitResult> {
     return new Promise<GitResult>((resolve, reject) => {
+      // Validate before spawning: an invalid option must not leave an
+      // unobserved child process running after this Promise rejects.
+      const timeoutMs = normalizeTimeout(options.timeoutMs);
       const startedAt = new Date();
       const started = Date.now();
       let settled = false;
       let terminationError: Error | undefined;
+      let closeResult: GitResult | undefined;
+      let forceKillSent = false;
+      let treeKillPending = 0;
       let forceKillTimer: NodeJS.Timeout | undefined;
+      let terminationSettleTimer: NodeJS.Timeout | undefined;
+      let terminationPollTimer: NodeJS.Timeout | undefined;
+      let timeoutTimer: NodeJS.Timeout | undefined;
       const child = spawn(this.gitPath, [...args], {
         cwd: options.cwd,
         env: gitProcessEnv(options.env),
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
+        // A separate process group lets POSIX cancellation reach hooks,
+        // credential helpers, editors, and any other descendants as one unit.
+        detached: process.platform !== "win32",
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       let outputBytes = 0;
       const maximumOutput = options.maxOutputBytes ?? 64 * 1024 * 1024;
 
+      const resultFromOutput = (exitCode = child.exitCode ?? -1): GitResult => ({
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+        exitCode,
+      });
+
       const finish = (callback: () => void): void => {
         if (settled) return;
         settled = true;
         if (forceKillTimer) clearTimeout(forceKillTimer);
+        if (terminationSettleTimer) clearTimeout(terminationSettleTimer);
+        if (terminationPollTimer) clearTimeout(terminationPollTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
         options.signal?.removeEventListener("abort", abort);
         callback();
+      };
+
+      const finishTermination = (result = closeResult ?? resultFromOutput()): void => {
+        const error = terminationError;
+        if (!error) return;
+        finish(() => {
+          this.emitTrace(args, options.cwd, startedAt, started, null, result.stdout, error.message);
+          reject(new GitCommandError(args, result, error));
+        });
+      };
+
+      const maybeFinishTermination = (): void => {
+        if (settled || !terminationError || !closeResult || treeKillPending > 0) return;
+        if (process.platform !== "win32" && !forceKillSent && processGroupExists(child.pid)) {
+          if (!terminationPollTimer) {
+            terminationPollTimer = setTimeout(() => {
+              terminationPollTimer = undefined;
+              maybeFinishTermination();
+            }, 25);
+            terminationPollTimer.unref();
+          }
+          return;
+        }
+        finishTermination(closeResult);
+      };
+
+      const killTree = (force: boolean): void => {
+        treeKillPending += 1;
+        void terminateProcessTree(child, force).finally(() => {
+          treeKillPending -= 1;
+          maybeFinishTermination();
+        });
       };
 
       const terminate = (error: Error): void => {
         if (terminationError) return;
         terminationError = error;
-        child.kill("SIGTERM");
-        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+        child.stdin.destroy();
+        killTree(false);
+        forceKillTimer = setTimeout(() => {
+          forceKillSent = true;
+          killTree(true);
+        }, TERMINATION_GRACE_MS);
         forceKillTimer.unref();
+        // Even a descendant that escaped the process group and inherited a
+        // pipe must not keep this Promise (and a repository mutex) forever.
+        terminationSettleTimer = setTimeout(() => {
+          forceKillSent = true;
+          killTree(true);
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finishTermination();
+        }, TERMINATION_GRACE_MS + TERMINATION_SETTLE_MS);
+        terminationSettleTimer.unref();
       };
       const remember = (target: Buffer[], chunk: Buffer): void => {
+        if (settled || terminationError) return;
         const copy = Buffer.from(chunk);
         outputBytes += copy.length;
         if (outputBytes > maximumOutput) {
@@ -174,23 +259,26 @@ export class GitRunner {
       child.stdout.on("data", (chunk: Buffer) => remember(stdout, chunk));
       child.stderr.on("data", (chunk: Buffer) => remember(stderr, chunk));
       child.on("error", (error) => {
+        if (terminationError) {
+          closeResult ??= resultFromOutput();
+          maybeFinishTermination();
+          return;
+        }
         finish(() => {
           this.emitTrace(args, options.cwd, startedAt, started, null, "", error.message);
           reject(new GitCommandError(args, {}, error));
         });
       });
       child.on("close", (exitCode) => {
-        const result: GitResult = {
-          stdout: Buffer.concat(stdout),
-          stderr: Buffer.concat(stderr),
-          exitCode: exitCode ?? -1,
-        };
+        const result = resultFromOutput(exitCode ?? -1);
+        closeResult = result;
+        if (terminationError) {
+          maybeFinishTermination();
+          return;
+        }
         finish(() => {
-          const terminationMessage = terminationError?.message ?? "";
-          this.emitTrace(args, options.cwd, startedAt, started, terminationError ? null : result.exitCode, result.stdout, terminationMessage || result.stderr);
-          if (terminationError) {
-            reject(new GitCommandError(args, result, terminationError));
-          } else if (result.exitCode === 0) {
+          this.emitTrace(args, options.cwd, startedAt, started, result.exitCode, result.stdout, result.stderr);
+          if (result.exitCode === 0) {
             resolve(result);
           } else {
             reject(new GitCommandError(args, result));
@@ -208,6 +296,10 @@ export class GitRunner {
         }
         options.signal.addEventListener("abort", abort, { once: true });
       }
+      timeoutTimer = setTimeout(() => {
+        terminate(new Error(`Git command timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+      timeoutTimer.unref();
 
       child.stdin.on("error", () => {
         // A terminating child can close stdin before a pending write finishes.
@@ -251,4 +343,66 @@ export class GitRunner {
       }
     }
   }
+}
+
+function normalizeTimeout(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return DEFAULT_GIT_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("Git command timeoutMs must be a positive finite number");
+  }
+  return Math.min(Math.floor(timeoutMs), MAX_TIMER_MS);
+}
+
+function processGroupExists(pid: number | undefined): boolean {
+  if (pid === undefined || process.platform === "win32") return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function terminateProcessTree(child: ChildProcessWithoutNullStreams, force: boolean): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, force ? "SIGKILL" : "SIGTERM");
+      return;
+    } catch {
+      // Fall back to the direct process even for ESRCH. That error can mean
+      // process-group creation was unavailable rather than that the child is
+      // already gone.
+      try { child.kill(force ? "SIGKILL" : "SIGTERM"); } catch { /* already gone */ }
+      return;
+    }
+  }
+
+  // Node has no Windows Job Object API. taskkill is present on supported
+  // Windows versions and /T walks the descendant tree before /F terminates it.
+  await new Promise<void>((resolve) => {
+    let finished = false;
+    const complete = (): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(safetyTimer);
+      resolve();
+    };
+    const killer = spawn("taskkill.exe", ["/pid", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const safetyTimer = setTimeout(() => {
+      try { killer.kill(); } catch { /* already gone */ }
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      complete();
+    }, TERMINATION_SETTLE_MS);
+    safetyTimer.unref();
+    killer.once("error", () => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      complete();
+    });
+    killer.once("close", complete);
+  });
 }

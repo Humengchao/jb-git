@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -51,6 +61,28 @@ test("discovers a repository and reads its status", async () => {
   assert.equal(status.changes.find((change) => change.path === "untracked.txt")?.kind, "untracked");
   const branches = await repository.branches();
   assert.equal(branches.find((branch) => branch.name === initialBranch)?.kind, "local");
+});
+
+test("reads SHA-256 log and blame object IDs when Git supports that repository format", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-sha256-"));
+  try {
+    execFileSync("git", ["init", "--object-format=sha256", "-q"], { cwd: root, stdio: "ignore" });
+  } catch {
+    context.skip("the configured Git runtime does not support SHA-256 repositories");
+    return;
+  }
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), "sha256\n");
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "sha256 commit");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  const [commit] = await repository.logRef("HEAD", 1);
+  assert.match(commit.hash, /^[0-9a-f]{64}$/);
+  const [line] = await repository.blame("file.txt");
+  assert.equal(line.hash, commit.hash);
 });
 
 test("discovers nested and bare repositories", async () => {
@@ -135,6 +167,8 @@ test("runs commit, branch, and stash operations through Git Core", async () => {
   assert.match(await repository.showCommit(revision), /update/);
   assert.match(await repository.formatPatch(revision, "file.txt"), /Subject: \[PATCH\] update/);
   assert.match(await repository.compareRefHistory(initialRevision, revision), />.*update/);
+  assert.deepEqual(await repository.aheadBehind(initialRevision, revision), { left: 0, right: 1 });
+  assert.deepEqual((await repository.logRange(initialRevision, revision)).map((commit) => commit.hash), [revision]);
   assert.match(await repository.diffRefs(initialRevision, revision), /-one[\s\S]*\+two/);
   assert.deepEqual(await repository.diffFiles(initialRevision, revision), [{ status: "M", path: "file.txt" }]);
   const blame = await repository.blame("file.txt");
@@ -301,6 +335,29 @@ test("shelves tracked changes and restores them as unstaged work", async () => {
   assert.equal(restored.staged, false);
   assert.equal(restored.unstaged, true);
   assert.equal(readText(join(root, "file.txt")), "shelved\n");
+});
+
+test("restores the staging area when applying a Smart Checkout stash", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-smart-checkout-stash-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "file.txt"), "base\n");
+  git(root, "add", "file.txt");
+  git(root, "commit", "-qm", "initial");
+  writeFileSync(join(root, "file.txt"), "indexed\n");
+  git(root, "add", "file.txt");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  await repository.stash("smart checkout", true, false);
+  const [entry] = await repository.stashes();
+  assert.ok(entry);
+  await repository.applyStash(entry.ref, true, entry.oid, true);
+  const [restored] = (await repository.status()).changes;
+  assert.equal(restored.staged, true);
+  assert.equal(restored.unstaged, false);
+  assert.equal(readText(join(root, "file.txt")), "indexed\n");
 });
 
 test("keeps the real index intact when a selected-path commit fails", async () => {
@@ -662,6 +719,28 @@ test("sets upstream when pushing a branch that has none", async () => {
   assert.equal(git(work, "config", "--get", "branch.side.remote"), "origin");
 });
 
+test("pushes the exact fully-qualified source and destination shown by the preview", async () => {
+  const base = mkdtempSync(join(tmpdir(), "jb-git-exact-push-"));
+  const remote = join(base, "remote.git");
+  const work = join(base, "work");
+  execFileSync("git", ["init", "--bare", "-q", "remote.git"], { cwd: base });
+  mkdirSync(work);
+  git(work, "init", "-q");
+  git(work, "config", "user.name", "JB Git Test");
+  git(work, "config", "user.email", "jb-git-test@example.invalid");
+  git(work, "remote", "add", "origin", remote);
+  writeFileSync(join(work, "a.txt"), "one\n");
+  git(work, "add", "a.txt");
+  git(work, "commit", "-qm", "first");
+  git(work, "branch", "source");
+
+  const repository = await discoverRepository(work, new GitRunner());
+  assert.ok(repository);
+  await repository.pushRemote("origin", "refs/heads/source:refs/heads/review/source", false, undefined, true);
+  assert.equal(git(remote, "rev-parse", "refs/heads/review/source"), git(work, "rev-parse", "refs/heads/source"));
+  assert.equal(git(work, "config", "--get", "branch.source.merge"), "refs/heads/review/source");
+});
+
 test("checks out a remote branch that already has a local counterpart", async () => {
   const base = mkdtempSync(join(tmpdir(), "jb-git-remote-checkout-"));
   const remote = join(base, "remote.git");
@@ -821,4 +900,153 @@ test("routes non-UTF-8 conflicts through the binary flow instead of mangling the
   // Editing these bytes as a JS string turns 0xE9 into U+FFFD; Apply would then write the
   // replacement characters back. The whole-file (binary) flow avoids the text round trip.
   assert.equal(versions.binary, true, "legacy encodings must not be edited as text");
+});
+
+test("resolves relative common Git directories from the discovery working directory", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-common-dir-"));
+  const nested = join(root, "packages", "app", "src");
+  mkdirSync(nested, { recursive: true });
+  git(root, "init", "-q");
+
+  // In a normal repository Git returns ../../../../.git from this cwd. That
+  // value is relative to `nested`, not to the repository root.
+  const repository = await discoverRepository(nested, new GitRunner());
+  assert.ok(repository);
+  assert.equal(sameDirectory(repository.info.gitDir, join(root, ".git")), true);
+  assert.equal(sameDirectory(repository.info.commonGitDir, join(root, ".git")), true);
+});
+
+test("treats exact file names as literal pathspecs across repository operations", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-literal-paths-"));
+  const magic = ":(glob)*";
+  const innocent = "innocent.txt";
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, magic), "base magic\n");
+  writeFileSync(join(root, innocent), "base innocent\n");
+  git(root, "--literal-pathspecs", "add", "--", magic, innocent);
+  git(root, "commit", "-qm", "initial literal paths");
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  assert.equal((await repository.blame(magic))[0]?.content, "base magic");
+  const exactFormatPatch = await repository.formatPatch("HEAD", magic);
+  assert.match(exactFormatPatch, /Subject: \[PATCH\] initial literal paths/);
+  assert.doesNotMatch(exactFormatPatch, /innocent\.txt/);
+
+  writeFileSync(join(root, magic), "changed magic\n");
+  writeFileSync(join(root, innocent), "changed innocent\n");
+  const exactDiff = await repository.diffAgainstWorkingTree("HEAD", magic);
+  assert.match(exactDiff, /changed magic/);
+  assert.doesNotMatch(exactDiff, /changed innocent/);
+  assert.doesNotMatch((await repository.patch([magic])).toString("utf8"), /innocent\.txt/);
+
+  await repository.stage([magic]);
+  assert.deepEqual(git(root, "diff", "--cached", "--name-only", "-z").split("\0").filter(Boolean), [magic]);
+  await repository.unstage([magic]);
+  assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+  await repository.restoreFileFromRevision("HEAD", magic);
+  assert.equal(readText(join(root, magic)), "base magic\n");
+  assert.equal(readText(join(root, innocent)), "changed innocent\n");
+
+  writeFileSync(join(root, magic), "discard me\n");
+  await repository.discard([magic]);
+  assert.equal(readText(join(root, magic)), "base magic\n");
+  assert.equal(readText(join(root, innocent)), "changed innocent\n");
+
+  writeFileSync(join(root, magic), "committed magic\n");
+  await repository.commitPaths([magic], "literal selected commit");
+  assert.equal((await repository.fileContent(magic, "HEAD")).toString("utf8"), "committed magic\n");
+  assert.equal((await repository.fileContent(innocent, "HEAD")).toString("utf8"), "base innocent\n");
+
+  const cleanTarget = ":(exclude)keep.txt";
+  writeFileSync(join(root, cleanTarget), "remove only this\n");
+  writeFileSync(join(root, "other-untracked.txt"), "keep this\n");
+  writeFileSync(join(root, "keep.txt"), "keep this too\n");
+  await repository.cleanUntracked([cleanTarget]);
+  assert.equal(existsSync(join(root, cleanTarget)), false);
+  assert.equal(existsSync(join(root, "other-untracked.txt")), true);
+  assert.equal(existsSync(join(root, "keep.txt")), true);
+});
+
+test("frames Git log records by byte length even when bodies contain separator bytes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-log-framing-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "history.txt"), "one\n");
+  git(root, "add", "history.txt");
+  git(root, "commit", "-qm", "plain subject");
+  writeFileSync(join(root, "history.txt"), "two\n");
+  git(root, "commit", "-qam", "multiline subject\n\nline one\nline two");
+  writeFileSync(join(root, "history.txt"), "three\n");
+  git(root, "commit", "-qam", "control subject\n\nbody 前\x01body 后");
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const commits = await repository.logRef("HEAD", 10);
+  assert.equal(commits.length, 3);
+  assert.deepEqual(commits.map((commit) => commit.subject), ["control subject", "multiline subject", "plain subject"]);
+  assert.match(commits[0].body, /body 前\x01body 后/);
+  assert.match(commits[1].body, /line one\nline two/);
+  assert.match(commits[2].body, /plain subject/);
+});
+
+test("never follows conflict symlinks and routes mode 120000 through whole-side resolution", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-symlink-conflict-"));
+  const outside = mkdtempSync(join(tmpdir(), "jb-git-symlink-victim-"));
+  const victim = join(outside, "valuable.txt");
+  writeFileSync(victim, "valuable outside content\n");
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  symlinkSync("base-target", join(root, "link"));
+  writeFileSync(join(root, "text.txt"), "base\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "base");
+  const main = git(root, "branch", "--show-current");
+
+  git(root, "switch", "-qc", "feature");
+  unlinkSync(join(root, "link"));
+  symlinkSync("feature-target", join(root, "link"));
+  writeFileSync(join(root, "text.txt"), "feature\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "feature");
+
+  git(root, "switch", "-q", main);
+  unlinkSync(join(root, "link"));
+  symlinkSync(victim, join(root, "link"));
+  writeFileSync(join(root, "text.txt"), "main\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "main");
+  assert.throws(() => git(root, "merge", "feature"));
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const linkVersions = await repository.conflictVersions("link");
+  assert.equal(linkVersions.binary, true);
+  assert.equal(linkVersions.result, victim, "the link target is read, not the external file");
+  assert.notEqual(linkVersions.result, readText(victim));
+  await assert.rejects(repository.applyConflictResult("link", "malicious overwrite"), /symbolic-link|special-file/i);
+
+  // Also protect a normal 100644 conflict if its worktree result is replaced
+  // with a symlink between Git's merge and the editor read/write.
+  unlinkSync(join(root, "text.txt"));
+  symlinkSync(victim, join(root, "text.txt"));
+  const textVersions = await repository.conflictVersions("text.txt");
+  assert.equal(textVersions.binary, true);
+  assert.equal(textVersions.result, victim);
+  await assert.rejects(repository.applyConflictResult("text.txt", "malicious overwrite"), /symbolic link/i);
+  assert.equal(readText(victim), "valuable outside content\n");
+
+  await repository.resolveConflict("link", "theirs");
+  await repository.markResolved(["link"]);
+  assert.equal(readlinkSync(join(root, "link")), "feature-target");
+  assert.equal((await repository.status()).changes.find((change) => change.path === "link")?.conflicted ?? false, false);
+  assert.equal(readText(victim), "valuable outside content\n");
 });

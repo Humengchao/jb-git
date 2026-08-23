@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { access, mkdtemp, opendir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { access, lstat, mkdtemp, open, opendir, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
@@ -27,8 +28,20 @@ function trimOutput(value: string): string {
   return value.replace(/[\r\n]+$/, "");
 }
 
-function resolveGitDir(rootPath: string, value: string): string {
-  return path.isAbsolute(value) ? path.normalize(value) : path.normalize(path.resolve(rootPath, value));
+function resolveGitDir(commandCwd: string, value: string): string {
+  // rev-parse prints relative --git-dir/--git-common-dir values relative to
+  // the command's cwd, which may be a workspace nested below the repository.
+  return path.isAbsolute(value) ? path.normalize(value) : path.normalize(path.resolve(commandCwd, value));
+}
+
+/** Prevents a path obtained from Git from being reinterpreted as pathspec magic. */
+function literalPathspec(value: string): string {
+  const normalized = path.sep === "\\" ? value.replaceAll("\\", "/") : value;
+  return `:(literal)${normalized}`;
+}
+
+function literalPathspecs(values: readonly string[]): string[] {
+  return values.map(literalPathspec);
 }
 
 function parseNameStatus(output: string): GitCommitFile[] {
@@ -47,6 +60,57 @@ function parseNameStatus(output: string): GitCommitFile[] {
     if (filePath) files.push({ status, path: filePath });
   }
   return files;
+}
+
+/**
+ * With a custom pretty format, `--log-size` reports that formatted record's
+ * exact byte length. Unlike a sentinel byte, this framing cannot be forged by
+ * a legal commit message.
+ */
+function parseLengthPrefixedLog(output: Buffer): GitCommit[] {
+  const commits: GitCommit[] = [];
+  let cursor = 0;
+  while (cursor < output.length) {
+    while (cursor < output.length && (output[cursor] === 0x0a || output[cursor] === 0x0d)) cursor += 1;
+    if (cursor >= output.length) break;
+    const lineEnd = output.indexOf(0x0a, cursor);
+    if (lineEnd < 0) throw new Error("Git log ended before its record-size header was complete.");
+    const header = output.subarray(cursor, lineEnd).toString("ascii").replace(/\r$/, "");
+    const sizeMatch = /^log size (\d+)$/.exec(header);
+    if (!sizeMatch) throw new Error("Git log returned an invalid record-size header.");
+    const size = Number(sizeMatch[1]);
+    const recordStart = lineEnd + 1;
+    const recordEnd = recordStart + size;
+    if (!Number.isSafeInteger(size) || size < 0 || recordEnd > output.length) {
+      throw new Error("Git log returned an invalid record size.");
+    }
+    const record = output.subarray(recordStart, recordEnd);
+    const fields: Buffer[] = [];
+    let fieldStart = 0;
+    for (let field = 0; field < 8; field += 1) {
+      const separator = record.indexOf(0, fieldStart);
+      if (separator < 0) throw new Error("Git log returned an incomplete metadata record.");
+      fields.push(record.subarray(fieldStart, separator));
+      fieldStart = separator + 1;
+    }
+    const [hashBytes, parentsBytes, authorBytes, emailBytes, authoredAtBytes, committedAtBytes, refsBytes, subjectBytes] = fields;
+    const hash = hashBytes.toString("utf8");
+    const parents = parentsBytes.toString("utf8");
+    const refs = refsBytes.toString("utf8");
+    commits.push({
+      hash,
+      parents: parents ? parents.split(" ").filter(Boolean) : [],
+      author: authorBytes.toString("utf8"),
+      email: emailBytes.toString("utf8"),
+      authoredAt: authoredAtBytes.toString("utf8"),
+      committedAt: committedAtBytes.toString("utf8"),
+      refs: refs ? refs.split(",").map((ref) => ref.trim()).filter(Boolean) : [],
+      subject: subjectBytes.toString("utf8"),
+      body: record.subarray(fieldStart).toString("utf8").trim(),
+    });
+    cursor = recordEnd;
+  }
+  return commits;
 }
 
 export class GitRepository {
@@ -106,6 +170,23 @@ export class GitRepository {
     return this.readLog([revision], limit, filePath, options);
   }
 
+  public async logRange(baseExclusive: string, head = "HEAD", limit = 200): Promise<GitCommit[]> {
+    const [baseRevision, headRevision] = await Promise.all([this.resolveCommit(baseExclusive), this.resolveCommit(head)]);
+    return this.readLog([`${baseRevision}..${headRevision}`], limit);
+  }
+
+  /** Returns commits reachable only from left and only from right. */
+  public async aheadBehind(left: string, right = "HEAD"): Promise<{ left: number; right: number }> {
+    const [leftRevision, rightRevision] = await Promise.all([this.resolveCommit(left), this.resolveCommit(right)]);
+    const output = trimOutput(await this.runner.text(
+      ["rev-list", "--left-right", "--count", `${leftRevision}...${rightRevision}`],
+      { cwd: this.info.rootPath },
+    ));
+    const match = /^(\d+)\s+(\d+)$/.exec(output);
+    if (!match) throw new Error("Git returned invalid ahead/behind counts.");
+    return { left: Number(match[1]), right: Number(match[2]) };
+  }
+
   private async readLog(
     revisions: readonly string[],
     limit: number,
@@ -113,7 +194,7 @@ export class GitRepository {
     options: Partial<GitLogOptions> = {},
   ): Promise<GitCommit[]> {
     const order = options.order === "topological" ? "--topo-order" : "--date-order";
-    const output = await this.runner.text([
+    const result = await this.runner.run([
       "log",
       order,
       ...(options.firstParent ? ["--first-parent"] : []),
@@ -121,26 +202,13 @@ export class GitRepository {
       ...(options.author ? [`--author=${options.author}`] : []),
       ...(options.since ? [`--since=${options.since}`] : []),
       `--max-count=${Math.max(1, Math.min(limit, 5_000))}`,
+      "--log-size",
       "--date=iso-strict",
-      "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B%x01",
+      "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B",
       ...revisions,
       ...(filePath ? ["--", logPathspec(filePath)] : []),
     ], { cwd: this.info.rootPath });
-    return output.split("\x01").filter((record) => record.trim()).map((record) => {
-      const fields = record.replace(/^[\r\n]+/, "").split("\x00");
-      const [hash, parents, author, email, authoredAt, committedAt, refs, subject, ...body] = fields;
-      return {
-        hash,
-        parents: parents ? parents.split(" ").filter(Boolean) : [],
-        author,
-        email,
-        authoredAt,
-        committedAt,
-        refs: refs ? refs.split(",").map((ref) => ref.trim()).filter(Boolean) : [],
-        subject,
-        body: body.join("\0").trim(),
-      };
-    });
+    return parseLengthPrefixedLog(result.stdout);
   }
 
   public async showCommit(hash: string): Promise<string> {
@@ -151,7 +219,7 @@ export class GitRepository {
     const revision = await this.resolveCommit(ref);
     return this.runner.text([
       "format-patch", "-1", "--stdout", revision,
-      ...(pathSpec ? ["--", pathSpec] : []),
+      ...(pathSpec ? ["--", literalPathspec(pathSpec)] : []),
     ], { cwd: this.info.rootPath });
   }
 
@@ -159,7 +227,7 @@ export class GitRepository {
     const revision = await this.resolveCommit(ref);
     return this.runner.text([
       "diff", revision,
-      ...(pathSpec ? ["--", pathSpec] : []),
+      ...(pathSpec ? ["--", literalPathspec(pathSpec)] : []),
     ], { cwd: this.info.rootPath });
   }
 
@@ -208,6 +276,7 @@ export class GitRepository {
 
   public async blame(pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
     const output = await this.runner.text([
+      "--literal-pathspecs",
       "blame",
       "--line-porcelain",
       ...(revision ? [revision] : []),
@@ -217,7 +286,7 @@ export class GitRepository {
     const entries: GitBlameEntry[] = [];
     let current: GitBlameEntry | undefined;
     for (const line of output.replace(/\r\n/g, "\n").split("\n")) {
-      const header = /^([0-9a-f]{7,40}) (\d+) (\d+)(?: \d+)?$/.exec(line);
+      const header = /^([0-9a-f]{7,64}) (\d+) (\d+)(?: \d+)?$/.exec(line);
       if (header) {
         current = {
           hash: header[1],
@@ -246,7 +315,7 @@ export class GitRepository {
   /** Returns raw patch bytes: shelf content may be in any encoding, and a UTF-8 round-trip would corrupt it. */
   public async patch(paths: readonly string[]): Promise<Buffer> {
     const base = (await this.currentRevision()) ?? await this.emptyTree();
-    const result = await this.runner.run(["diff", "--binary", "--no-ext-diff", base, "--", ...paths], { cwd: this.info.rootPath });
+    const result = await this.runner.run(["diff", "--binary", "--no-ext-diff", base, "--", ...literalPathspecs(paths)], { cwd: this.info.rootPath });
     return result.stdout;
   }
 
@@ -258,7 +327,7 @@ export class GitRepository {
       "--unified=3",
       ...(staged ? ["--cached"] : []),
       "--",
-      pathSpec,
+      literalPathspec(pathSpec),
     ], { cwd: this.info.rootPath });
     return parseUnifiedDiff(output);
   }
@@ -280,7 +349,7 @@ export class GitRepository {
         "--unified=3",
         ...(staged ? ["--cached"] : []),
         "--",
-        pathSpec,
+        literalPathspec(pathSpec),
       ], { cwd: this.info.rootPath });
       const hunks = parseUnifiedDiff(output);
       const hunk = hunks.find((candidate) => candidate.header === expectedHunk.header
@@ -305,14 +374,14 @@ export class GitRepository {
     await this.serial(async () => {
       const source = (await this.currentRevision()) ?? await this.emptyTree();
       await this.runner.run(
-        ["restore", `--source=${source}`, "--staged", "--worktree", "--", ...paths],
+        ["restore", `--source=${source}`, "--staged", "--worktree", "--", ...literalPathspecs(paths)],
         { cwd: this.info.rootPath },
       );
     });
   }
 
   public async cleanUntracked(paths: readonly string[]): Promise<void> {
-    await this.serial(() => this.runner.run(["clean", "-f", "--", ...paths], { cwd: this.info.rootPath }));
+    await this.serial(() => this.runner.run(["clean", "-f", "--", ...literalPathspecs(paths)], { cwd: this.info.rootPath }));
   }
 
   public async sparseCheckoutSet(paths: readonly string[], cone = true): Promise<void> {
@@ -392,13 +461,13 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["fetch", ...(prune ? ["--prune"] : []), name], { cwd: this.info.rootPath, signal }));
   }
 
-  public async pushRemote(name: string, branch?: string, forceWithLease = false, signal?: AbortSignal, setUpstream = false): Promise<void> {
+  public async pushRemote(name: string, refspec?: string, forceWithLease = false, signal?: AbortSignal, setUpstream = false): Promise<void> {
     await this.serial(() => this.runner.run([
       "push",
-      ...(setUpstream && branch ? ["--set-upstream"] : []),
+      ...(setUpstream && refspec ? ["--set-upstream"] : []),
       ...(forceWithLease ? ["--force-with-lease"] : []),
       name,
-      ...(branch ? [branch] : []),
+      ...(refspec ? [refspec] : []),
     ], { cwd: this.info.rootPath, signal }));
   }
 
@@ -482,23 +551,23 @@ export class GitRepository {
   }
 
   public async updateSubmodules(init = true, recursive = true, paths: readonly string[] = []): Promise<void> {
-    await this.serial(() => this.runner.run(["submodule", "update", ...(init ? ["--init"] : []), ...(recursive ? ["--recursive"] : []), ...(paths.length ? ["--", ...paths] : [])], { cwd: this.info.rootPath }));
+    await this.serial(() => this.runner.run(["submodule", "update", ...(init ? ["--init"] : []), ...(recursive ? ["--recursive"] : []), ...(paths.length ? ["--", ...literalPathspecs(paths)] : [])], { cwd: this.info.rootPath }));
   }
 
   public async stage(paths: readonly string[]): Promise<void> {
-    await this.serial(() => this.runner.run(["add", "--", ...paths], { cwd: this.info.rootPath }));
+    await this.serial(() => this.runner.run(["add", "--", ...literalPathspecs(paths)], { cwd: this.info.rootPath }));
   }
 
   public async unstage(paths: readonly string[]): Promise<void> {
     await this.serial(async () => {
       const head = await this.currentRevision();
       if (head) {
-        await this.runner.run(["reset", head, "--", ...paths], { cwd: this.info.rootPath });
+        await this.runner.run(["reset", head, "--", ...literalPathspecs(paths)], { cwd: this.info.rootPath });
         return;
       }
       // An unborn repository has no HEAD for `git reset` to resolve. Removing
       // paths from the index keeps their working-tree contents intact.
-      await this.runner.run(["rm", "--cached", "-r", "--ignore-unmatch", "--", ...paths], { cwd: this.info.rootPath });
+      await this.runner.run(["rm", "--cached", "-r", "--ignore-unmatch", "--", ...literalPathspecs(paths)], { cwd: this.info.rootPath });
     });
   }
 
@@ -518,15 +587,16 @@ export class GitRepository {
       }
 
       const pathSpecs = [...candidates];
+      const literalSpecs = literalPathspecs(pathSpecs);
       const head = await this.currentRevision();
       if (!head) {
-        await this.runner.run(["rm", "--cached", "-r", "--ignore-unmatch", "--", ...pathSpecs], { cwd: this.info.rootPath });
+        await this.runner.run(["rm", "--cached", "-r", "--ignore-unmatch", "--", ...literalSpecs], { cwd: this.info.rootPath });
         return;
       }
 
       const [treeOutput, indexOutput] = await Promise.all([
-        this.runner.text(["ls-tree", "-r", "-z", "--name-only", head, "--", ...pathSpecs], { cwd: this.info.rootPath }),
-        this.runner.text(["ls-files", "-z", "--cached", "--", ...pathSpecs], { cwd: this.info.rootPath }),
+        this.runner.text(["ls-tree", "-r", "-z", "--name-only", head, "--", ...literalSpecs], { cwd: this.info.rootPath }),
+        this.runner.text(["ls-files", "-z", "--cached", "--", ...literalSpecs], { cwd: this.info.rootPath }),
       ]);
       const treePaths = treeOutput.split("\0").filter(Boolean);
       const indexPaths = indexOutput.split("\0").filter(Boolean);
@@ -538,24 +608,24 @@ export class GitRepository {
 
       if (trackedAtHead.length) {
         await this.runner.run(
-          ["restore", `--source=${head}`, "--staged", "--worktree", "--", ...trackedAtHead],
+          ["restore", `--source=${head}`, "--staged", "--worktree", "--", ...literalPathspecs(trackedAtHead)],
           { cwd: this.info.rootPath },
         );
       }
       if (addedToIndex.length) {
         // IntelliJ-style rollback of a newly added file removes it from the
         // index but deliberately keeps the user's local file as untracked.
-        await this.runner.run(["restore", "--staged", "--", ...addedToIndex], { cwd: this.info.rootPath });
+        await this.runner.run(["restore", "--staged", "--", ...literalPathspecs(addedToIndex)], { cwd: this.info.rootPath });
       }
       const obsoleteRenameTargets = addedToIndex.filter((candidate) => renamedTargets.has(candidate));
       if (obsoleteRenameTargets.length) {
-        await this.runner.run(["clean", "-f", "--", ...obsoleteRenameTargets], { cwd: this.info.rootPath });
+        await this.runner.run(["clean", "-f", "--", ...literalPathspecs(obsoleteRenameTargets)], { cwd: this.info.rootPath });
       }
     });
   }
 
   public async resolveConflict(pathSpec: string, side: "ours" | "theirs"): Promise<void> {
-    await this.serial(() => this.runner.run(["checkout", `--${side}`, "--", pathSpec], { cwd: this.info.rootPath }));
+    await this.serial(() => this.runner.run(["checkout", `--${side}`, "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath }));
   }
 
   /**
@@ -570,12 +640,14 @@ export class GitRepository {
 
   public async conflictVersions(pathSpec: string): Promise<GitConflictVersions> {
     await this.assertConflictedPath(pathSpec);
-    const [base, ours, theirs, result] = await Promise.all([
-      this.conflictStage(pathSpec, 1),
-      this.conflictStage(pathSpec, 2),
-      this.conflictStage(pathSpec, 3),
+    const stageModes = await this.conflictStageModes(pathSpec);
+    const [base, ours, theirs, workingTree] = await Promise.all([
+      this.conflictStage(pathSpec, 1, stageModes),
+      this.conflictStage(pathSpec, 2, stageModes),
+      this.conflictStage(pathSpec, 3, stageModes),
       this.conflictWorkingTree(pathSpec),
     ]);
+    const result = workingTree.content;
     return {
       path: pathSpec,
       base: base?.toString("utf8") ?? "",
@@ -586,16 +658,32 @@ export class GitRepository {
       theirsExists: theirs !== null,
       result: result?.toString("utf8") ?? "",
       resultExists: result !== null,
-      binary: [base, ours, theirs, result].some((content) => content !== null && !GitRepository.isEditableText(content)),
+      // A symlink blob contains UTF-8-looking target text, but presenting it in
+      // the text merge editor would turn the link into a regular file. Route
+      // mode 120000 (and other special entries) through whole-side checkout.
+      binary: workingTree.special
+        || [...stageModes.values()].some((mode) => mode !== "100644" && mode !== "100755")
+        || [base, ours, theirs, result].some((item) => item !== null && !GitRepository.isEditableText(item)),
     };
   }
 
   public async applyConflictResult(pathSpec: string, content: string, deleted = false): Promise<void> {
     await this.serial(async () => {
       await this.assertConflictedPath(pathSpec);
-      if (deleted) await rm(this.worktreePath(pathSpec), { force: true });
-      else await writeFile(this.worktreePath(pathSpec), content, "utf8");
-      await this.runner.run(["add", "--", pathSpec], { cwd: this.info.rootPath });
+      const stageModes = await this.conflictStageModes(pathSpec);
+      if ([...stageModes.values()].some((mode) => mode !== "100644" && mode !== "100755")) {
+        throw new Error(`${pathSpec} is a symbolic-link or special-file conflict; resolve it by accepting ours or theirs.`);
+      }
+      const target = this.worktreePath(pathSpec);
+      await this.assertSafeConflictParent(target);
+      if (deleted) {
+        const current = await this.conflictPathStat(target);
+        if (current?.isSymbolicLink()) throw new Error(`Refusing to resolve ${pathSpec} through a symbolic link.`);
+        await rm(target, { force: true });
+      } else {
+        await this.writeConflictResult(target, pathSpec, content);
+      }
+      await this.runner.run(["add", "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
     });
   }
 
@@ -668,7 +756,7 @@ export class GitRepository {
   public async restoreFileFromRevision(ref: string, pathSpec: string): Promise<void> {
     await this.serial(async () => {
       const revision = await this.resolveCommit(ref);
-      await this.runner.run(["restore", `--source=${revision}`, "--", pathSpec], { cwd: this.info.rootPath });
+      await this.runner.run(["restore", `--source=${revision}`, "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
     });
   }
 
@@ -765,7 +853,7 @@ export class GitRepository {
           cwd: this.info.rootPath,
           env: environment,
         });
-        await this.runner.run(["add", "-A", "--", ...pathSpecs], { cwd: this.info.rootPath, env: environment });
+        await this.runner.run(["add", "-A", "--", ...literalPathspecs(pathSpecs)], { cwd: this.info.rootPath, env: environment });
         const args = ["commit", "--file=-"];
         if (options.amend) args.push("--amend");
         if (options.signoff) args.push("--signoff");
@@ -826,10 +914,10 @@ export class GitRepository {
     return found.ref;
   }
 
-  public async applyStash(ref: string, pop = false, oid?: string): Promise<void> {
+  public async applyStash(ref: string, pop = false, oid?: string, reinstateIndex = false): Promise<void> {
     await this.serial(async () => {
       const current = await this.resolveStashRef(ref, oid);
-      await this.runner.run(["stash", pop ? "pop" : "apply", current], { cwd: this.info.rootPath });
+      await this.runner.run(["stash", pop ? "pop" : "apply", ...(reinstateIndex ? ["--index"] : []), current], { cwd: this.info.rootPath });
     });
   }
 
@@ -907,22 +995,101 @@ export class GitRepository {
     if (!change?.conflicted) throw new Error(`${pathSpec} is no longer an unresolved conflict.`);
   }
 
-  private async conflictStage(pathSpec: string, stage: 1 | 2 | 3): Promise<Buffer | null> {
+  private async conflictStageModes(pathSpec: string): Promise<Map<1 | 2 | 3, string>> {
+    const output = await this.runner.text(
+      ["ls-files", "--unmerged", "-z", "--", literalPathspec(pathSpec)],
+      { cwd: this.info.rootPath },
+    );
+    const modes = new Map<1 | 2 | 3, string>();
+    for (const entry of output.split("\0")) {
+      if (!entry) continue;
+      const match = /^(\d{6}) [0-9a-f]+ ([123])\t/.exec(entry);
+      if (!match) throw new Error(`Git returned an invalid conflict entry for ${pathSpec}.`);
+      modes.set(Number(match[2]) as 1 | 2 | 3, match[1]);
+    }
+    if (modes.size === 0) throw new Error(`${pathSpec} is no longer an unresolved conflict.`);
+    return modes;
+  }
+
+  private async conflictStage(
+    pathSpec: string,
+    stage: 1 | 2 | 3,
+    modes: ReadonlyMap<1 | 2 | 3, string>,
+  ): Promise<Buffer | null> {
+    if (!modes.has(stage)) return null;
+    return (await this.runner.run(["show", `:${stage}:${pathSpec}`], { cwd: this.info.rootPath })).stdout;
+  }
+
+  private async conflictWorkingTree(pathSpec: string): Promise<{ content: Buffer | null; special: boolean }> {
+    const target = this.worktreePath(pathSpec);
+    await this.assertSafeConflictParent(target);
+    const initial = await this.conflictPathStat(target);
+    if (!initial) return { content: null, special: false };
+    if (initial.isSymbolicLink()) {
+      try {
+        return { content: await readlink(target, { encoding: "buffer" }), special: true };
+      } catch (error) {
+        throw new Error(`Conflict path ${pathSpec} changed while it was being read.`, { cause: error });
+      }
+    }
+    if (!initial.isFile()) return { content: Buffer.alloc(0), special: true };
+    let handle;
     try {
-      return (await this.runner.run(["show", `:${stage}:${pathSpec}`], { cwd: this.info.rootPath })).stdout;
+      handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== initial.dev || opened.ino !== initial.ino) {
+        throw new Error(`Conflict path ${pathSpec} changed while it was being read.`);
+      }
+      return { content: await handle.readFile(), special: false };
     } catch (error) {
-      // A stage is legitimately absent for add/delete and rename conflicts.
-      if (error instanceof GitCommandError) return null;
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+        throw new Error(`Refusing to read conflict path ${pathSpec} through a symbolic link.`, { cause: error });
+      }
+      throw error;
+    } finally {
+      await handle?.close();
+    }
+  }
+
+  private async conflictPathStat(target: string): Promise<Stats | null> {
+    try {
+      return await lstat(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
   }
 
-  private async conflictWorkingTree(pathSpec: string): Promise<Buffer | null> {
+  private async assertSafeConflictParent(target: string): Promise<void> {
+    const relativeParent = path.relative(this.info.rootPath, path.dirname(target));
+    let current = this.info.rootPath;
+    for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      const stat = await lstat(current);
+      if (stat.isSymbolicLink()) throw new Error(`Refusing to access a conflict below symbolic-link directory ${current}.`);
+      if (!stat.isDirectory()) throw new Error(`Conflict parent ${current} is not a directory.`);
+    }
+  }
+
+  private async writeConflictResult(target: string, pathSpec: string, content: string): Promise<void> {
+    const initial = await this.conflictPathStat(target);
+    if (initial?.isSymbolicLink()) throw new Error(`Refusing to write conflict path ${pathSpec} through a symbolic link.`);
+    if (initial && !initial.isFile()) throw new Error(`Conflict path ${pathSpec} is not a regular file.`);
+
+    const temporaryDirectory = await mkdtemp(path.join(path.dirname(target), ".jb-git-conflict-"));
+    const temporaryFile = path.join(temporaryDirectory, "result");
     try {
-      return await readFile(this.worktreePath(pathSpec));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
+      await writeFile(temporaryFile, content, { encoding: "utf8", mode: initial ? initial.mode & 0o777 : 0o666 });
+      const current = await this.conflictPathStat(target);
+      if (current?.isSymbolicLink()) throw new Error(`Refusing to write conflict path ${pathSpec} through a symbolic link.`);
+      if (current && !current.isFile()) throw new Error(`Conflict path ${pathSpec} is not a regular file.`);
+      if ((initial === null) !== (current === null)
+        || (initial && current && (initial.dev !== current.dev || initial.ino !== current.ino))) {
+        throw new Error(`Conflict path ${pathSpec} changed while it was being written.`);
+      }
+      await rename(temporaryFile, target);
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
     }
   }
 
@@ -930,7 +1097,9 @@ export class GitRepository {
     if (!pathSpec || path.isAbsolute(pathSpec)) throw new Error("Conflict path must be relative to the repository.");
     const resolved = path.resolve(this.info.rootPath, pathSpec);
     const relative = path.relative(this.info.rootPath, resolved);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Conflict path is outside the repository.");
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error("Conflict path is outside the repository.");
+    }
     return resolved;
   }
 
@@ -1005,8 +1174,8 @@ export async function discoverRepository(
     return new GitRepository(
       {
         rootPath: path.normalize(rootPath),
-        gitDir: resolveGitDir(rootPath, gitDirRaw),
-        commonGitDir: resolveGitDir(rootPath, commonGitDirRaw),
+        gitDir: resolveGitDir(workspacePath, gitDirRaw),
+        commonGitDir: resolveGitDir(workspacePath, commonGitDirRaw),
         isBare,
       },
       runner,

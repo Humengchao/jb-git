@@ -36,6 +36,16 @@ test("provides editable three-pane conflict controls and a staged Apply flow", (
   assert.match(scriptMatch[1], /setTimeout\(send, 300\)/);
   assert.match(source, /MAX_MERGE_DRAFT_BYTES/);
   assert.match(source, /MAX_MERGE_DRAFTS/);
+  assert.match(source, /onDidReceiveMessage\(async \(message: unknown\)/);
+  assert.match(source, /isMergeEditorMessage\(message\)/);
+});
+
+test("labels rebase conflict sides by replay semantics instead of generic ours and theirs", () => {
+  assert.match(source, /operation === "rebase"/);
+  assert.match(source, /Rebase Target/);
+  assert.match(source, /Replayed Commit/);
+  assert.match(source, /stopped-sha/);
+  assert.match(source, /original-commit/);
 });
 
 test("parses ordinary and diff3 conflict markers without including marker lines", () => {

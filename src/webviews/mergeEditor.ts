@@ -3,15 +3,9 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import * as vscode from "vscode";
 import { GitConflictVersions } from "../git/types";
-import { RepositoryManager } from "../repositoryManager";
+import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { webviewDocument } from "./html";
-
-type MergeEditorMessage =
-  | { type: "ready" }
-  | { type: "apply"; result: string; deleted?: boolean }
-  | { type: "dirty"; result: string; deleted?: boolean }
-  | { type: "cancel" }
-  | { type: "confirm"; action: string };
+import { isMergeEditorMessage } from "./mergeEditorProtocol";
 
 // The webview sandbox has no allow-modals, so window.confirm() silently
 // returns false there; confirmations must round-trip through the host.
@@ -24,6 +18,11 @@ const CONFIRM_PROMPTS = new Map<string, { message: string; button: string }>([
 interface MergeEditorLabels {
   ours: string;
   result: string;
+  theirs: string;
+}
+
+export interface ConflictSideLabels {
+  ours: string;
   theirs: string;
 }
 
@@ -95,23 +94,11 @@ export class MergeConflictEditor implements vscode.Disposable {
       : versions;
 
     const snapshot = this.manager.snapshot(rootPath);
-    const operation = snapshot?.operation.kind ?? "none";
-    let incomingLabel = operation === "none"
-      ? "Incoming Changes"
-      : `Incoming Changes (${operation === "cherry-pick" ? "Cherry-pick" : operation[0].toUpperCase() + operation.slice(1)})`;
-    if (snapshot?.operation.detail && ["merge", "cherry-pick", "revert"].includes(operation)) {
-      try {
-        const revision = (await readFile(snapshot.operation.detail, "utf8")).trim().split(/\s+/)[0];
-        const branch = snapshot.branches.find((candidate) => candidate.oid === revision);
-        incomingLabel = branch ? `Changes from ${branch.name}` : `${incomingLabel} · ${revision.slice(0, 10)}`;
-      } catch {
-        // The operation may finish while the editor is opening; the generic label remains useful.
-      }
-    }
+    const sideLabels = await conflictSideLabels(snapshot);
     const labels: MergeEditorLabels = {
-      ours: `Changes from ${snapshot?.status?.branch.head ?? "Current Branch"}`,
+      ours: sideLabels.ours,
       result: "Result",
-      theirs: incomingLabel,
+      theirs: sideLabels.theirs,
     };
     const title = `Merge Revisions for ${path.basename(pathSpec)}`;
     const panel = vscode.window.createWebviewPanel(
@@ -138,7 +125,8 @@ export class MergeConflictEditor implements vscode.Disposable {
         ).then((choice) => { if (choice === "Reopen") void this.open(rootPath, pathSpec); });
       }
     });
-    messageRegistration = panel.webview.onDidReceiveMessage(async (message: MergeEditorMessage) => {
+    messageRegistration = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      if (!isMergeEditorMessage(message)) return;
       if (message.type === "ready") {
         await panel.webview.postMessage({
           type: "load",
@@ -235,6 +223,64 @@ export function conflictFingerprint(versions: GitConflictVersions): string {
   return createHash("sha256")
     .update(JSON.stringify([versions.path, versions.baseExists, versions.base, versions.oursExists, versions.ours, versions.theirsExists, versions.theirs, versions.resultExists, versions.result]))
     .digest("hex");
+}
+
+/**
+ * Git's stage-2/stage-3 meaning changes during a rebase: "ours" is the
+ * target branch with already-replayed commits, while "theirs" is the commit
+ * currently being replayed. Never label those panes as current/incoming
+ * unconditionally; that makes the safest-looking button keep the wrong side.
+ */
+export async function conflictSideLabels(snapshot?: RepositorySnapshot): Promise<ConflictSideLabels> {
+  const currentBranch = snapshot?.status?.branch.head ?? "Current Branch";
+  const operation = snapshot?.operation.kind ?? "none";
+  const detail = snapshot?.operation.detail;
+  if (operation === "rebase") {
+    const [onto, stopped, headName] = await Promise.all([
+      readOperationMetadata(detail, "onto"),
+      readOperationMetadata(detail, "stopped-sha", "original-commit"),
+      readOperationMetadata(detail, "head-name"),
+    ]);
+    const originalBranch = headName?.replace(/^refs\/heads\//, "");
+    return {
+      ours: onto ? `Rebase Target · ${onto.slice(0, 10)}` : "Rebase Target · already applied commits",
+      theirs: stopped
+        ? `Replayed Commit${originalBranch ? ` from ${originalBranch}` : ""} · ${stopped.slice(0, 10)}`
+        : `Replayed Commit${originalBranch ? ` from ${originalBranch}` : ""}`,
+    };
+  }
+
+  let revision: string | undefined;
+  if (detail && ["merge", "cherry-pick", "revert"].includes(operation)) {
+    try {
+      revision = (await readFile(detail, "utf8")).trim().split(/\s+/)[0] || undefined;
+    } catch {
+      // The operation may finish while labels are loading.
+    }
+  }
+  const branch = revision ? snapshot?.branches.find((candidate) => candidate.oid === revision) : undefined;
+  const suffix = branch ? ` from ${branch.name}` : revision ? ` · ${revision.slice(0, 10)}` : "";
+  const theirs = operation === "merge"
+    ? `Merged Changes${suffix}`
+    : operation === "cherry-pick"
+      ? `Cherry-picked Commit${suffix}`
+      : operation === "revert"
+        ? `Revert Result${suffix}`
+        : "Incoming Changes";
+  return { ours: `Changes from ${currentBranch}`, theirs };
+}
+
+async function readOperationMetadata(directory: string | undefined, ...names: string[]): Promise<string | undefined> {
+  if (!directory) return undefined;
+  for (const name of names) {
+    try {
+      const value = (await readFile(path.join(directory, name), "utf8")).trim().split(/\s+/)[0];
+      if (value) return value;
+    } catch {
+      // rebase-merge and rebase-apply expose slightly different file names.
+    }
+  }
+  return undefined;
 }
 
 const mergeStyles = String.raw`

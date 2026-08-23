@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 
 export function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 export function deepestContaining<T>(items: readonly T[], candidate: string, rootOf: (item: T) => string): T | undefined {

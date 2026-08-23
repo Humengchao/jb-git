@@ -20,6 +20,11 @@ export class RepositoryManager implements vscode.Disposable {
   private refreshQueue: Promise<void> = Promise.resolve();
   private contextWorkspace?: boolean;
   private contextRepository?: boolean;
+  private contextHasChanges?: boolean;
+  private contextOperationKind?: GitOperationKind;
+  private contextCanContinue?: boolean;
+  private contextCanAbort?: boolean;
+  private contextCanSkip?: boolean;
 
   public constructor(
     private readonly runner: GitRunner,
@@ -44,7 +49,15 @@ export class RepositoryManager implements vscode.Disposable {
   public async discoverAndRefresh(scanNested = true): Promise<void> {
     await this.enqueueRefresh(async () => {
       const previous = this.snapshotKeys();
-      const repositories = await discoverRepositories(this.workspacePaths(), this.runner, undefined, scanNested);
+      const discovered = await discoverRepositories(this.workspacePaths(), this.runner, undefined, scanNested);
+      const existingByRoot = new Map(this.repositories.map((repository) => [repository.info.rootPath, repository]));
+      const repositories = discovered.map((repository) => {
+        const existing = existingByRoot.get(repository.info.rootPath);
+        // GitRepository owns the per-repository mutation mutex. Reusing it when
+        // discovery found the same underlying repository keeps commands issued
+        // across a rescan on one lock instead of creating two independent queues.
+        return existing && sameRepositoryIdentity(existing, repository) ? existing : repository;
+      });
       const snapshots = await Promise.all(repositories.map((repository) => this.readSnapshot(repository)));
       if (this.disposed) return;
       // Swap the list and its snapshots together: while the reads were in flight, commands
@@ -288,8 +301,8 @@ export class RepositoryManager implements vscode.Disposable {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).fetchRemote(name, true, signal));
   }
 
-  public async pushRemote(rootPath: string, name: string, branch?: string, forceWithLease = false, signal?: AbortSignal, setUpstream = false): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).pushRemote(name, branch, forceWithLease, signal, setUpstream));
+  public async pushRemote(rootPath: string, name: string, refspec?: string, forceWithLease = false, signal?: AbortSignal, setUpstream = false): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).pushRemote(name, refspec, forceWithLease, signal, setUpstream));
   }
 
   public async worktrees(rootPath: string): Promise<GitWorktree[]> {
@@ -333,8 +346,8 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).stashes();
   }
 
-  public async applyStash(rootPath: string, ref: string, pop = false, oid?: string): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).applyStash(ref, pop, oid));
+  public async applyStash(rootPath: string, ref: string, pop = false, oid?: string, reinstateIndex = false): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).applyStash(ref, pop, oid, reinstateIndex));
   }
 
   public async dropStash(rootPath: string, ref: string, oid?: string): Promise<void> {
@@ -413,6 +426,10 @@ export class RepositoryManager implements vscode.Disposable {
   private async updateContextKeys(): Promise<void> {
     const hasWorkspace = this.workspacePaths().length > 0;
     const hasRepository = this.hasRepositories;
+    const hasChanges = this.all.some((snapshot) => Boolean(snapshot.status?.changes.length));
+    const operation = this.all.find((snapshot) => snapshot.operation.kind !== "none")?.operation
+      ?? { kind: "none" as const, canContinue: false, canAbort: false };
+    const canSkip = operation.kind === "rebase" || operation.kind === "cherry-pick";
     const updates: Thenable<unknown>[] = [];
     if (this.contextWorkspace !== hasWorkspace) {
       this.contextWorkspace = hasWorkspace;
@@ -421,6 +438,26 @@ export class RepositoryManager implements vscode.Disposable {
     if (this.contextRepository !== hasRepository) {
       this.contextRepository = hasRepository;
       updates.push(vscode.commands.executeCommand("setContext", "jbGit.hasRepository", hasRepository));
+    }
+    if (this.contextHasChanges !== hasChanges) {
+      this.contextHasChanges = hasChanges;
+      updates.push(vscode.commands.executeCommand("setContext", "jbGit.hasChanges", hasChanges));
+    }
+    if (this.contextOperationKind !== operation.kind) {
+      this.contextOperationKind = operation.kind;
+      updates.push(vscode.commands.executeCommand("setContext", "jbGit.operationKind", operation.kind));
+    }
+    if (this.contextCanContinue !== operation.canContinue) {
+      this.contextCanContinue = operation.canContinue;
+      updates.push(vscode.commands.executeCommand("setContext", "jbGit.canContinueOperation", operation.canContinue));
+    }
+    if (this.contextCanAbort !== operation.canAbort) {
+      this.contextCanAbort = operation.canAbort;
+      updates.push(vscode.commands.executeCommand("setContext", "jbGit.canAbortOperation", operation.canAbort));
+    }
+    if (this.contextCanSkip !== canSkip) {
+      this.contextCanSkip = canSkip;
+      updates.push(vscode.commands.executeCommand("setContext", "jbGit.canSkipOperation", canSkip));
     }
     await Promise.all(updates);
   }
@@ -435,10 +472,17 @@ export class RepositoryManager implements vscode.Disposable {
 /** A stable UI-facing snapshot identity. Status timestamps are deliberately ignored. */
 export function snapshotKey(snapshot: RepositorySnapshot): string {
   return JSON.stringify({
-    root: snapshot.repository.info.rootPath,
+    repository: snapshot.repository.info,
     status: snapshot.status ? { branch: snapshot.status.branch, changes: snapshot.status.changes } : null,
     branches: snapshot.branches,
     operation: snapshot.operation,
     error: snapshot.error,
   });
+}
+
+function sameRepositoryIdentity(left: GitRepository, right: GitRepository): boolean {
+  return left.info.rootPath === right.info.rootPath
+    && left.info.gitDir === right.info.gitDir
+    && left.info.commonGitDir === right.info.commonGitDir
+    && left.info.isBare === right.info.isBare;
 }

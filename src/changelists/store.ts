@@ -4,6 +4,7 @@ import { GitChange } from "../git/types";
 export interface Changelist {
   id: string;
   name: string;
+  description?: string;
   files: string[];
 }
 
@@ -55,9 +56,14 @@ export class ChangelistStore implements vscode.Disposable {
       ?? repository.lists[0];
   }
 
-  public async create(repositoryRoot: string, name: string): Promise<Changelist> {
+  public async create(repositoryRoot: string, name: string, description?: string): Promise<Changelist> {
     const repository = this.ensure(repositoryRoot);
-    const list = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name: name.trim(), files: [] };
+    const list = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: name.trim(),
+      ...(description?.trim() ? { description: description.trim() } : {}),
+      files: [],
+    };
     repository.lists.push(list);
     repository.activeId = list.id;
     await this.save(repositoryRoot);
@@ -68,6 +74,18 @@ export class ChangelistStore implements vscode.Disposable {
     const list = this.ensure(repositoryRoot).lists.find((item) => item.id === listId);
     if (!list) throw new Error("Changelist not found");
     list.name = name.trim();
+    await this.save(repositoryRoot);
+  }
+
+  public async update(repositoryRoot: string, listId: string, name: string, description?: string): Promise<void> {
+    const list = this.ensure(repositoryRoot).lists.find((item) => item.id === listId);
+    if (!list) throw new Error("Changelist not found");
+    const nextName = name.trim();
+    if (!nextName) throw new Error("Changelist name cannot be empty");
+    list.name = nextName;
+    const nextDescription = description?.trim();
+    if (nextDescription) list.description = nextDescription;
+    else delete list.description;
     await this.save(repositoryRoot);
   }
 

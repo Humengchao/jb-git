@@ -1,6 +1,27 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { GitCommandError, GitRunner, redactGitArgs, redactGitText } from "../dist/git/runner.js";
+
+async function waitFor(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`condition was not met within ${timeoutMs} ms`);
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
 
 test("redacts credentials in Git arguments and output", () => {
   const secret = "pat-super-secret";
@@ -14,8 +35,30 @@ test("redacts credentials in Git arguments and output", () => {
   assert.equal(error.stderr.includes(secret), false);
   assert.equal(error.args.join(" ").includes(secret), false);
   assert.deepEqual(redactGitArgs(["--token=abc", "--password", "def"]), ["--token=***", "--password", "***"]);
-  assert.equal(redactGitText("https://u:p@example.com/x"), "https://u:***@example.com/x");
+  assert.equal(redactGitText("https://u:p@example.com/x"), "https://***@example.com/x");
   assert.equal(redactGitText("https://pat-secret@example.com/x"), "https://***@example.com/x");
+});
+
+test("redacts authorization headers and common token encodings without leaving the credential value", () => {
+  const secret = "runner-secret.ABC_123+/=";
+  const samples = [
+    `Authorization: Bearer ${secret}`,
+    `Proxy-Authorization: Basic ${secret}`,
+    `http.extraHeader=Authorization: Bearer ${secret}`,
+    `Bearer ${secret}`,
+    `https://oauth2:${secret}@example.com/repository.git`,
+    `https://${secret}@example.com/repository.git`,
+    `https://example.com/repository.git?token=${secret}&page=1`,
+    `https://example.com/repository.git?private_token=${secret}`,
+    `{"authorization":"Bearer ${secret}","api_key":"${secret}"}`,
+    `password=${secret}`,
+  ];
+
+  for (const sample of samples) {
+    assert.equal(redactGitText(sample).includes(secret), false, sample);
+  }
+  assert.equal(redactGitArgs(["-c", `http.extraHeader=Proxy-Authorization: Basic ${secret}`]).join(" ").includes(secret), false);
+  assert.equal(redactGitArgs(["--client-secret", secret]).join(" ").includes(secret), false);
 });
 
 test("redacts credentials before emitting Git console traces", async () => {
@@ -60,6 +103,62 @@ test("waits for an aborted child to close and emits one trace", async () => {
   assert.equal(traces.length, 1);
   assert.equal(traces[0].exitCode, null);
 });
+
+test("applies a total runtime limit and remains usable after timing out", async () => {
+  const runner = new GitRunner(process.execPath);
+  const traces = [];
+  runner.onDidRun((event) => traces.push(event));
+  await assert.rejects(
+    runner.text(["-e", "setInterval(() => {}, 1000)"], { cwd: process.cwd(), timeoutMs: 50 }),
+    /Git command timed out after 50 ms/,
+  );
+  assert.equal(traces.length, 1);
+  assert.equal(traces[0].exitCode, null);
+  assert.match(traces[0].stderr, /timed out after 50 ms/);
+  assert.equal(await runner.text(["-e", "process.stdout.write('ok')"], { cwd: process.cwd(), timeoutMs: 1_000 }), "ok");
+});
+
+for (const termination of ["abort", "timeout"]) {
+  test(`${termination} terminates descendant processes as well as the direct child`, async () => {
+    const root = mkdtempSync(join(tmpdir(), `jb-git-${termination}-tree-`));
+    const pidFile = join(root, "descendant.pid");
+    const runner = new GitRunner(process.execPath);
+    const controller = new AbortController();
+    let descendantPid;
+    const parentScript = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      "writeFileSync(process.argv[1], String(child.pid));",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const running = runner.text(["-e", parentScript, pidFile], {
+      cwd: root,
+      signal: controller.signal,
+      timeoutMs: termination === "timeout" ? 1_000 : 5_000,
+    });
+    const rejected = assert.rejects(
+      running,
+      termination === "timeout" ? /timed out after 1000 ms/ : /Git command aborted/,
+    );
+
+    try {
+      await waitFor(() => existsSync(pidFile));
+      descendantPid = Number(readFileSync(pidFile, "utf8"));
+      assert.equal(Number.isInteger(descendantPid) && descendantPid > 0, true);
+      assert.equal(processExists(descendantPid), true);
+      if (termination === "abort") controller.abort();
+      await rejected;
+      await waitFor(() => !processExists(descendantPid));
+    } finally {
+      controller.abort();
+      if (descendantPid && processExists(descendantPid)) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("never lets a git subcommand open an interactive editor", async () => {
   // `rebase --continue` and friends pass no --no-edit; with core.editor = "code --wait" the
