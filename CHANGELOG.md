@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.14
+
+- fix: keep a gutter action on every change and draw the icons as SVG
+
 ## 0.1.13
 
 - feat: render the merge IDEA-style with connectors and gutter actions
