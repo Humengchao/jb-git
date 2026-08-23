@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.15
+
+- perf: paint only the visible slice, and keep the acted-on change in view
+
 ## 0.1.14
 
 - fix: keep a gutter action on every change and draw the icons as SVG
