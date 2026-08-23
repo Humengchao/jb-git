@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13
+
+- feat: render the merge IDEA-style with connectors and gutter actions
+- feat: model merge conflicts as ranges so the result can drop Git's markers
+- fix: show each conflict as a coloured band instead of a text selection
+
 ## 0.1.12
 
 - fix: settle terminated Git commands and hand the shell portable paths
