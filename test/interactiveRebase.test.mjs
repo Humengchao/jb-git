@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildRebaseTodo, isNoOpPlan, isRebaseAction, shellQuote, validateRebasePlan } from "../dist/interactiveRebase.js";
+import { buildRebaseTodo, isNoOpPlan, isRebaseAction, posixPath, shellQuote, validateRebasePlan } from "../dist/interactiveRebase.js";
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
 
@@ -200,6 +200,22 @@ test("runs the configured Git binary rather than whatever PATH resolves", () => 
   assert.ok(plan.todo.includes("'/opt/custom path/bin/git' commit --amend"));
   // The guard must use the configured binary too, not PATH's git.
   assert.ok(plan.todo.includes(`test "$('/opt/custom path/bin/git' log -1 --format=%s)\"`));
+});
+
+test("hands the shell forward slashes, which Windows MSYS needs", () => {
+  // Git runs exec and the sequence editor through its bundled sh on Windows,
+  // where a backslash inside single quotes is a literal, not a separator.
+  assert.equal(posixPath("C:\\repo\\.git\\jb-git-rebase"), "C:/repo/.git/jb-git-rebase");
+  assert.equal(posixPath("/tmp/scratch"), "/tmp/scratch");
+
+  const plan = buildRebaseTodo(
+    [{ oid: OID_A, subject: "first", action: "reword", message: "m" }],
+    "C:\\repo\\.git\\jb-git-rebase",
+    "C:\\Program Files\\Git\\cmd\\git.exe",
+  );
+  assert.ok(plan.todo.includes("exec test \"$('C:/Program Files/Git/cmd/git.exe' log -1"));
+  assert.ok(plan.todo.includes(`--file='C:/repo/.git/jb-git-rebase/message-${OID_A}.txt'`));
+  assert.ok(!plan.todo.includes("\\"), "no backslash may survive into the todo");
 });
 
 test("reorders commits through a real interactive rebase", async () => {

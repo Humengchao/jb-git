@@ -155,7 +155,7 @@ export function buildRebaseTodo(
     // --no-verify: this only rewrites the message of a commit whose content was
     // already accepted, and rebase deliberately does not re-run pre-commit hooks
     // for the picks around it.
-    const git = shellQuote(gitExecutable);
+    const git = shellQuote(posixPath(gitExecutable));
     const file = shellQuote(joinPosix(scratchDirectory, amend.file));
     const rewrite = `${git} commit --amend --no-verify --cleanup=whitespace --file=${file}`;
     // A pick that replays as an empty commit makes Git stop; if the user then
@@ -181,13 +181,20 @@ function firstLine(subject: string): string {
 }
 
 /**
- * Joins a scratch path for the shell command. Git's `exec` always runs under a
- * POSIX shell, so the separator stays `/` even when the repository lives on a
- * Windows drive path.
+ * Rewrites a path for the shell Git runs `exec` and the sequence editor under.
+ *
+ * On Windows that shell is Git's bundled MSYS `sh`, where a backslash inside
+ * single quotes stays a literal character rather than a separator, so a native
+ * `C:\\repo\\.git` path would reach `cp` unusable. Windows itself accepts forward
+ * slashes, which makes them correct on every platform.
  */
+export function posixPath(value: string): string {
+  return value.replaceAll("\\", "/");
+}
+
+/** Joins a scratch path for the shell command, tolerating a trailing separator. */
 function joinPosix(directory: string, name: string): string {
-  const base = directory.replaceAll("\\", "/").replace(/\/+$/, "");
-  return `${base}/${name}`;
+  return `${posixPath(directory).replace(/\/+$/, "")}/${name}`;
 }
 
 /**

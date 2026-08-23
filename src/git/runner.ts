@@ -212,11 +212,12 @@ export class GitRunner {
         if (settled || !terminationError || !closeResult || treeKillPending > 0) return;
         if (process.platform !== "win32" && !forceKillSent && processGroupExists(child.pid)) {
           if (!terminationPollTimer) {
+            // Not unref'd: after termination this timer is the only route left
+            // to settling the Promise, so it has to hold the event loop open.
             terminationPollTimer = setTimeout(() => {
               terminationPollTimer = undefined;
               maybeFinishTermination();
             }, 25);
-            terminationPollTimer.unref();
           }
           return;
         }
@@ -240,9 +241,12 @@ export class GitRunner {
           forceKillSent = true;
           killTree(true);
         }, TERMINATION_GRACE_MS);
-        forceKillTimer.unref();
         // Even a descendant that escaped the process group and inherited a
         // pipe must not keep this Promise (and a repository mutex) forever.
+        // These timers are deliberately not unref'd: once termination starts,
+        // the child's own handles can disappear at any moment, and an unref'd
+        // timer would let the event loop drain with the Promise still pending.
+        // Every one of them is cleared by finish(), so none outlives the command.
         terminationSettleTimer = setTimeout(() => {
           forceKillSent = true;
           killTree(true);
@@ -250,7 +254,6 @@ export class GitRunner {
           child.stderr.destroy();
           finishTermination();
         }, TERMINATION_GRACE_MS + TERMINATION_SETTLE_MS);
-        terminationSettleTimer.unref();
       };
       const remember = (target: Buffer[], chunk: Buffer): void => {
         if (settled || terminationError) return;
@@ -404,7 +407,6 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams, force
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
       complete();
     }, TERMINATION_SETTLE_MS);
-    safetyTimer.unref();
     killer.once("error", () => {
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
       complete();

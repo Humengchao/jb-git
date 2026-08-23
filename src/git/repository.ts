@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
 import { parseUnifiedDiff, patchForHunk } from "./patch";
-import { buildRebaseTodo, shellQuote, type RebaseStep } from "../interactiveRebase";
+import { buildRebaseTodo, posixPath, shellQuote, type RebaseStep } from "../interactiveRebase";
 import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
 import {
   GitBranch,
@@ -894,7 +894,7 @@ export class GitRepository {
         // An inherited GIT_SEQUENCE_EDITOR outranks `sequence.editor`, so the
         // user's real editor would open and block while holding the mutex.
         // Git runs this through its own shell, which `cp` is always part of.
-        env: { GIT_SEQUENCE_EDITOR: `cp ${shellQuote(todoPath)}` },
+        env: { GIT_SEQUENCE_EDITOR: `cp ${shellQuote(posixPath(todoPath))}` },
       });
     });
   }

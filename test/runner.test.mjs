@@ -184,3 +184,23 @@ test("never lets a git subcommand open an interactive editor", async () => {
   const { readSource } = await import("./sourceText.mjs");
   assert.match(readSource("../src/git/runner.ts", import.meta.url), /GIT_EDITOR: "true"/);
 });
+
+test("keeps the event loop alive until a terminated command settles", async () => {
+  const { readSource } = await import("./sourceText.mjs");
+  const source = readSource("../src/git/runner.ts", import.meta.url);
+  // Once termination starts, the child's own handles can disappear at any
+  // moment, and these timers are the only remaining route to settling the
+  // Promise. Unref'ing one lets the loop drain with the Promise pending, which
+  // in the extension host would strand a repository mutex forever.
+  for (const timer of ["forceKillTimer", "terminationSettleTimer", "terminationPollTimer", "safetyTimer"]) {
+    assert.ok(
+      !new RegExp(`${timer}\\.unref\\(\\)`).test(source),
+      `${timer} must not be unref'd: it is on the path that settles a terminated command`,
+    );
+  }
+  // Each one is still cleared on the settle path, so none outlives its command.
+  assert.match(source, /if \(forceKillTimer\) clearTimeout\(forceKillTimer\)/);
+  assert.match(source, /if \(terminationSettleTimer\) clearTimeout\(terminationSettleTimer\)/);
+  assert.match(source, /if \(terminationPollTimer\) clearTimeout\(terminationPollTimer\)/);
+  assert.match(source, /clearTimeout\(safetyTimer\)/);
+});
