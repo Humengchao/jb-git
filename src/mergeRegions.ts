@@ -1,0 +1,171 @@
+/**
+ * Tracks conflicts in a merge result that no longer carries Git's markers.
+ *
+ * IDEA's merge pane shows clean file content and marks each unresolved conflict
+ * as a coloured region, never as `<<<<<<<` text. Removing the markers means the
+ * conflicts can no longer be recovered by re-parsing the text, so each one is
+ * held as a character range and moved as the user edits around it.
+ *
+ * The whole model is pure so it can be tested without a Webview: the editor only
+ * feeds it the old text, the new text, and which side a button chose.
+ */
+
+/** One conflict, located in the current result text. */
+export interface MergeRegion {
+  /** Offset of the region's first character in the result text. */
+  readonly start: number;
+  /** Offset one past the region's last character. */
+  readonly end: number;
+  /** The competing versions, kept so a side can still be applied later. */
+  readonly ours: string;
+  readonly theirs: string;
+  /** How the region reached its current text, or undefined while it is unresolved. */
+  readonly resolution?: "ours" | "theirs" | "both" | "manual";
+}
+
+export interface MergeModel {
+  /** File content with no conflict markers: what the user reads and what Apply writes. */
+  readonly text: string;
+  readonly regions: readonly MergeRegion[];
+}
+
+/** A single contiguous replacement, which is what any edit reduces to. */
+export interface TextDelta {
+  readonly start: number;
+  readonly oldEnd: number;
+  readonly newEnd: number;
+}
+
+const START_MARKER = /^<{7,}[^\r\n]*(?:\r?\n|$)/gm;
+
+/**
+ * Reduces an edit to one replaced range by matching the common prefix and
+ * suffix. Any edit a textarea can produce, including a paste or an undo, is a
+ * single replacement once its unchanged ends are removed.
+ */
+export function textDelta(before: string, after: string): TextDelta {
+  let start = 0;
+  const limit = Math.min(before.length, after.length);
+  while (start < limit && before[start] === after[start]) start += 1;
+  let suffix = 0;
+  while (
+    suffix < before.length - start
+    && suffix < after.length - start
+    && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) suffix += 1;
+  return { start, oldEnd: before.length - suffix, newEnd: after.length - suffix };
+}
+
+/**
+ * Converts a conflicted working-tree file into clean text plus regions.
+ *
+ * An unresolved region shows our side, which is the version already on the
+ * branch; the incoming side stays available on the region and is shown in the
+ * right-hand pane, so nothing is hidden from the user.
+ */
+export function buildModel(markerText: string): MergeModel {
+  const regions: MergeRegion[] = [];
+  let text = "";
+  let cursor = 0;
+  START_MARKER.lastIndex = 0;
+  let start: RegExpExecArray | null;
+  while ((start = START_MARKER.exec(markerText))) {
+    const parsed = readConflict(markerText, start);
+    if (!parsed) break;
+    text += markerText.slice(cursor, start.index);
+    regions.push({ start: text.length, end: text.length + parsed.ours.length, ours: parsed.ours, theirs: parsed.theirs });
+    text += parsed.ours;
+    cursor = parsed.end;
+    START_MARKER.lastIndex = parsed.end;
+  }
+  text += markerText.slice(cursor);
+  return { text, regions };
+}
+
+/** Reads the `ours`/`theirs` sections that follow a `<<<<<<<` line. */
+function readConflict(text: string, start: RegExpExecArray): { ours: string; theirs: string; end: number } | undefined {
+  const from = start.index + start[0].length;
+  const base = matchAt(/^\|{7,}[^\r\n]*(?:\r?\n|$)/gm, text, from);
+  const divider = matchAt(/^={7,}(?:\r?\n|$)/gm, text, from);
+  if (!divider) return undefined;
+  const end = matchAt(/^>{7,}[^\r\n]*(?:\r?\n|$)/gm, text, divider.index + divider[0].length);
+  if (!end) return undefined;
+  // A diff3-style conflict puts the base between ours and the divider.
+  const oursEnd = base && base.index < divider.index ? base.index : divider.index;
+  return {
+    ours: text.slice(from, oursEnd),
+    theirs: text.slice(divider.index + divider[0].length, end.index),
+    end: end.index + end[0].length,
+  };
+}
+
+function matchAt(pattern: RegExp, text: string, from: number): RegExpExecArray | null {
+  pattern.lastIndex = from;
+  return pattern.exec(text);
+}
+
+/**
+ * Moves regions to follow an edit.
+ *
+ * A region the edit reached is marked `manual`: the user rewrote that text
+ * themselves, so the tool must stop claiming it is unresolved, and must never
+ * later overwrite it with a side the user did not ask for.
+ */
+export function applyEdit(regions: readonly MergeRegion[], delta: TextDelta): MergeRegion[] {
+  const shift = delta.newEnd - delta.oldEnd;
+  return regions.map((region) => {
+    if (region.end <= delta.start) return region;
+    if (region.start >= delta.oldEnd) return { ...region, start: region.start + shift, end: region.end + shift };
+    const start = Math.min(region.start, delta.start);
+    const end = Math.max(region.end + shift, delta.newEnd);
+    return { ...region, start, end: Math.max(start, end), resolution: "manual" as const };
+  });
+}
+
+/** Replaces one region with the chosen side and moves the regions after it. */
+export function resolveRegion(
+  model: MergeModel,
+  index: number,
+  side: "ours" | "theirs" | "both",
+): MergeModel {
+  const region = model.regions[index];
+  if (!region) return model;
+  const replacement = side === "both" ? joinSides(region.ours, region.theirs) : region[side];
+  const text = model.text.slice(0, region.start) + replacement + model.text.slice(region.end);
+  const shift = replacement.length - (region.end - region.start);
+  const regions = model.regions.map((other, position) => {
+    if (position === index) return { ...other, end: other.start + replacement.length, resolution: side };
+    if (other.start >= region.end) return { ...other, start: other.start + shift, end: other.end + shift };
+    return other;
+  });
+  return { text, regions };
+}
+
+/** Keeps both sides, adding the separator Git would have needed between them. */
+function joinSides(ours: string, theirs: string): string {
+  if (!ours || !theirs) return ours + theirs;
+  return /\r?\n$/.test(ours) ? ours + theirs : `${ours}\n${theirs}`;
+}
+
+export function unresolved(regions: readonly MergeRegion[]): number {
+  return regions.filter((region) => region.resolution === undefined).length;
+}
+
+/**
+ * Restores the marker form, used only to hand a still-conflicted result back to
+ * a draft or to Git. Resolved regions contribute their settled text.
+ */
+export function toMarkerText(model: MergeModel, labels: { ours: string; theirs: string }): string {
+  let output = "";
+  let cursor = 0;
+  for (const region of model.regions) {
+    output += model.text.slice(cursor, region.start);
+    if (region.resolution === undefined) {
+      output += `<<<<<<< ${labels.ours}\n${region.ours}=======\n${region.theirs}>>>>>>> ${labels.theirs}\n`;
+    } else {
+      output += model.text.slice(region.start, region.end);
+    }
+    cursor = region.end;
+  }
+  return output + model.text.slice(cursor);
+}
