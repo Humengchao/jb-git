@@ -20,7 +20,7 @@ export interface MergeRegion {
   readonly ours: string;
   readonly theirs: string;
   /** How the region reached its current text, or undefined while it is unresolved. */
-  readonly resolution?: "ours" | "theirs" | "both" | "manual";
+  readonly resolution?: "ours" | "theirs" | "both" | "manual" | "ignored";
 }
 
 export interface MergeModel {
@@ -139,6 +139,19 @@ export function resolveRegion(
     return other;
   });
   return { text, regions };
+}
+
+/**
+ * Marks a region handled without changing its text, which is IDEA's `×` gutter
+ * action: the user looked at the change and chose to keep the result as it is.
+ */
+export function ignoreRegion(model: MergeModel, index: number): MergeModel {
+  const region = model.regions[index];
+  if (!region || region.resolution !== undefined) return model;
+  return {
+    text: model.text,
+    regions: model.regions.map((other, position) => (position === index ? { ...other, resolution: "ignored" as const } : other)),
+  };
 }
 
 /** Keeps both sides, adding the separator Git would have needed between them. */

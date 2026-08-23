@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyEdit,
   buildModel,
+  ignoreRegion,
   resolveRegion,
   textDelta,
   toMarkerText,
@@ -108,6 +109,19 @@ test("applying a side twice ends on the last choice", () => {
   const twice = resolveRegion(once, 0, "ours");
   assert.equal(twice.text, "mine\n");
   assert.equal(twice.regions[0].resolution, "ours");
+});
+
+test("ignoring a change keeps the text and stops counting it", () => {
+  const model = buildModel(`head\n${conflicted("mine\n", "yours\n")}tail\n`);
+  const ignored = ignoreRegion(model, 0);
+  assert.equal(ignored.text, model.text);
+  assert.equal(ignored.regions[0].resolution, "ignored");
+  assert.equal(unresolved(ignored.regions), 0);
+  // The ignored region is settled, so a draft no longer carries markers for it.
+  assert.equal(toMarkerText(ignored, LABELS), "head\nmine\ntail\n");
+  // Ignore answers an open question only; a handled region keeps its resolution.
+  const applied = resolveRegion(model, 0, "theirs");
+  assert.equal(ignoreRegion(applied, 0), applied);
 });
 
 test("rebuilds marker text for a result that still has conflicts", () => {
