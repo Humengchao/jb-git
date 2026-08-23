@@ -1,43 +1,81 @@
 # JB Git implementation plan
 
-This repository follows the IDEA-parity plan discussed for the project.
+This checkpoint describes the current source tree. It separates a workflow being present from full IntelliJ IDEA parity so that README feature lists, implementation milestones and release claims use the same boundary.
 
-## Milestones
+## Status model
 
-1. P0: behavior map and high-risk proof of concepts for partial commit, multi-repository rollback, operation state, and log graph.
-2. P1: Git Core, repository discovery, machine-readable status parsing, operation coordination, and VS Code integration.
-3. P2: daily workflow—Local Changes, Diff, Stage/Unstage, Commit, Branch, Fetch/Pull/Push.
-4. P3: Changelist, partial commit, Staging Area, Shelf, Patch, History, and Blame.
-5. P4: Log Graph, Merge/Rebase/Cherry-pick/Revert/Reset, interactive rebase, and conflict workflow.
-6. P5: multi-root, Worktree, Submodule, Sparse Checkout, LFS, Bisect, and large-repository tuning.
-7. P6: cross-platform hardening, accessibility, remote extension hosts, CI, and release.
+- **Implemented**: the workflow is present and covered by the current implementation/tests.
+- **Partial**: useful end-to-end behavior exists, but IDEA offers materially deeper behavior.
+- **Planned**: not implemented in the current tree.
+- **Out of scope**: an explicit project non-goal.
 
-## Reference map
+## IDEA behavior baseline
 
-The public IntelliJ Community repository is used as a behavior and test-case reference:
+The parity baseline comes from current JetBrains documentation and the public IntelliJ Community source layout:
 
-- `plugins/git4idea/backend/src/commands` — Git command execution and output handling.
-- `plugins/git4idea/backend/src/repo` — repository state and repository files.
-- `plugins/git4idea/backend/src/index` and `status` — index and status behavior.
-- `plugins/git4idea/backend/src/branch`, `rebase`, `merge`, `stash` — operation workflows.
-- `platform/vcs-impl` — changelists, partial changes, shelf, patch, diff, and merge infrastructure.
+- [Commit and push changes](https://www.jetbrains.com/help/idea/commit-and-push-changes.html) — Staging Area, partial commit, per-chunk/per-line selection and Changelist workflows.
+- [Resolve Git conflicts](https://www.jetbrains.com/help/idea/resolve-conflicts.html) — Base-aware three-pane merge, non-conflicting/simple-conflict actions and result review.
+- [Merge, rebase, or cherry-pick changes](https://www.jetbrains.com/help/idea/apply-changes-from-one-branch-to-another.html) — branch integration and interactive rebase.
+- [Investigate changes](https://www.jetbrains.com/help/idea/investigate-changes.html) — Log, file history and editor-gutter Blame annotations.
+- [Changelist settings](https://www.jetbrains.com/help/idea/settings-version-control-changelist-conflicts.html) — same-file partial-change ownership and inactive-Changelist conflict policies.
+- `plugins/git4idea/backend/src/commands` and `repo` — Git command execution and repository state.
+- `plugins/git4idea/backend/src/index`, `status`, `branch`, `rebase`, `merge` and `stash` — Index, status and operation workflows.
+- `platform/vcs-impl` — Changelists, Shelf, Patch, Diff and Merge infrastructure.
 - `platform/vcs-log` — commit graph and log data layers.
-- `plugins/git4idea/tests` — independent parity test inventory.
+- `plugins/git4idea/tests` — independent parity-test inventory.
 
 The implementation is clean-room TypeScript. Any future source reuse requires per-file license review and attribution.
 
-## Implementation checkpoint
+## Capability checkpoint
 
-The staged local implementation currently reaches the following checkpoint:
-
-| Milestone | Status | Delivered |
+| IDEA capability | Status | Current implementation and remaining boundary |
 | --- | --- | --- |
-| P0 | Foundation complete | Reference map, risk notes, parser and hunk-operation tests |
-| P1 | Complete for local extension host | Git Core runner, repository discovery, porcelain-v2 status, serialized mutations, operation-state detection |
-| P2 | Complete for MVP workflows | Local Changes, diff, stage/unstage/discard, commit, branch, fetch/pull/push, remotes, clone |
-| P3 | Core and primary UI complete | Bottom Git tool window with Local Changes and Shelf tabs, Changelist-based selected-file commit, Patch import, File History, Blame, Stash |
-| P4 | Core workflows and Log UI complete | Bottom Log and Console tabs, colored log graph, branch filters, Changed Files and Details panes, Merge/Rebase/Cherry-pick/Revert/Reset, continue/abort/skip, three-pane conflict resolution, Bisect |
-| P5 | Partial | Worktree, Submodule, Sparse Checkout, LFS pull; large-repository tuning and full multi-root transaction semantics remain |
-| P6 | Partial | Windows/macOS/Linux core CI and VS Code 1.95/stable Extension Host matrix; Git-version fallbacks, accessibility, remote-host testing, release/signing remain |
+| HEAD / Index / Working Tree model | Implemented | The UI keeps `HEAD → Index` and `Index → Working Tree` separate. It supports file Diff and text-Hunk stage/unstage, with stale-Hunk identity checks before applying a patch. |
+| Two commit sources | Implemented | **Staging area (Index)** commits exactly the staged snapshot. **Selected files (complete contents)** uses an isolated temporary Index and therefore does not destroy the real Index if staging, hooks or commit fail. Selected-Changelist commit uses the same complete-path model. |
+| Changelists | Partial | Create, describe, activate, delete and move whole files; preserve assignments through renames; commit a selected Changelist. Per-Hunk or overlapping-line ownership inside one file, task context and inactive-Changelist conflict handling are planned. |
+| Rollback and recovery | Implemented | Tracked-file Rollback first persists a recovery Shelf. Untracked deletion goes through the operating-system Trash. Individual conflicted-file rollback is blocked so one conflict side is not silently lost. |
+| Shelf, Stash and Patch | Partial | Shelf create/apply/delete, Stash create/apply/pop/delete, commit-patch export and patch import are present. Recovery uses persisted Shelf patches and stash OIDs; arbitrary local-change patch construction and IDEA's broader Unshelve targeting/options remain gaps. |
+| Smart Checkout | Implemented | Dirty checkout stashes tracked, staged and untracked changes, identifies the temporary stash by immutable OID, checks out, and restores Working Tree plus Index. Failed/conflicting recovery keeps the stash. |
+| Push preview and recovery | Implemented | Fetch-before-preview, an exact fully-qualified source/destination refspec, outgoing commit list, initial upstream, configurable destination-branch protection, Force with Lease only, and checked-out existing-upstream non-fast-forward recovery through Pull with Rebase/Merge followed by a new preview. IDEA's richer multi-repository Push dialog and background incoming/outgoing model are not claimed. |
+| Log and object IDs | Partial | Graph, filters, branch comparison, progressive 300-commit loading, virtualization after 500 entries and a 5,000-entry cap are present. Full 40-character SHA-1 and 64-character SHA-256 IDs pass through UI validation. Persistent indexing and exhaustive huge-history search remain planned. |
+| Conflict resolution | Partial | A recoverable left/result/right editor provides editable result, per-block and whole-file choices, navigation, external-change detection, drafts and staged Apply. Rebase stage labels correctly say **Rebase Target** and **Replayed Commit** using replay metadata. It is not yet IDEA's complete Base-aware three-way merge: Base/Result comparison modes, full semantic alignment and all simple/non-conflicting resolution actions are missing. |
+| Merge/Rebase/Cherry-pick/Revert/Reset | Partial | Start plus Continue/Abort/Skip operations are present, but history-editing depth remains below IDEA. |
+| Interactive rebase editor | Planned | No visual sequence editor yet provides reorder, reword, squash, fixup and drop. |
+| File History and Blame | Partial | File History and command/output Blame are implemented, including literal special-path handling. |
+| Editor-gutter Blame | Planned | Inline annotations, previous-revision traversal and movement detection are not implemented. |
+| Multi-root, nested repositories and Worktrees | Partial | Discovery, per-repository mutation serialization and linked-worktree metadata watching are present. External ordinary working-file changes now trigger debounced refreshes while `.git`, dependency and cache noise is ignored. Pending refreshes are retained by root/generation, and rediscovery reuses the same repository object and mutation lock when identity is unchanged. Cross-repository transactional rollback remains planned. |
+| JetBrains-native UI/assets and pixel parity | Out of scope | The extension uses VS Code Panel/Webview/Diff primitives. It does not copy JetBrains source, controls, UI assets or trademarks. |
 
-The current code deliberately stops short of claiming complete IntelliJ parity. The remaining work should be implemented as separate commits: interactive rebase sequencing, full multi-root rollback, large-log indexing/pagination, capability-based command fallbacks, and cross-platform/package verification.
+## Milestone checkpoint
+
+| Milestone | Status | Delivered / boundary |
+| --- | --- | --- |
+| P0 — behavior map and high-risk proofs | Implemented | Reference map plus parser, partial-commit, Hunk, conflict, refresh and repository-operation tests. |
+| P1 — Git Core and repository lifecycle | Implemented | Argument-array Git runner, porcelain-v2 parsing, discovery, serialized mutations, operation-state detection and stable rediscovery identity. |
+| P2 — daily Git workflow | Implemented | Local Changes, two-layer Diff, file/Hunk stage/unstage, two commit sources, branch operations, Smart Checkout, remotes, Fetch/Pull and guarded Push. |
+| P3 — Changelist, Shelf, Patch, History and Blame | Partial | Core UI, commit-patch export/import and safe recovery are present; advanced same-file Changelist ownership and gutter Blame remain. |
+| P4 — Log and history-changing operations | Partial | Log graph/UI, Merge/Rebase/Cherry-pick/Revert/Reset, Continue/Abort/Skip and a usable conflict editor are present; interactive rebase and complete Base-aware merge parity remain. |
+| P5 — workspace scale and advanced repositories | Partial | Multi-root/nested/Bare discovery, Worktree, Submodule, Sparse Checkout, LFS pull, Bisect, progressive Log loading, virtualization and reliable external refresh are present; persistent log indexing and cross-root transaction semantics remain. |
+| P6 — hardening and delivery | Partial | Windows/macOS/Linux unit CI, VS Code 1.95/stable Extension Host CI and the automated release pipeline are implemented. Accessibility depth, SSH/WSL/Dev Container/remote-host verification and systematic Git-version fallbacks still need work. |
+
+## Prioritized parity work
+
+1. Build an interactive-rebase sequence editor with validation and recovery for reorder, reword, squash, fixup and drop.
+2. Extend conflict resolution into a complete Base-aware three-way Merge workflow, including Base/Result comparisons and IDEA-equivalent non-conflicting/simple-conflict actions.
+3. Add editor-gutter Blame with navigation, previous revisions and movement/copy detection.
+4. Model Changelist ownership below the file level so independent or overlapping changes in one file can be separated safely.
+5. Add explicit multi-repository transaction planning, partial-failure reporting and compensating rollback where operations are reversible.
+6. Add persistent large-history indexing/search and benchmark graph behavior beyond the current 5,000-commit window.
+7. Expand capability-based Git fallbacks, accessibility testing and SSH/WSL/Dev Container/remote Extension Host coverage.
+
+## Release and signing status
+
+Release automation is implemented, not a remaining feature. A push to `main` (unless its subject contains `[skip release]`) runs the cross-platform verification matrix, bumps the version, packages a new VSIX, commits and tags the release, and creates a GitHub Release. Marketplace upload is automatic only when `VSCE_PAT` is configured; otherwise the workflow still produces the versioned GitHub release and reports that Marketplace upload was skipped.
+
+The project does not currently claim cryptographic VSIX/code signing or Git Commit GPG signing. Those are distinct from the implemented `Sign-off` commit option and are not prerequisites for the existing release pipeline.
+
+## Explicit non-goals
+
+- Pixel-perfect reproduction of IntelliJ IDEA or replacement of VS Code's native Panel/editor chrome.
+- Copying JetBrains source code, UI assets, controls, product names or trademarks.
+- Reimplementing Git itself; the user's configured system Git remains the source of truth.

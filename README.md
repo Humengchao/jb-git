@@ -14,9 +14,27 @@ The implementation is intentionally layered:
 
 ## Current status
 
-The local MVP now covers repository discovery, porcelain-v2 status, a Changelist-based Commit tool window, file and hunk stage/unstage, diff, selected-file commit/amend/sign-off/no-verify, Commit and Push, branches/tags, fetch/pull/push, remotes, stash, shelf, history/file history, blame, merge/rebase/cherry-pick/revert/reset, continue/abort/skip, a three-pane merge conflict editor, Worktrees, Submodules, Clone, Sparse Checkout, Patch import, LFS pull, and Bisect.
+The status terms below are intentional: **Implemented** means the workflow is present in the current tree, **Partial** means it is usable but does not yet match IDEA's depth, **Planned** means it is not implemented, and **Out of scope** is a deliberate non-goal.
 
-The UI now lives in a single bottom `Git` tool window, rather than an Activity Bar sidebar or editor tab. Its `Log`, `Console`, `Local Changes`, and `Shelf` tabs follow IntelliJ IDEA's workflow boundaries; Log uses horizontally resizable Branches / Commits / Changed Files / Details panes, Command/Ctrl branch multi-selection, Branch/User/Date/Paths/order filters, and a Changes Between workspace with a grouped file tree plus native side-by-side code diffs. Local Changes combines Changelists and the commit form. Double-clicking a conflicted text file opens a resizable three-pane merge surface with current/incoming versions, an editable result, per-block Left/Both/Right actions, whole-file acceptance, conflict navigation, and an Apply action that stages the resolved result. It can be reopened from the conflicted file or `JB Git: Open Merge Conflict Editor` in the Command Palette. Binary conflicts retain a safe whole-file ours/theirs fallback. VS Code still renders its own native Panel and editor chrome. Remaining high-risk work is tracked in `docs/implementation-plan.md`: an interactive rebase editor, multi-root transactional rollback, Git-version capability fallbacks, and release/remote-host hardening.
+| IntelliJ IDEA workflow | Status | JB Git behavior and boundary |
+| --- | --- | --- |
+| Git tool window and Log | Partial | One bottom `Git` panel provides Log, Console, Local Changes and Shelf. The graph, filters, branch comparison, progressive 300-commit loading and virtualized large lists are implemented; persistent history indexing and exhaustive very-large-repository search are not. |
+| HEAD / Index / Working Tree review | Implemented | Local Changes exposes the two distinct comparisons—`HEAD → Index` (staged) and `Index → Working Tree` (unstaged)—with file diff plus text-hunk stage/unstage. Hunk application verifies that the displayed hunk is still current before mutating the Index. |
+| Commit sources | Implemented | The commit form has two explicit sources: **Staging area (Index)** commits exactly the staged snapshot, while **Selected files (complete contents)** commits the checked files through an isolated temporary Index. A failed selected-file/Changelist commit leaves the user's real Index intact. |
+| Changelists | Partial | Create, rename/describe, activate, delete and move whole files, including rename tracking and selected-Changelist commit. IDEA-style ownership of different hunks or overlapping lines in the same file, task context and changelist-conflict policies remain gaps. |
+| Rollback, Shelf and untracked deletion | Implemented | Rolling back a tracked file first keeps a recovery entry in Shelf. An untracked file is moved through the operating system Trash instead of being permanently deleted. Conflicted paths are not individually rolled back because that could discard one side. |
+| Branch checkout with local changes | Implemented | Smart Checkout stores tracked, staged and untracked changes in a temporary stash identified by immutable OID, checks out the branch, then restores the Working Tree and Index. A failed or conflicting restore leaves the stash available for recovery. |
+| Push safety | Implemented | Push fetches before preview, shows and executes the exact local-ref-to-remote-ref target plus outgoing commits, and supports initial upstream setup. Force push is unavailable whenever the destination branch matches a configurable protected-branch pattern; other destinations only offer Force with Lease. A non-fast-forward rejection on the checked-out branch's existing upstream offers pull-with-rebase or pull-with-merge and then previews again. |
+| SHA-1 and SHA-256 object IDs | Implemented | Log selection and protocol validation accept complete 40- and 64-hex object IDs; Git still remains the authority that resolves and validates the object. |
+| Merge conflict resolution | Partial | Text conflicts have a resizable left/result/right editor, editable result, per-block and whole-file choices, navigation, recoverable drafts, stale-result checks and staged Apply. Rebase labels correctly identify **Rebase Target** and **Replayed Commit** instead of treating stage 2/3 as ordinary ours/theirs. This is not yet IDEA's complete base-aware three-way merge experience (base/result comparisons, full semantic alignment and all simple/non-conflicting resolution controls). |
+| Merge/rebase/cherry-pick/revert/reset operations | Partial | Start plus continue/abort/skip flows are implemented; history-editing depth remains below IDEA. |
+| Interactive rebase editor | Planned | There is no visual sequence editor yet for reorder, reword, squash, fixup and drop. |
+| File history and Blame | Partial | File History and command/output Blame are implemented, including literal special-path handling. |
+| Editor-gutter Blame | Planned | Inline annotations, previous-revision navigation and movement detection are not implemented. |
+| Multi-root, nested repositories and Worktrees | Partial | Discovery, per-repository mutation serialization, linked-worktree metadata watching and debounced external working-file refresh are implemented. Refreshes are tracked per root/generation and rediscovery retains repository identity and its mutation lock. Cross-repository transactional rollback is still planned. |
+| JetBrains-native UI/assets and pixel parity | Out of scope | JB Git is a clean-room VS Code extension. VS Code renders its native panel/editor chrome; JetBrains source, UI assets, controls and trademarks are not copied. |
+
+The broader command inventory also includes branches/tags, fetch/pull/remotes, stash, Worktrees, Submodules, Clone, Sparse Checkout, Patch import and commit export, LFS pull and Bisect. See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the prioritized parity gaps rather than treating the inventory as a claim of complete IntelliJ IDEA parity.
 
 ## Development
 
@@ -35,11 +53,11 @@ Every installable update receives a new semantic version and produces a newly na
 
 ## Releasing
 
-Publishing is automated. Every push to `main` runs the `Release` workflow, which:
+The release pipeline is implemented and automated. Every push to `main` runs the `Release` workflow, which:
 
 1. Runs the unit tests on Linux, macOS and Windows and the extension-host tests against VS Code 1.95.0 and stable.
 2. Raises the patch version and updates the lockfile, changelog and installation docs together.
-3. Packages the VSIX and publishes it to the Visual Studio Marketplace.
+3. Packages the VSIX and, when `VSCE_PAT` is configured, publishes it to the Visual Studio Marketplace.
 4. Pushes a `chore: release <version>` commit, tags it `v<version>`, and attaches the VSIX to a GitHub release.
 
 Nothing is published unless the whole matrix passes. To land a change without releasing, put `[skip release]` in the commit subject:

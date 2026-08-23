@@ -10,9 +10,12 @@ import { ChangelistStore } from "./changelists/store";
 import { ShelfStore } from "./shelves/store";
 import { RepositoryManager } from "./repositoryManager";
 import { IntelliJGitToolWindowProvider } from "./webviews/logPanel";
-import { MergeConflictEditor } from "./webviews/mergeEditor";
+import { conflictSideLabels, MergeConflictEditor } from "./webviews/mergeEditor";
 import { validateGitRefName, validatePathInput, validateRemoteName, validateSingleLine } from "./inputValidation";
 import { canonicalPath, deepestContaining } from "./pathRouting";
+import { moveUntrackedToTrash } from "./discardSafety";
+import { previewAndPush } from "./pushPreview";
+import { checkoutWithLocalChanges } from "./smartCheckout";
 
 function workspacePaths(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
@@ -20,6 +23,75 @@ function workspacePaths(): string[] {
 
 function configurationGitPath(): string {
   return vscode.workspace.getConfiguration("jbGit").get<string>("gitPath", "git");
+}
+
+export interface RefreshGenerationBatch {
+  readonly roots: ReadonlyMap<string, number>;
+  readonly discoveryGeneration?: number;
+}
+
+/**
+ * Tracks debounced refresh requests without allowing completion of an older
+ * refresh to erase work that arrived later (or belongs to another root).
+ */
+export class RefreshGenerationTracker {
+  private readonly roots = new Map<string, number>();
+  private generation = 0;
+  private discoveryGeneration?: number;
+
+  public addRoot(rootPath: string): void {
+    this.roots.set(rootPath, ++this.generation);
+  }
+
+  public addDiscovery(): void {
+    this.discoveryGeneration = ++this.generation;
+  }
+
+  public capture(): RefreshGenerationBatch {
+    return {
+      roots: new Map(this.roots),
+      discoveryGeneration: this.discoveryGeneration,
+    };
+  }
+
+  public complete(batch: RefreshGenerationBatch): void {
+    for (const [root, generation] of batch.roots) {
+      if (this.roots.get(root) === generation) this.roots.delete(root);
+    }
+    if (batch.discoveryGeneration !== undefined && this.discoveryGeneration === batch.discoveryGeneration) {
+      this.discoveryGeneration = undefined;
+    }
+  }
+
+  public get hasPending(): boolean {
+    return this.roots.size > 0 || this.discoveryGeneration !== undefined;
+  }
+}
+
+const WORKTREE_WATCH_IGNORED_SEGMENTS = new Set([".git", "node_modules", ".vscode-test", ".cache"]);
+
+/** Returns true for metadata and dependency/cache trees that must not cause worktree refreshes. */
+export function isWorktreeWatchPathIgnored(rootPath: string, filePath: string): boolean {
+  const relative = path.relative(rootPath, filePath);
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return true;
+  return relative.split(/[\\/]+/).some((segment) => WORKTREE_WATCH_IGNORED_SEGMENTS.has(segment.toLowerCase()));
+}
+
+export interface GitVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  text: string;
+}
+
+export function parseGitVersion(value: string): GitVersion | undefined {
+  const match = /(?:^|\s)(\d+)\.(\d+)(?:\.(\d+))?/.exec(value);
+  if (!match) return undefined;
+  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3] ?? 0), text: value.trim() };
+}
+
+function supportsRequiredGitCommands(version: GitVersion): boolean {
+  return version.major > 2 || (version.major === 2 && version.minor >= 23);
 }
 
 async function requireTrustedWorkspace(): Promise<boolean> {
@@ -66,6 +138,20 @@ async function runWithNotificationResult(title: string, task: (signal: AbortSign
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const runner = new GitRunner(configurationGitPath());
+  const gitRuntimeCheck = runner.version(context.extensionPath).then(async (text) => {
+    const version = parseGitVersion(text);
+    if (!version) {
+      await vscode.window.showWarningMessage(`JB Git could not identify the configured Git version: ${text}`);
+    } else if (!supportsRequiredGitCommands(version)) {
+      await vscode.window.showWarningMessage(`JB Git requires Git 2.23 or newer; configured runtime is ${version.text}. Switch, restore, and sparse-checkout operations may be unavailable.`);
+    }
+  }, async (error) => {
+    const action = await vscode.window.showErrorMessage(
+      `JB Git could not run '${configurationGitPath()}': ${formatGitError(error)}`,
+      "Open Settings",
+    );
+    if (action === "Open Settings") await vscode.commands.executeCommand("workbench.action.openSettings", "jbGit.gitPath");
+  });
   const manager = new RepositoryManager(runner, workspacePaths);
   const changelistStore = new ChangelistStore(context.workspaceState);
   await changelistStore.load();
@@ -118,11 +204,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     updateStatusBar();
   };
 
-  const pendingRefreshRoots = new Set<string>();
-  let pendingDiscovery = false;
+  const pendingRefreshes = new RefreshGenerationTracker();
   let refreshTimer: NodeJS.Timeout | undefined;
   let refreshDeadline: number | undefined;
+  let refreshInFlight = false;
+  let refreshSchedulingDisposed = false;
   const scheduleRefresh = (): void => {
+    if (refreshSchedulingDisposed || refreshInFlight) return;
     if (refreshTimer) clearTimeout(refreshTimer);
     const delay = vscode.workspace.getConfiguration("jbGit").get<number>("refreshDebounceMs", 600);
     // A steady event stream (auto-save while typing) must not defer the
@@ -131,42 +219,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined;
       refreshDeadline = undefined;
-      const roots = [...pendingRefreshRoots];
-      const discover = pendingDiscovery;
-      pendingRefreshRoots.clear();
-      pendingDiscovery = false;
-      const operation = discover
+      const batch = pendingRefreshes.capture();
+      if (!batch.roots.size && batch.discoveryGeneration === undefined) return;
+      refreshInFlight = true;
+      const roots = [...batch.roots.keys()];
+      const operation = batch.discoveryGeneration !== undefined
         ? manager.discoverAndRefresh()
         : Promise.all(roots.map((root) => manager.refresh(root))).then(() => undefined);
-      void operation.then(updateStatusBar, (error) => vscode.window.showErrorMessage(formatGitError(error)));
+      void operation
+        .then(updateStatusBar, (error) => vscode.window.showErrorMessage(formatGitError(error)))
+        .finally(() => {
+          // Only the exact root generations captured by this batch are done.
+          // Requests queued while it ran, including another root, remain pending.
+          pendingRefreshes.complete(batch);
+          refreshInFlight = false;
+          if (!refreshSchedulingDisposed && pendingRefreshes.hasPending) scheduleRefresh();
+        });
     }, Math.max(0, Math.min(delay, refreshDeadline - Date.now())));
   };
   const scheduleRefreshRoot = (rootPath: string): void => {
     if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
-    pendingRefreshRoots.add(rootPath);
+    pendingRefreshes.addRoot(rootPath);
     scheduleRefresh();
   };
   const scheduleRefreshForPath = (filePath: string): void => {
     if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
     void canonicalPath(filePath).then((candidate) => {
       const snapshot = deepestContaining(manager.all, candidate, (item) => item.repository.info.rootPath);
-      if (snapshot) scheduleRefreshRoot(snapshot.repository.info.rootPath);
+      if (!snapshot || snapshot.repository.info.isBare) return;
+      const root = snapshot.repository.info.rootPath;
+      if (!isWorktreeWatchPathIgnored(root, candidate)) scheduleRefreshRoot(root);
     });
   };
   const scheduleDiscovery = (): void => {
     if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
-    pendingDiscovery = true;
+    pendingRefreshes.addDiscovery();
     scheduleRefresh();
   };
   // This watcher is only for discovering newly-created or removed repositories.
-  // Repository state itself is watched through a small set of metadata paths below.
+  // Repository state itself is watched through metadata and worktree paths below.
   const gitMetadataWatcher = vscode.workspace.createFileSystemWatcher("**/.git");
   const repositoryMetadataWatchers = new Map<string, vscode.FileSystemWatcher[]>();
+  const repositoryWorktreeWatchers = new Map<string, vscode.FileSystemWatcher>();
   const metadataPatterns = [
     "HEAD", "index", "packed-refs", "refs/**", "MERGE_HEAD", "CHERRY_PICK_HEAD",
     "REVERT_HEAD", "BISECT_LOG", "rebase-merge/**", "rebase-apply/**", "sequencer/**",
   ];
-  const rebuildRepositoryMetadataWatchers = (): void => {
+  const rebuildRepositoryWatchers = (): void => {
     const desired = new Map<string, { root: string; directory: string }>();
     for (const snapshot of manager.all) {
       for (const directory of new Set([snapshot.repository.info.gitDir, snapshot.repository.info.commonGitDir])) {
@@ -189,6 +288,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return watcher;
       });
       repositoryMetadataWatchers.set(key, watchers);
+    }
+
+    const worktreeRoots = new Set(manager.all
+      .filter((snapshot) => !snapshot.repository.info.isBare)
+      .map((snapshot) => snapshot.repository.info.rootPath));
+    for (const [root, watcher] of repositoryWorktreeWatchers) {
+      if (!worktreeRoots.has(root)) {
+        watcher.dispose();
+        repositoryWorktreeWatchers.delete(root);
+      }
+    }
+    for (const root of worktreeRoots) {
+      if (repositoryWorktreeWatchers.has(root)) continue;
+      // Text-document/workspace events only cover edits made through VS Code.
+      // A filesystem watcher is required for formatters, generators, and other
+      // external tools that modify ordinary worktree files.
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, "**/*"));
+      const onWorktreeChange = (uri: vscode.Uri): void => {
+        // Filter before canonicalisation so dependency/cache event storms do
+        // not create one realpath lookup per file.
+        if (!isWorktreeWatchPathIgnored(root, uri.fsPath)) scheduleRefreshForPath(uri.fsPath);
+      };
+      watcher.onDidChange(onWorktreeChange);
+      watcher.onDidCreate(onWorktreeChange);
+      watcher.onDidDelete(onWorktreeChange);
+      repositoryWorktreeWatchers.set(root, watcher);
     }
   };
 
@@ -275,9 +400,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diffProvider,
     gitMetadataWatcher,
     { dispose: () => {
+      refreshSchedulingDisposed = true;
       if (refreshTimer) clearTimeout(refreshTimer);
       for (const watchers of repositoryMetadataWatchers.values()) for (const watcher of watchers) watcher.dispose();
       repositoryMetadataWatchers.clear();
+      for (const watcher of repositoryWorktreeWatchers.values()) watcher.dispose();
+      repositoryWorktreeWatchers.clear();
     } },
     vscode.workspace.registerFileSystemProvider(DiffContentProvider.scheme, diffProvider, {
       isCaseSensitive: true,
@@ -288,15 +416,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel,
     manager.onDidChange(() => {
       updateStatusBar();
-      rebuildRepositoryMetadataWatchers();
-      // A manager refresh already captured the latest worktree and metadata
-      // state, so discard watcher events generated by that same Git operation.
-      for (const snapshot of manager.all) pendingRefreshRoots.delete(snapshot.repository.info.rootPath);
-      if (!pendingRefreshRoots.size && !pendingDiscovery && refreshTimer) {
-        clearTimeout(refreshTimer);
-        refreshTimer = undefined;
-        refreshDeadline = undefined;
-      }
+      rebuildRepositoryWatchers();
       for (const snapshot of manager.all) {
         if (snapshot.status) {
           void changelistStore.reconcile(snapshot.repository.info.rootPath, snapshot.status.changes)
@@ -305,6 +425,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration("jbGit.gitPath")) return;
+      void vscode.window.showInformationMessage("Reload VS Code to use the new JB Git executable.", "Reload").then((choice) => {
+        if (choice === "Reload") void vscode.commands.executeCommand("workbench.action.reloadWindow");
+      });
+    }),
     vscode.workspace.onDidSaveTextDocument((document) => scheduleRefreshForPath(document.uri.fsPath)),
     vscode.workspace.onDidCreateFiles((event) => event.files.forEach((uri) => scheduleRefreshForPath(uri.fsPath))),
     vscode.workspace.onDidDeleteFiles((event) => event.files.forEach((uri) => scheduleRefreshForPath(uri.fsPath))),
@@ -354,7 +480,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const root = snapshot.repository.info.rootPath;
       if (selected.branch) {
         if (selected.branch.kind === "local" && selected.branch.name === current) return;
-        await runWithNotification(`Checking out ${selected.branch.name}`, () => manager.checkout(root, selected.branch!.name, selected.branch!.kind, selected.branch!.fullName));
+        await runWithNotification(`Checking out ${selected.branch.name}`, () => checkoutWithLocalChanges(manager, root, selected.branch!));
       } else if (selected.action === "new") {
         const name = await vscode.window.showInputBox({ title: "New Branch", prompt: `Create from ${current ?? "HEAD"}`, validateInput: (value) => validateGitRefName(value) });
         if (name?.trim()) await runWithNotification(`Creating branch ${name.trim()}`, () => manager.createBranch(root, name.trim()));
@@ -402,23 +528,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
       if (selected?.command) await vscode.commands.executeCommand(selected.command, root);
     }),
-    vscode.commands.registerCommand("jbGit.fileHistory", async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor || editor.document.uri.scheme !== "file") return void vscode.window.showInformationMessage("Open a file before showing its Git history.");
-      const filePath = editor.document.uri.fsPath;
+    vscode.commands.registerCommand("jbGit.fileHistory", async (resource?: vscode.Uri) => {
+      const uri = resource?.scheme === "file" ? resource : vscode.window.activeTextEditor?.document.uri;
+      if (!uri || uri.scheme !== "file") return void vscode.window.showInformationMessage("Open or select a file before showing its Git history.");
+      const filePath = uri.fsPath;
       const snapshot = deepestContaining(manager.all, await canonicalPath(filePath), (item) => item.repository.info.rootPath);
       if (!snapshot) return void vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
       await gitToolWindow.open(snapshot.repository.info.rootPath, relativePath);
     }),
-    vscode.commands.registerCommand("jbGit.blame", async () => {
-      if (!(await requireTrustedWorkspace())) return;
-      const editor = vscode.window.activeTextEditor;
-      if (!editor || editor.document.uri.scheme !== "file") {
-        await vscode.window.showInformationMessage("Open a file in the editor before running JB Git Blame.");
+    vscode.commands.registerCommand("jbGit.blame", async (resource?: vscode.Uri) => {
+      const uri = resource?.scheme === "file" ? resource : vscode.window.activeTextEditor?.document.uri;
+      if (!uri || uri.scheme !== "file") {
+        await vscode.window.showInformationMessage("Open or select a file before running JB Git Blame.");
         return;
       }
-      const filePath = editor.document.uri.fsPath;
+      const filePath = uri.fsPath;
       const snapshot = deepestContaining(manager.all, await canonicalPath(filePath), (item) => item.repository.info.rootPath);
       if (!snapshot) {
         await vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
@@ -553,19 +678,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(rootPath);
       if (!first) return;
-      const mode = await vscode.window.showQuickPick(
-        [
-          { label: "Push", force: false },
-          { label: "Force with lease", force: true, description: "Safeguarded force push" },
-        ],
-        { placeHolder: "Choose push mode" },
-      );
-      if (!mode) return;
-      if (mode.force) {
-        const answer = await vscode.window.showWarningMessage("Force with lease can rewrite remote history. Continue?", { modal: true }, "Push");
-        if (answer !== "Push") return;
-      }
-      await runWithNotification("Pushing Git commits", (signal) => manager.push(first.repository.info.rootPath, mode.force, signal), true);
+      await previewAndPush(manager, first.repository.info.rootPath);
     }),
     vscode.commands.registerCommand("jbGit.merge", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1029,13 +1142,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!name) return;
       const branch = manager.snapshot(root)?.status?.branch.head;
       if (!branch) return void vscode.window.showInformationMessage("Push requires a checked-out local branch.");
-      const mode = await vscode.window.showQuickPick(
-        [{ label: "Push", force: false }, { label: "Force with lease", force: true }],
-        { placeHolder: `Push ${branch} to ${name}` },
-      );
-      if (!mode) return;
-      if (mode.force && (await vscode.window.showWarningMessage("Force with lease can rewrite remote history. Continue?", { modal: true }, "Push")) !== "Push") return;
-      await runWithNotification(`Pushing ${branch} to ${name}`, (signal) => manager.pushRemote(root, name, branch, mode.force, signal), true);
+      await previewAndPush(manager, root, { remote: name });
     }),
     vscode.commands.registerCommand("jbGit.applyStash", async (node?: StashNode) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1102,7 +1209,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { placeHolder: "Select a branch to checkout" },
       ))?.item;
       if (!selected) return;
-      await runWithNotification(`Checking out ${selected.name}`, () => manager.checkout(snapshot.repository.info.rootPath, selected.name, selected.kind, selected.fullName));
+      await runWithNotification(`Checking out ${selected.name}`, () => checkoutWithLocalChanges(manager, snapshot.repository.info.rootPath, selected));
     }),
     vscode.commands.registerCommand("jbGit.stageChange", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1131,21 +1238,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.discardChange", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace()) || !node) return;
       if (node.change.kind === "untracked") {
-        const answer = await vscode.window.showWarningMessage(`Delete untracked file ${node.change.path}?`, { modal: true }, "Delete");
-        if (answer !== "Delete") return;
-        await runWithNotification(`Deleting ${node.change.path}`, () => manager.cleanUntracked(node.repositoryRoot, [node.change.path]));
+        const answer = await vscode.window.showWarningMessage(`Move untracked file ${node.change.path} to Trash?`, { modal: true }, "Move to Trash");
+        if (answer !== "Move to Trash") return;
+        await runWithNotification(`Moving ${node.change.path} to Trash`, async () => {
+          await moveUntrackedToTrash(node.repositoryRoot, node.change.path);
+          await manager.refresh(node.repositoryRoot);
+        });
         return;
+      }
+      if (node.change.conflicted) {
+        return void vscode.window.showWarningMessage("Conflicted files are not discarded individually. Resolve the conflict or abort the Git operation so both sides remain recoverable.");
       }
       const confirmDiscard = vscode.workspace.getConfiguration("jbGit").get<boolean>("confirmDiscard", true);
       if (confirmDiscard) {
         const answer = await vscode.window.showWarningMessage(
-          `Discard working tree changes in ${node.change.path}?`,
+          `Roll back ${node.change.path}? A recovery entry will be kept in Shelf.`,
           { modal: true },
           "Discard",
         );
         if (answer !== "Discard") return;
       }
-      await runWithNotification(`Discarding ${node.change.path}`, () => manager.discard(node.repositoryRoot, [node.change.path]));
+      const snapshot = manager.snapshot(node.repositoryRoot);
+      if (!snapshot) return;
+      const recovery = await runWithNotification(`Backing up and rolling back ${node.change.path}`, async () => {
+        const recoveryPaths = [node.change.path, ...(node.change.originalPath ? [node.change.originalPath] : [])];
+        const entry = await shelfStore.create(snapshot.repository, `Rollback backup · ${node.change.path}`, recoveryPaths);
+        await manager.refresh(node.repositoryRoot);
+        return entry;
+      });
+      if (recovery) void vscode.window.showInformationMessage(`Rolled back ${node.change.path}. Recovery shelf '${recovery.name}' was kept.`);
     }),
     vscode.commands.registerCommand("jbGit.resolveConflict", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1166,6 +1287,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // each workspace root (including parent and bare repositories) without a
   // recursive directory crawl. The full nested scan runs when the view opens
   // or when the user explicitly refreshes.
+  await gitRuntimeCheck;
   await manager.discoverAndRefresh(false);
   updateStatusBar();
 }
@@ -1192,16 +1314,17 @@ async function openMergeConflictEditor(
   );
   if (opened !== false) return;
 
+  const labels = await conflictSideLabels(manager.snapshot(node.repositoryRoot));
   const side = await vscode.window.showQuickPick(
     [
-      { label: "Accept ours", value: "ours" as const, description: "Use the complete current-branch binary file" },
-      { label: "Accept theirs", value: "theirs" as const, description: "Use the complete incoming binary file" },
+      { label: "Accept left", value: "ours" as const, description: labels.ours },
+      { label: "Accept right", value: "theirs" as const, description: labels.theirs },
     ],
     { title: "Binary merge conflict", placeHolder: `${node.change.path} cannot be merged as text` },
   );
   if (!side) return;
   const answer = await vscode.window.showWarningMessage(
-    `Replace ${node.change.path} with ${side.label.toLowerCase()} and mark it resolved?`,
+    `Replace ${node.change.path} with '${side.description}' and mark it resolved?`,
     { modal: true },
     "Resolve",
   );

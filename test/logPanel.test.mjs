@@ -3,6 +3,8 @@ import test from "node:test";
 import { readSource } from "./sourceText.mjs";
 
 const source = readSource("../src/webviews/logPanel.ts", import.meta.url);
+const protocolSource = readSource("../src/webviews/logPanelProtocol.ts", import.meta.url);
+const pushPreviewSource = readSource("../src/pushPreview.ts", import.meta.url);
 const scriptMatch = source.match(/const logScript = String\.raw`([\s\S]*?)`;\r?\n$/);
 
 function graphHarness(collapsed = []) {
@@ -94,7 +96,7 @@ test("provides real branch, user, date, path, and ordering filters", () => {
 
 test("keeps filtered selection, details, and progressively loaded history consistent", () => {
   assert.ok(scriptMatch);
-  assert.match(source, /type: "loadMore"/);
+  assert.match(protocolSource, /"loadMore"/);
   assert.match(source, /logLimit = Math\.min\(5_000/);
   assert.match(scriptMatch[1], /refreshDetailsForFilter/);
   assert.match(scriptMatch[1], /Loading commit details/);
@@ -110,12 +112,32 @@ test("virtualizes large commit lists and stops offering history past the hard ca
 
 test("provides safe local-change commits and repository-scoped drafts", () => {
   assert.ok(scriptMatch);
-  assert.match(source, /listId\?: string/);
+  assert.match(protocolSource, /listId\?: string/);
   assert.match(scriptMatch[1], /listId: list\.id/);
   assert.match(scriptMatch[1], /commitMessages/);
   assert.match(scriptMatch[1], /commit\.disabled = disabled/);
   assert.match(scriptMatch[1], /collapsedChangelists/);
   assert.match(scriptMatch[1], /setupChangesSplitter/);
+  assert.match(protocolSource, /"editChangelist"/);
+  assert.match(protocolSource, /"deleteChangelist"/);
+  assert.match(scriptMatch[1], /changelist-description/);
+});
+
+test("exposes the Index and working tree as separate, hunk-level commit sources", () => {
+  assert.ok(scriptMatch);
+  assert.match(protocolSource, /type: "requestHunks"/);
+  assert.match(protocolSource, /type: "applyHunk"/);
+  assert.match(source, /manager\.stageHunk/);
+  assert.match(source, /manager\.unstageHunk/);
+  assert.match(scriptMatch[1], /HEAD → Index/);
+  assert.match(scriptMatch[1], /Index → Working Tree/);
+  assert.match(scriptMatch[1], /Staging area \(Index\)/);
+  assert.match(scriptMatch[1], /complete contents/);
+});
+
+test("accepts full SHA-1 and SHA-256 object IDs from the log", () => {
+  assert.match(source, /\[0-9a-f\]\{40\}.*\[0-9a-f\]\{64\}/);
+  assert.doesNotMatch(source, /\^\[0-9a-f\]\{40\}\$/);
 });
 
 test("supports keyboard navigation and a filtered incremental Git console", () => {
@@ -175,14 +197,14 @@ test("opens generated diffs read-only instead of dirty untitled editors", () => 
   }
 });
 
-test("pushes without waiting for the commit notification to be dismissed", () => {
+test("routes Commit & Push through an outgoing-commit preview without waiting on notifications", () => {
   const handler = source.match(/if \(message\.type === "commit"\) \{([\s\S]*?)type: "committed"/);
   assert.ok(handler);
   // showInformationMessage only settles once the toast closes, so awaiting it here
   // used to delay the push until the notification went away.
   assert.doesNotMatch(handler[1], /await vscode\.window\.showInformationMessage/);
-  assert.match(handler[1], /void vscode\.window\.showInformationMessage/);
-  assert.ok(handler[1].indexOf("manager.push") < handler[1].indexOf("void vscode.window.showInformationMessage(`Committed"));
+  assert.match(handler[1], /previewAndPush\(this\.manager, root\)/);
+  assert.ok(handler[1].indexOf("previewAndPush") < handler[1].indexOf("push was not performed"));
 });
 
 test("offers IntelliJ branch operations from the branch context menu", () => {
@@ -263,7 +285,7 @@ test("targets refs unambiguously and guards branch operations by kind", () => {
     /rebase\(root, branch\.fullName\)/,
     /merge\(root, branch\.fullName\)/,
     /compareRefHistory\(left\.fullName, right\.fullName\)/,
-    /checkout\(root, branch\.name, branch\.kind, branch\.fullName\)/,
+    /checkoutWithLocalChanges\(this\.manager, root, branch\)/,
   ]) assert.match(source, call);
 
   const handler = source.slice(source.indexOf('message.action === "mergeRef"'));
@@ -278,18 +300,16 @@ test("targets refs unambiguously and guards branch operations by kind", () => {
   assert.match(menu[1], /if \(!isCurrent && kind !== 'tag'\) items\.push\(/);
 });
 
-test("never guesses a remote for a branch that has no matching one", () => {
+test("never guesses an integration remote and previews the exact branch push target", () => {
   const resolver = source.match(/private async remoteForBranch\([\s\S]*?\n  }/);
   assert.ok(resolver);
   // A ref left behind by `git remote remove` still looks remote; fetching some other remote
   // would silently integrate stale commits.
   assert.doesNotMatch(resolver[0], /remotes\.length === 1/);
   assert.match(resolver[0], /branch\.kind !== "remote"/);
-  const picker = source.match(/private async pickPushRemote\([\s\S]*?\n  }/);
-  assert.ok(picker);
-  assert.match(picker[0], /branch\.upstream/);
-  assert.match(picker[0], /showQuickPick/, "multiple remotes without origin must be offered, not refused");
-  assert.match(source, /pushRemote\(root, remote, branch\.name, false, signal, !branch\.upstream\)/);
+  assert.match(source, /previewAndPush\(this\.manager, root, \{ sourceBranch: branch\.name \}\)/);
+  assert.match(pushPreviewSource, /const refspec = `\$\{sourceRef\}:refs\/heads\/\$\{target\.branch\}`/);
+  assert.match(pushPreviewSource, /isProtectedBranch\(target\.branch/);
 });
 
 test("ends splitter drags even when the button is released outside the window", () => {
@@ -423,9 +443,11 @@ test("keeps commit controls and selection honest while replies are pending", () 
   // Checkbox toggles update the count and buttons immediately; the state echo is deferred
   // while a menu is open, so the last render's values would contradict the checkboxes.
   assert.match(script, /function refreshCommitControls\(\)/);
-  assert.equal(script.match(/refreshCommitControls\(\)/g)?.length, 4);
+  assert.equal(script.match(/refreshCommitControls\(\)/g)?.length, 5);
   assert.match(script, /count\.id = 'selected-count'/);
   assert.match(script, /commit\.id = 'commit-button'/);
+  assert.match(script, /Staging area \(Index\)/);
+  assert.match(script, /Selected files \(complete contents\)/);
   // A state push that neither answers nor invalidates an in-flight selectCommit keeps it
   // pending instead of snapping the highlight back.
   const apply = script.match(/function applyIncomingState\(next\) \{([\s\S]*?)\n  }/);

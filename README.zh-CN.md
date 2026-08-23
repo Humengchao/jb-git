@@ -6,6 +6,28 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 
 项目采用独立的 TypeScript 实现，通过用户系统中安装的 Git 执行实际版本控制操作，不复制 JetBrains 的源代码、界面资源或商标。
 
+## IDEA 能力对照
+
+下表是当前能力口径的准确信息源：**已实现**表示当前代码已提供该工作流，**部分实现**表示已经可用但深度尚未达到 IDEA，**规划中**表示尚未实现，**明确不做**表示它是项目的非目标。
+
+| IDEA 工作流 | 状态 | JB Git 当前行为与边界 |
+| --- | --- | --- |
+| Git 工具窗口与 Log | 部分实现 | 一个底部 `Git` Panel 提供 Log、Console、Local Changes 和 Shelf。提交图、筛选、分支比较、每次增量加载 300 条和大列表虚拟化已实现；持久化历史索引及超大仓库的完整搜索仍有差距。 |
+| HEAD / Index / Working Tree 审阅 | 已实现 | Local Changes 明确展示两层差异：`HEAD → Index`（已暂存）和 `Index → Working Tree`（未暂存），均支持文件 Diff；文本文件还支持 Hunk 级暂存/取消暂存，并在写入 Index 前验证 Hunk 没有过期。 |
+| 两种 Commit 来源 | 已实现 | **Staging area (Index)** 只提交 Index 中的精确快照；**Selected files (complete contents)** 通过隔离的临时 Index 提交勾选文件的完整内容。后者也用于指定 Changelist 提交，失败时不会破坏用户真实 Index 的部分暂存状态。 |
+| Changelist | 部分实现 | 支持创建、重命名/描述、设为 Active、删除、整文件移动、重命名路径迁移和指定 Changelist 提交。IDEA 可把同一文件的不同 Hunk/重叠行归属到不同 Changelist；这种高级 Hunk ownership、任务上下文与 Changelist 冲突策略尚未实现。 |
+| Rollback、Shelf 与未跟踪文件删除 | 已实现 | 回滚已跟踪文件前会先在 Shelf 保留 recovery entry；未跟踪文件通过系统 Trash 移除，不做不可恢复删除；冲突文件不允许单独回滚，以免静默丢掉一侧内容。 |
+| 带本地修改的分支切换 | 已实现 | Smart Checkout 把已跟踪、已暂存和未跟踪修改保存到临时 Stash，以不可变 OID 定位，切换后恢复 Working Tree 与 Index。切换或恢复失败时 Stash 会保留供恢复。 |
+| Push 安全流程 | 已实现 | Push 前先 Fetch，预览并执行精确的“本地 ref → 远端 ref”目标及 outgoing commits，并支持首次设置 upstream。目标分支命中可配置的 protected branch pattern 时禁用强推，其他目标只提供 Force with Lease；当前检出分支向既有 upstream 推送遇到 non-fast-forward rejection 时，可选择 Pull with Rebase/Merge 后重新预览。 |
+| SHA-1 / SHA-256 对象 ID | 已实现 | Log 选择与消息校验接受完整的 40 位和 64 位十六进制对象 ID，最终对象解析仍交由 Git 校验。 |
+| 合并冲突解决 | 部分实现 | 文本冲突具备可调宽的左/结果/右三栏、可编辑结果、逐块或整文件取舍、冲突导航、草稿恢复、外部修改防覆盖和 Apply 后暂存。Rebase 中会正确标为 **Rebase Target** 与 **Replayed Commit**，不会把 stage 2/3 错标成普通 ours/theirs。当前仍不是 IDEA 完整的、以 Base 为中心的三方 Merge：Base/Result 比较、完整语义对齐及全部 simple/non-conflicting 控制仍有差距。 |
+| Merge / Rebase / Cherry-pick / Revert / Reset | 部分实现 | 启动操作及 Continue/Abort/Skip 已实现，但历史编辑深度仍低于 IDEA。 |
+| Interactive Rebase 编辑器 | 规划中 | 尚无用于重排、reword、squash、fixup 和 drop 的可视化序列编辑器。 |
+| File History 与 Blame | 部分实现 | File History 和命令输出式 Blame 已实现，并能安全处理特殊路径。 |
+| 编辑器 gutter Blame | 规划中 | 行级标注、上一版本跳转和移动检测尚未实现。 |
+| 多根仓库、嵌套仓库与 Worktree | 部分实现 | 已有仓库发现、按仓库串行写操作、linked worktree 元数据监视和外部普通文件变化刷新。刷新请求按 root/generation 精确保留，重新发现相同仓库时沿用对象及 mutation lock；跨仓库事务回滚仍在规划中。 |
+| JetBrains 原生 UI、资源与像素级复刻 | 明确不做 | JB Git 是 clean-room VS Code 扩展，Panel 与编辑器外框由 VS Code 渲染，不复制 JetBrains 源码、控件、UI 资源或商标。 |
+
 ## 主要功能
 
 ### IDEA 风格工作区
@@ -24,10 +46,10 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 ### 本地更改
 
 - 按已暂存、未暂存、未跟踪和冲突状态分组显示文件。
-- 暂存、取消暂存和丢弃单个文件。
+- 暂存或取消暂存单个文件；回滚已跟踪文件前保留 recovery Shelf，未跟踪文件移到系统 Trash。
 - 展开并暂存或取消暂存单个文本 Hunk。
-- 打开 HEAD、Index 与工作区之间的文件差异。
-- 双击冲突文件可打开 IDEA 风格三栏合并界面：左侧为当前分支，中间为可编辑最终结果，右侧为合入版本。
+- 分别打开 `HEAD → Index` 与 `Index → Working Tree` 两层文件差异，不把已暂存和未暂存内容混为一种状态。
+- 双击冲突文件可打开 IDEA 风格的左/结果/右三栏界面；普通 Merge 显示当前分支与合入版本，Rebase 则按实际 replay 语义显示 Rebase Target 与 Replayed Commit。
 - 关闭界面后，可以再次双击冲突文件，或从命令面板运行 `JB Git: Open Merge Conflict Editor` 重新打开。
 - 支持上一处/下一处冲突、逐块接受左侧/两侧/右侧、整文件接受左侧或右侧，以及拖动调整三栏宽度。
 - 所有冲突标记处理完成后点击 `Apply`，插件会写入中间结果并自动暂存；`Cancel` 不会修改文件。
@@ -37,6 +59,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 
 - 创建普通提交、修订提交和带 Sign-off 的提交。
 - 支持跳过本地提交钩子。
+- 可选择精确提交 Staging Area (Index)，或通过临时 Index 提交所选文件的完整内容。
 - 创建 Changelist，并在不同 Changelist 之间移动文件。
 - 通过隔离的临时 Index 提交指定 Changelist。
 - 提交失败时保留用户原有的部分暂存状态。
@@ -47,10 +70,11 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - 左侧 Branches 栏自带工具条（Fetch、Pull、Push、新建分支、更多操作）和按名称筛选输入框。
 - 分支右键菜单提供 IDEA 同款操作：Push、Fetch、`Pull into <当前分支> using Merge/Rebase`、`Merge <分支> into <当前分支>`、`Rebase <当前分支> onto <分支>`、新建标签和删除标签。
 - 创建、切换、重命名和删除本地分支。
+- 有本地修改时使用 Smart Checkout：临时 Stash 后切换并恢复 Working Tree 与 Index，恢复失败仍保留可恢复的 Stash。
 - 从本地分支、远端分支或标签创建新分支。
 - 以 detached HEAD 模式检出标签。
 - 创建和删除标签。
-- Fetch、Pull、Push，以及受保护的 Force with Lease。
+- Fetch、Pull 与带预览的 Push；Push 显示目标及 outgoing commits，protected branch 禁止强推，其他分支仅允许 Force with Lease，rejected push 可选择 Rebase/Merge 后重试。
 - 管理远端仓库和 Fetch/Push URL。
 - 自动隐藏远端 URL 中可能存在的用户名、密码或访问令牌。
 
@@ -59,7 +83,8 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - 查看仓库历史、文件历史和提交详情。
 - 本地分支、远端分支和标签使用不同图标区分，选中提交的全部引用会显示在右侧详情中。
 - 双击提交或使用 `Compare with Local` 打开的差异为只读编辑器，关闭时不会提示保存。
-- 对当前文件执行 Blame。
+- 对当前文件执行输出式 Blame；当前不提供编辑器 gutter 行级标注。
+- Log 与提交选择支持 Git 的完整 SHA-1（40 位）和 SHA-256（64 位）对象 ID。
 - Merge、Rebase、Cherry-pick、Revert 和 Reset。
 - Continue、Abort 或 Skip 正在进行的 Git 操作。
 - 启动和控制 Git Bisect。
@@ -71,6 +96,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - 恢复 Shelf 后，修改默认保持为未暂存状态。
 - 支持首次提交前的新增文件以及重命名文件。
 - 创建、应用、弹出和删除 Stash。
+- 从提交创建并保存 Git Patch。
 - 从本地文件导入 Git Patch。
 
 ### 仓库与工作区
@@ -113,11 +139,11 @@ code --install-extension jb-git-0.1.11.vsix
 
 ### 自动发布到 Marketplace
 
-发布已完全自动化。每次推送到 `main` 都会触发 GitHub Actions 的 `Release` 工作流：
+Release 流水线已经实现并自动运行。每次推送到 `main` 都会触发 GitHub Actions 的 `Release` 工作流：
 
 1. 在 Linux、macOS、Windows 上运行核心测试，并在 VS Code 1.95.0 与 stable 上运行扩展宿主测试。
 2. 自动递增补丁版本，同步更新 `package.json`、`package-lock.json`、Changelog 和安装文档。
-3. 打包 VSIX 并发布到 Visual Studio Marketplace。
+3. 打包 VSIX；配置了 `VSCE_PAT` 时发布到 Visual Studio Marketplace。
 4. 回写 `chore: release <版本>` 提交、打上 `v<版本>` 标签，并创建附带 VSIX 的 GitHub Release。
 
 全部测试通过才会发布。如果某次提交不想触发发布，在提交标题里加上 `[skip release]`：
@@ -180,17 +206,11 @@ npm run package
 
 ## 当前范围
 
-当前版本已经按 IntelliJ IDEA 的主要工作流重新组织为底部 Git 工具窗口、Branches 弹窗和 Git Operations Popup。底部工具窗口的页签、信息层级、可调宽 Log 三栏、分支多选和提交筛选均以 IDEA 的 Git 窗口为基准；VS Code 自身的 Panel 标题栏、菜单与原生控件仍由 VS Code 渲染。
+当前版本已经按 IntelliJ IDEA 的主要工作流组织为底部 Git 工具窗口、Branches 弹窗和 Git Operations Popup；VS Code 自身的 Panel 标题栏、菜单与原生控件仍由 VS Code 渲染。上面的能力对照表是“已实现”与“IDEA 完整对等”之间的边界，不应把命令存在等同于完整 parity。
 
-仍在规划中的主要能力包括：
+接下来的主要差距是 Interactive Rebase 序列编辑、完整 Base-aware 三方 Merge、编辑器 gutter Blame、同文件多 Hunk 的 Changelist ownership、跨仓库事务回滚、持久化大历史索引，以及 SSH、WSL、Dev Container、远程 Extension Host、无障碍和不同 Git 版本的系统性验证。
 
-- 三方冲突合并编辑器。
-- Interactive Rebase、Squash 和 Fixup 编辑器。
-- 超大仓库日志的分页、索引和图谱性能优化。
-- 完整的多仓库事务回滚。
-- 面向不同 Git 版本的能力检测与降级策略。
-- SSH、WSL、Dev Container 和远程 Extension Host 的完整验证。
-- 无障碍、发布、签名和 Marketplace 流程。
+发布不再属于待办：跨平台测试、版本递增、VSIX、标签和 GitHub Release 流水线已经实现，Marketplace 上传只取决于 `VSCE_PAT`。项目目前不宣称提供 VSIX/代码的密码学签名，也没有实现 Git Commit 的 GPG 签名；这两类“签名”与现有 Sign-off 不是同一能力。
 
 详细计划请参阅 [实现计划](docs/implementation-plan.md)。
 

@@ -55,3 +55,44 @@ test("continues fetching the remaining repositories when one remote fails", () =
   // A disposed manager must not keep scanning or setting context keys.
   assert.match(manager, /const guarded = async \(\): Promise<void> => \{\s*if \(this\.disposed\) return;/);
 });
+
+test("tracks debounced refreshes by root and generation", () => {
+  assert.match(extension, /class RefreshGenerationTracker/);
+  assert.match(extension, /if \(this\.roots\.get\(root\) === generation\) this\.roots\.delete\(root\)/);
+  assert.match(extension, /pendingRefreshes\.complete\(batch\)/);
+  // A manager change can describe A while B is still waiting. It must never
+  // clear the whole pending set as the previous implementation did.
+  const managerChange = extension.slice(extension.indexOf("manager.onDidChange"), extension.indexOf("vscode.workspace.onDidChangeWorkspaceFolders"));
+  assert.doesNotMatch(managerChange, /pendingRefresh(?:Roots|es).*(?:clear|delete)/s);
+});
+
+test("watches ordinary worktree files changed by external tools without metadata noise", () => {
+  const watcher = extension.slice(extension.indexOf("const repositoryWorktreeWatchers"), extension.indexOf("const pickRepository"));
+  assert.match(watcher, /new vscode\.RelativePattern\(root, "\*\*\/\*"\)/);
+  assert.match(watcher, /watcher\.onDidChange\(onWorktreeChange\)/);
+  assert.match(watcher, /watcher\.onDidCreate\(onWorktreeChange\)/);
+  assert.match(watcher, /watcher\.onDidDelete\(onWorktreeChange\)/);
+  assert.match(extension, /WORKTREE_WATCH_IGNORED_SEGMENTS = new Set\(\["\.git", "node_modules"/);
+  assert.match(watcher, /isWorktreeWatchPathIgnored\(root, uri\.fsPath\)/);
+});
+
+test("validates the configured Git runtime and reacts to gitPath changes", () => {
+  assert.match(extension, /runner\.version\(context\.extensionPath\)/);
+  assert.match(extension, /requires Git 2\.23 or newer/);
+  assert.match(extension, /event\.affectsConfiguration\("jbGit\.gitPath"\)/);
+  assert.match(extension, /workbench\.action\.reloadWindow/);
+});
+
+test("routes branch checkout through the Smart Checkout recovery flow", () => {
+  assert.match(extension, /checkoutWithLocalChanges\(manager, root, selected\.branch!\)/);
+  assert.match(extension, /checkoutWithLocalChanges\(manager, snapshot\.repository\.info\.rootPath, selected\)/);
+});
+
+test("routes every user-facing push through target preview and branch protection", () => {
+  const pushRemoteCommand = extension.slice(extension.indexOf('registerCommand("jbGit.pushRemote"'));
+  assert.match(pushRemoteCommand.slice(0, 1_200), /previewAndPush\(manager, root, \{ remote: name \}\)/);
+  assert.doesNotMatch(extension, /manager\.pushRemote\(/);
+  const preview = readSource("../src/pushPreview.ts", import.meta.url);
+  assert.match(preview, /isProtectedBranch\(target\.branch/);
+  assert.match(preview, /const refspec = `\$\{sourceRef\}:refs\/heads\/\$\{target\.branch\}`/);
+});

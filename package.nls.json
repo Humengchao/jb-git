@@ -5,5 +5,6 @@
   "configuration.gitPath": "Path to the Git executable.",
   "configuration.autoRefresh": "Refresh repository state when files or Git metadata change.",
   "configuration.refreshDebounceMs": "Debounce interval for repository refreshes.",
-  "configuration.confirmDiscard": "Ask for confirmation before discarding changes."
+  "configuration.confirmDiscard": "Ask for confirmation before discarding changes.",
+  "configuration.protectedBranches": "Branch-name patterns where force push is unavailable in Push Preview. Supports * and ?."
 }

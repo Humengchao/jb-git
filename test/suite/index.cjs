@@ -34,11 +34,41 @@ async function run() {
   execFileSync("git", ["init", "-q"], { cwd: parent });
   const child = path.join(parent, "workspace-child");
   await mkdir(child);
+  const { RefreshGenerationTracker, isWorktreeWatchPathIgnored, parseGitVersion } = require(path.join(extension.extensionPath, "dist", "extension.js"));
+  assert.deepEqual(parseGitVersion("git version 2.51.0"), { major: 2, minor: 51, patch: 0, text: "git version 2.51.0" });
+  assert.deepEqual(parseGitVersion("git version 2.39.3 (Apple Git-146)"), { major: 2, minor: 39, patch: 3, text: "git version 2.39.3 (Apple Git-146)" });
+  const { isProtectedBranch } = require(path.join(extension.extensionPath, "dist", "pushPreview.js"));
+  assert.equal(isProtectedBranch("main", ["main", "release/*"]), true);
+  assert.equal(isProtectedBranch("release/2026.2", ["main", "release/*"]), true);
+  assert.equal(isProtectedBranch("feature/release-notes", ["main", "release/*"]), false);
+  const { safeWorktreeUri } = require(path.join(extension.extensionPath, "dist", "discardSafety.js"));
+  assert.equal(safeWorktreeUri(parent, "src/..foo").fsPath, path.join(parent, "src", "..foo"));
+  assert.throws(() => safeWorktreeUri(parent, "../outside"), /outside the repository/);
+  const tracker = new RefreshGenerationTracker();
+  tracker.addRoot("repository-a");
+  const refreshA = tracker.capture();
+  tracker.addRoot("repository-b");
+  tracker.complete(refreshA);
+  assert.deepEqual([...tracker.capture().roots.keys()], ["repository-b"], "finishing repository A must not clear pending repository B");
+  const staleA = new RefreshGenerationTracker();
+  staleA.addRoot("repository-a");
+  const firstA = staleA.capture();
+  staleA.addRoot("repository-a");
+  staleA.complete(firstA);
+  assert.deepEqual([...staleA.capture().roots.keys()], ["repository-a"], "a newer generation for the same root must remain pending");
+  assert.equal(isWorktreeWatchPathIgnored(parent, path.join(parent, ".git", "index")), true);
+  assert.equal(isWorktreeWatchPathIgnored(parent, path.join(parent, "node_modules", "dependency", "index.js")), true);
+  assert.equal(isWorktreeWatchPathIgnored(parent, path.join(parent, "src", "index.js")), false);
+
   const { RepositoryManager } = require(path.join(extension.extensionPath, "dist", "repositoryManager.js"));
   const { GitRunner } = require(path.join(extension.extensionPath, "dist", "git", "runner.js"));
   const manager = new RepositoryManager(new GitRunner(), () => [child]);
   try {
     await manager.discoverAndRefresh();
+    const repositoryBeforeRescan = manager.repository();
+    assert.ok(repositoryBeforeRescan);
+    await manager.discoverAndRefresh();
+    assert.equal(manager.repository(), repositoryBeforeRescan, "rediscovery must preserve repository identity and its mutation lock");
     assert.equal(await manager.initializeRepository(child), false, "initialization inside a parent repository should be a no-op");
     await assert.rejects(access(path.join(child, ".git")), "a nested .git directory must not be created");
   } finally {
@@ -54,6 +84,9 @@ async function run() {
   const { ChangelistStore } = require(path.join(extension.extensionPath, "dist", "changelists", "store.js"));
   const changelists = new ChangelistStore(memento);
   const feature = await changelists.create(parent, "Feature");
+  await changelists.update(parent, feature.id, "Feature A", "Scoped implementation work");
+  assert.equal(changelists.lists(parent).find((list) => list.id === feature.id).name, "Feature A");
+  assert.equal(changelists.lists(parent).find((list) => list.id === feature.id).description, "Scoped implementation work");
   await changelists.assign(parent, "old.txt", feature.id);
   await changelists.reconcile(parent, [{
     path: "new.txt", originalPath: "old.txt", indexStatus: "R", workTreeStatus: " ",
@@ -86,6 +119,8 @@ async function run() {
     false,
     "the renamed file must not appear in two changelists",
   );
+  await changelists.remove(parent, elsewhere.id);
+  assert.equal(changelists.lists(parent).some((list) => list.id === elsewhere.id), false, "a Changelist can be deleted from the UI lifecycle");
   changelists.dispose();
 
   // Generated diffs must not open as untitled documents: those start dirty, so closing a

@@ -368,6 +368,30 @@
           "group": "navigation@81"
         }
       ],
+      "editor/context": [
+        {
+          "command": "jbGit.fileHistory",
+          "when": "resourceScheme == file && jbGit.hasRepository",
+          "group": "jbGit@10"
+        },
+        {
+          "command": "jbGit.blame",
+          "when": "resourceScheme == file && jbGit.hasRepository",
+          "group": "jbGit@11"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "jbGit.fileHistory",
+          "when": "resourceScheme == file && !explorerResourceIsFolder && jbGit.hasRepository",
+          "group": "git@20"
+        },
+        {
+          "command": "jbGit.blame",
+          "when": "resourceScheme == file && !explorerResourceIsFolder && jbGit.hasRepository",
+          "group": "git@21"
+        }
+      ],
       "commandPalette": [
         { "command": "jbGit.openDiff", "when": "false" },
         { "command": "jbGit.moveToChangelist", "when": "false" },
@@ -378,9 +402,24 @@
         { "command": "jbGit.fetchRemote", "when": "false" },
         { "command": "jbGit.pushRemote", "when": "false" },
         { "command": "jbGit.discardChange", "when": "false" },
-        { "command": "jbGit.markResolved", "when": "false" }
+        { "command": "jbGit.markResolved", "when": "false" },
+        { "command": "jbGit.continueOperation", "when": "jbGit.canContinueOperation" },
+        { "command": "jbGit.abortOperation", "when": "jbGit.canAbortOperation" },
+        { "command": "jbGit.skipOperation", "when": "jbGit.canSkipOperation" },
+        { "command": "jbGit.bisectGood", "when": "jbGit.operationKind == bisect" },
+        { "command": "jbGit.bisectBad", "when": "jbGit.operationKind == bisect" },
+        { "command": "jbGit.bisectSkip", "when": "jbGit.operationKind == bisect" },
+        { "command": "jbGit.bisectReset", "when": "jbGit.operationKind == bisect" }
       ]
     },
+    "keybindings": [
+      {
+        "command": "jbGit.openGitToolWindow",
+        "key": "alt+9",
+        "mac": "cmd+9",
+        "when": "jbGit.hasRepository"
+      }
+    ],
     "configuration": {
       "title": "%configuration.title%",
       "properties": {
@@ -405,6 +444,18 @@
           "type": "boolean",
           "default": true,
           "description": "%configuration.confirmDiscard%"
+        },
+        "jbGit.protectedBranches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "main",
+            "master",
+            "release/*"
+          ],
+          "description": "%configuration.protectedBranches%"
         }
       }
     }

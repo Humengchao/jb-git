@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { ChangelistStore } from "../changelists/store";
-import { GitBranch, GitChange, GitCommit, GitCommitFile, GitLogOptions } from "../git/types";
+import { GitBranch, GitChange, GitCommit, GitCommitFile, GitDiffHunk, GitLogOptions } from "../git/types";
 import { GitTraceEvent, isGitAbort } from "../git/runner";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
@@ -10,50 +10,15 @@ import { DiffContentProvider, isBinaryContent } from "../views/diffProvider";
 import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
 import { validateGitRefName, validatePathInput } from "../inputValidation";
-
-type LogMessage =
-  | { type: "ready"; logOptions?: Partial<GitLogOptions>; activeTab?: ToolTab }
-  | { type: "setActiveTab"; tab: ToolTab }
-  | { type: "selectRepository"; root: string }
-  | { type: "selectRef"; ref?: string }
-  | { type: "setPathFilter"; path?: string }
-  | { type: "setLogOptions"; options: GitLogOptions }
-  | { type: "selectCommit"; hash: string }
-  | { type: "checkout"; name: string; kind: GitBranch["kind"] }
-  | { type: "newBranch"; hash: string }
-  | { type: "cherryPick"; hash: string }
-  | { type: "revert"; hash: string }
-  | { type: "reset"; hash: string }
-  | { type: "showPatch"; hash: string }
-  | { type: "openCommitFile"; hash: string; path: string }
-  | { type: "refresh" }
-  | { type: "clearConsole" }
-  | { type: "togglePath"; path: string; checked: boolean }
-  | { type: "toggleAll"; checked: boolean; listId?: string }
-  | { type: "loadMore" }
-  | { type: "openDiff"; path: string }
-  | { type: "commit"; message: string; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean }
-  | { type: "createChangelist" }
-  | { type: "setActiveChangelist"; id: string }
-  | { type: "moveToChangelist"; path: string }
-  | { type: "stage"; path: string }
-  | { type: "unstage"; path: string }
-  | { type: "discard"; path: string }
-  | { type: "createShelf" }
-  | { type: "applyShelf"; id: string }
-  | { type: "deleteShelf"; id: string }
-  | { type: "runCommand"; command: string }
-  | { type: "contextAction"; action: "copyRevision" | "createPatch" | "checkoutRevision" | "compareWithLocal" | "createTag"; hash: string }
-  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag"; ref: string; kind: GitBranch["kind"] }
-  | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
-  | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string };
+import { moveUntrackedToTrash } from "../discardSafety";
+import { previewAndPush } from "../pushPreview";
+import { checkoutWithLocalChanges } from "../smartCheckout";
+import { isLogMessage, isToolTab, LogMessage, ToolTab } from "./logPanelProtocol";
 
 interface LogSelection {
   commit: GitCommit;
   files: GitCommitFile[];
 }
-
-type ToolTab = "log" | "console" | "changes" | "shelf";
 
 interface DisplayTrace extends GitTraceEvent {
   background: boolean;
@@ -107,6 +72,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private lastSentTracesKey?: string;
   private lastSentLogKey?: string;
   private readonly branchComparisons: BranchComparisonWorkspace;
+  private readonly hunkCache = new Map<string, { staged: GitDiffHunk[]; unstaged: GitDiffHunk[] }>();
   private readonly disposables: vscode.Disposable[] = [];
   private didRequestNestedDiscovery = false;
 
@@ -127,7 +93,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     this.branchComparisons = new BranchComparisonWorkspace(diffProvider);
     this.disposables.push(
       this.branchComparisons,
-      manager.onDidChange(() => this.scheduleUpdate()),
+      manager.onDidChange(() => { this.hunkCache.clear(); this.scheduleUpdate(); }),
       changelists.onDidChange(() => this.scheduleUpdate()),
       shelves.onDidChange(() => this.scheduleUpdate()),
     );
@@ -138,7 +104,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     view.webview.options = { enableScripts: true };
     view.webview.html = webviewDocument("Git", logStyles, logScript);
     const registrations: vscode.Disposable[] = [
-      view.webview.onDidReceiveMessage((message: LogMessage) => void this.handleMessage(message)),
+      view.webview.onDidReceiveMessage((message: unknown) => {
+        if (isLogMessage(message)) void this.handleMessage(message);
+      }),
       view.onDidChangeVisibility(() => { if (view.visible) this.scheduleUpdate(0); }),
     ];
     registrations.push(view.onDidDispose(() => {
@@ -319,6 +287,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       const lists = this.changelists.lists(root).map((list) => ({
         id: list.id,
         name: list.name,
+        description: list.description,
         active: list.id === this.changelists.activeId(root),
         changes: changes
           .filter((change) => this.changelists.listForFile(root, change.path).id === list.id)
@@ -357,6 +326,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           ...(includeTraces ? { traces: this.traces } : {}),
           lists,
           totalChanges: changes.length,
+          stagedCount: changes.filter((change) => change.staged).length,
           selectedCount: selected.size,
           ...(shelfEntries ? {
             shelves: shelfEntries.map((entry) => ({
@@ -505,18 +475,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           if (message.action === "pushRef") {
             if (branch.kind !== "local") return;
-            // push() honours the branch's own upstream and establishes one when missing,
-            // so only a branch that is not checked out needs an explicit destination.
             if (branch.name === snapshot.status?.branch.head) {
-              await this.withCancellableProgress(`Pushing ${branch.name}`, (signal) => this.manager.push(root, false, signal));
+              await previewAndPush(this.manager, root);
               return;
             }
-            const remote = await this.pickPushRemote(root, branch);
-            if (!remote) return;
-            await this.withCancellableProgress(
-              `Pushing ${branch.name} to ${remote}`,
-              (signal) => this.manager.pushRemote(root, remote, branch.name, false, signal, !branch.upstream),
-            );
+            await previewAndPush(this.manager, root, { sourceBranch: branch.name });
             return;
           }
           if (message.action === "tagFromRef") {
@@ -560,7 +523,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           return;
         }
-        if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
+        if (!isFullObjectId(message.hash)) return;
         const commit = this.currentCommits.find((item) => item.hash === message.hash);
         if (!commit) return;
         if ("path" in message) {
@@ -667,8 +630,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "openDiff") {
         const change = changes.find((item) => item.path === message.path);
         if (!change) return;
-        const mode = change.staged && !change.unstaged ? "staged" : "unstaged";
+        const mode = message.mode ?? (change.staged && !change.unstaged ? "staged" : "unstaged");
+        if ((mode === "staged" && !change.staged) || (mode === "unstaged" && !change.unstaged)) return;
         await vscode.commands.executeCommand("jbGit.openDiff", new ChangeNode(root, change, mode));
+        return;
+      }
+      if (message.type === "requestHunks") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
+        const hunks = await this.readHunks(root, change);
+        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...hunks });
         return;
       }
       if (message.type === "selectRef") {
@@ -693,7 +664,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return void this.update();
       }
       if (message.type === "selectCommit") {
-        if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
+        if (!isFullObjectId(message.hash)) return;
         const commit = this.currentCommits.find((item) => item.hash === message.hash);
         if (!commit) return;
         this.selectedHash = message.hash;
@@ -707,13 +678,13 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (message.type === "showPatch") {
-        if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
+        if (!isFullObjectId(message.hash)) return;
         const patch = await snapshot.repository.showCommit(message.hash);
         await this.showReadOnlyDiff(root, message.hash.slice(0, 12), patch);
         return;
       }
       if (message.type === "openCommitFile") {
-        if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
+        if (!isFullObjectId(message.hash)) return;
         const commit = this.currentCommits.find((item) => item.hash === message.hash);
         if (!commit) return;
         const files = await this.manager.commitFiles(root, commit.hash);
@@ -727,28 +698,42 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (!(await requireTrusted())) return;
+      if (message.type === "applyHunk") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change || change.conflicted || !Number.isInteger(message.index) || message.index < 0) return;
+        const hunks = await this.readHunks(root, change);
+        const expected = hunks[message.source][message.index];
+        if (!expected) return;
+        if (message.source === "staged") await this.manager.unstageHunk(root, change.path, expected);
+        else await this.manager.stageHunk(root, change.path, expected);
+        const latest = this.manager.snapshot(root)?.status?.changes.find((item) => item.path === change.path);
+        if (!latest) {
+          this.hunkCache.delete(`${root}\0${change.path}`);
+          await this.view?.webview.postMessage({ type: "hunks", path: change.path, staged: [], unstaged: [] });
+          return;
+        }
+        const refreshed = await this.readHunks(root, latest, true);
+        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...refreshed });
+        return;
+      }
       if (message.type === "commit") {
         const commitMessage = message.message.trim();
         if (!commitMessage) return void vscode.window.showWarningMessage("Enter a commit message first.");
-        const paths = changes.filter((change) => selected.has(change.path)).map((change) => change.path);
-        if (!paths.length) return void vscode.window.showWarningMessage("Select at least one changed file to commit.");
-        const revision = await this.manager.commitPaths(root, paths, commitMessage, {
-          amend: message.amend,
-          signoff: message.signoff,
-          noVerify: message.noVerify,
-        });
+        const options = { amend: message.amend, signoff: message.signoff, noVerify: message.noVerify };
+        let revision: string;
+        if (message.mode === "staged") {
+          if (!changes.some((change) => change.staged)) return void vscode.window.showWarningMessage("Stage at least one change before committing the staging area.");
+          revision = await this.manager.commit(root, commitMessage, options);
+        } else {
+          const paths = changes.filter((change) => selected.has(change.path)).map((change) => change.path);
+          if (!paths.length) return void vscode.window.showWarningMessage("Select at least one changed file to commit.");
+          revision = await this.manager.commitPaths(root, paths, commitMessage, options);
+        }
         // Never await a notification here: showInformationMessage only settles once the
         // toast is dismissed, which used to stall the push for as long as it stayed up.
         if (message.push) {
-          await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: `Pushing ${revision.slice(0, 12)}`, cancellable: true },
-            async (_progress, token) => {
-              const controller = new AbortController();
-              const registration = token.onCancellationRequested(() => controller.abort());
-              try { await this.manager.push(root, false, controller.signal); } finally { registration.dispose(); }
-            },
-          );
-          void vscode.window.showInformationMessage(`Committed ${revision.slice(0, 12)} and pushed it.`);
+          const pushed = await previewAndPush(this.manager, root);
+          if (!pushed) void vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}; push was not performed.`);
         } else {
           void vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
         }
@@ -757,7 +742,30 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "createChangelist") {
         const name = await vscode.window.showInputBox({ title: "New Changelist", prompt: "Name", placeHolder: "Feature work" });
-        if (name?.trim()) await this.changelists.create(root, name.trim());
+        if (!name?.trim()) return;
+        const description = await vscode.window.showInputBox({ title: `New Changelist · ${name.trim()}`, prompt: "Optional description", placeHolder: "Why these changes belong together" });
+        if (description === undefined) return;
+        await this.changelists.create(root, name.trim(), description);
+        return;
+      }
+      if (message.type === "editChangelist") {
+        const list = this.changelists.lists(root).find((candidate) => candidate.id === message.id);
+        if (!list) return;
+        const name = await vscode.window.showInputBox({ title: "Edit Changelist", prompt: "Name", value: list.name });
+        if (!name?.trim()) return;
+        const description = await vscode.window.showInputBox({ title: `Edit Changelist · ${name.trim()}`, prompt: "Optional description", value: list.description ?? "" });
+        if (description === undefined) return;
+        await this.changelists.update(root, list.id, name, description);
+        return;
+      }
+      if (message.type === "deleteChangelist") {
+        const list = this.changelists.lists(root).find((candidate) => candidate.id === message.id);
+        if (!list || this.changelists.lists(root).length === 1) return;
+        const answer = await vscode.window.showWarningMessage(
+          `Delete Changelist '${list.name}'? Its files will move to the first remaining Changelist.`,
+          { modal: true }, "Delete",
+        );
+        if (answer === "Delete") await this.changelists.remove(root, list.id);
         return;
       }
       if (message.type === "setActiveChangelist") {
@@ -785,16 +793,28 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "discard") {
         const change = changes.find((item) => item.path === message.path);
         if (!change) return;
-        const action = change.kind === "untracked" ? "Delete" : "Rollback";
+        const action = change.kind === "untracked" ? "Move to Trash" : "Rollback";
         const shouldConfirm = vscode.workspace.getConfiguration("jbGit").get<boolean>("confirmDiscard", true);
         if (shouldConfirm) {
           const confirmed = await vscode.window.showWarningMessage(
-            `${action} all local changes in ${change.path}?`, { modal: true }, action,
+            change.kind === "untracked"
+              ? `Move ${change.path} to the system Trash?`
+              : `Roll back ${change.path}? A recovery entry will be kept in Shelf.`,
+            { modal: true }, action,
           );
           if (confirmed !== action) return;
         }
-        if (change.kind === "untracked") await this.manager.cleanUntracked(root, [change.path]);
-        else await this.manager.discard(root, [change.path]);
+        if (change.kind === "untracked") {
+          await moveUntrackedToTrash(root, change.path);
+          await this.manager.refresh(root);
+        } else if (change.conflicted) {
+          return void vscode.window.showWarningMessage("Conflicted files are not rolled back individually. Resolve the conflict or abort the Git operation so both sides remain recoverable.");
+        } else {
+          const recoveryPaths = [change.path, ...(change.originalPath ? [change.originalPath] : [])];
+          const recovery = await this.shelves.create(snapshot.repository, `Rollback backup · ${change.path}`, recoveryPaths);
+          await this.manager.refresh(root);
+          void vscode.window.showInformationMessage(`Rolled back ${change.path}. Recovery shelf '${recovery.name}' was kept.`);
+        }
         return;
       }
       if (message.type === "createShelf") {
@@ -830,10 +850,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "checkout") {
         const branch = snapshot.branches.find((item) => item.name === message.name && item.kind === message.kind);
-        if (branch) await this.manager.checkout(root, branch.name, branch.kind, branch.fullName);
+        if (branch) await checkoutWithLocalChanges(this.manager, root, branch);
         return;
       }
-      if (!/^[0-9a-f]{40}$/i.test(message.hash)) return;
+      if (!("hash" in message) || !isFullObjectId(message.hash)) return;
       if (message.type === "newBranch") {
         const name = await vscode.window.showInputBox({ title: "New Branch", prompt: `Create from ${message.hash.slice(0, 12)}`, validateInput: (value) => validateGitRefName(value) });
         if (name?.trim()) await this.manager.createBranch(root, name.trim(), message.hash);
@@ -893,26 +913,19 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       .find((remote) => prefix.startsWith(`${remote.name}/`))?.name;
   }
 
-  /** Picks the remote to push a branch that is not checked out to, preferring its upstream. */
-  private async pickPushRemote(root: string, branch: GitBranch): Promise<string | undefined> {
-    const remotes = await this.manager.remotes(root);
-    if (!remotes.length) {
-      await vscode.window.showWarningMessage("This repository has no remote. Add a remote before pushing.");
-      return undefined;
+  private async readHunks(root: string, change: GitChange, refresh = false): Promise<{ staged: GitDiffHunk[]; unstaged: GitDiffHunk[] }> {
+    const key = `${root}\0${change.path}`;
+    if (!refresh) {
+      const cached = this.hunkCache.get(key);
+      if (cached) return cached;
     }
-    const upstreamRemote = branch.upstream
-      ? [...remotes].sort((left, right) => right.name.length - left.name.length)
-        .find((remote) => branch.upstream?.startsWith(`${remote.name}/`))?.name
-      : undefined;
-    if (upstreamRemote) return upstreamRemote;
-    if (remotes.length === 1) return remotes[0].name;
-    const origin = remotes.find((remote) => remote.name === "origin");
-    if (origin) return origin.name;
-    const picked = await vscode.window.showQuickPick(
-      remotes.map((remote) => ({ label: remote.name, description: remote.fetchUrl })),
-      { title: `Push '${branch.name}' to`, placeHolder: "Select a remote" },
-    );
-    return picked?.label;
+    const [staged, unstaged] = await Promise.all([
+      change.staged ? this.manager.diffHunks(root, change.path, true) : Promise.resolve([]),
+      change.unstaged ? this.manager.diffHunks(root, change.path, false) : Promise.resolve([]),
+    ]);
+    const value = { staged, unstaged };
+    this.hunkCache.set(key, value);
+    return value;
   }
 
   private async withCancellableProgress(title: string, operation: (signal: AbortSignal) => Promise<void>): Promise<void> {
@@ -952,6 +965,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   }
 }
 
+/** Git currently exposes full SHA-1 (40 hex) or SHA-256 (64 hex) object IDs. */
+function isFullObjectId(value: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+}
+
 function statusLabel(change: GitChange): string {
   if (change.conflicted) return "!";
   if (change.kind === "untracked") return "?";
@@ -977,10 +995,6 @@ function normalizeLogOptions(options?: Partial<GitLogOptions>): GitLogOptions {
     author,
     since,
   };
-}
-
-function isToolTab(value: unknown): value is ToolTab {
-  return value === "log" || value === "console" || value === "changes" || value === "shelf";
 }
 
 function sameSet<T>(left: ReadonlySet<T>, right: ReadonlySet<T>): boolean {
@@ -1144,10 +1158,16 @@ const logStyles = String.raw`
   .group-header:focus-visible, .change-row:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .twisty { width: 12px; color: var(--vscode-descriptionForeground); }
   .active-dot { color: var(--vscode-charts-blue); }
+  .changelist-actions { display: flex; align-items: center; opacity: .75; }
+  .group-header:hover .changelist-actions, .group-header:focus-within .changelist-actions { opacity: 1; }
+  .changelist-description { padding: 1px 10px 5px 48px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: pre-wrap; }
   .select-all { margin-left: auto; color: var(--vscode-descriptionForeground); }
-  .change-row { height: 26px; display: grid; grid-template-columns: 24px 20px minmax(0, 1fr) auto; align-items: center; padding: 0 6px 0 20px; }
+  .change-item { min-width: 0; }
+  .change-row { min-height: 26px; display: grid; grid-template-columns: 20px 24px 20px minmax(0, 1fr) auto; align-items: center; padding: 0 6px 0 8px; }
   .change-row:hover, .change-row:focus-within { background: var(--vscode-list-hoverBackground); }
   .change-row input { margin: 0; }
+  .hunk-toggle { width: 20px; height: 24px; padding: 0; color: var(--vscode-descriptionForeground); background: transparent; }
+  .hunk-toggle:disabled { visibility: hidden; }
   .change-status { width: 18px; font-weight: 700; text-align: center; }
   .status-M { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
   .status-A, .status-q { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
@@ -1157,13 +1177,29 @@ const logStyles = String.raw`
   .change-file { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
   .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .directory, .stage-mark { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; }
-  .stage-mark { margin-left: auto; }
+  .stage-mark { margin-left: auto; padding: 0 4px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
+  .worktree-mark { border-style: dashed; }
   .row-actions { display: none; align-items: center; }
   .change-row:hover .row-actions, .change-row:focus-within .row-actions { display: flex; }
   .row-action { width: 24px; height: 24px; border-radius: 2px; }
+  .state-diff { width: 22px; font-size: 10px; font-weight: 700; color: var(--vscode-textLink-foreground); }
   .row-action:hover { background: var(--vscode-toolbar-hoverBackground); }
-  .commit-form { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(60px, 1fr) auto auto; gap: 0; background: var(--vscode-panel-background, var(--vscode-editor-background)); }
+  .change-hunks { margin: 0 8px 7px 28px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; overflow: hidden; background: var(--vscode-editor-background); }
+  .hunk-group + .hunk-group { border-top: 1px solid var(--vscode-panel-border); }
+  .hunk-group-title { padding: 5px 8px; color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); }
+  .hunk-block + .hunk-block { border-top: 1px solid color-mix(in srgb, var(--vscode-panel-border) 65%, transparent); }
+  .hunk-header { min-height: 29px; display: flex; align-items: center; gap: 6px; padding: 3px 7px; }
+  .hunk-header code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); }
+  .hunk-preview { max-height: 220px; margin: 0; padding: 5px 8px 8px; overflow: auto; font: 11px/1.35 var(--vscode-editor-font-family); }
+  .hunk-add { color: var(--vscode-gitDecoration-addedResourceForeground); }
+  .hunk-delete { color: var(--vscode-gitDecoration-deletedResourceForeground); }
+  .hunk-context { color: var(--vscode-editor-foreground); }
+  .hunk-empty { padding: 8px; color: var(--vscode-descriptionForeground); }
+  .commit-form { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(60px, 1fr) auto auto; gap: 0; background: var(--vscode-panel-background, var(--vscode-editor-background)); }
   .commit-form-title { height: 28px; display: flex; align-items: center; padding: 0 9px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
+  .commit-mode-row { display: grid; grid-template-columns: minmax(160px, auto) minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+  .commit-mode-row select { min-width: 0; }
+  .commit-mode-help { color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.25; }
   .commit-message { width: calc(100% - 14px); min-height: 60px; margin: 7px; padding: 7px 8px; resize: none; border: 1px solid var(--vscode-input-border, transparent); background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
   .commit-message::placeholder { color: var(--vscode-input-placeholderForeground); }
   .commit-options { min-height: 30px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 8px; color: var(--vscode-descriptionForeground); }
@@ -1202,6 +1238,8 @@ const logScript = String.raw`
   const app = document.getElementById('app');
   let state = { repositories: [], branches: [], commits: [] };
   let uiState = vscode.getState() || {};
+  let expandedChangeHunks = new Set(uiState.expandedChangeHunks || []);
+  const hunkState = new Map();
   let search = uiState.search || '';
   let branchFilter = uiState.branchFilter || '';
   let activeToolTab = uiState.activeToolTab || 'log';
@@ -1609,12 +1647,19 @@ const logScript = String.raw`
       const collapsedByRoot = { ...(uiState.collapsedChangelists || {}) };
       const collapsedLists = new Set(collapsedByRoot[state.selectedRoot || ''] || []); const collapsed = collapsedLists.has(list.id);
       const header = node('div', 'group-header'); header.tabIndex = 0; header.setAttribute('role', 'treeitem'); header.setAttribute('aria-expanded', String(!collapsed));
+      header.title = list.description || list.name;
       header.append(
         node('span', 'twisty', collapsed ? '›' : '⌄'),
         button(list.active ? '●' : '○', list.active ? 'Active Changelist' : 'Make active Changelist', event => { event.stopPropagation(); post('setActiveChangelist', { id: list.id }); }, list.active ? 'active-dot row-action' : 'row-action'),
         node('span', '', list.name),
         node('span', 'count', String(list.changes.length)),
       );
+      const listActions = node('span', 'changelist-actions');
+      listActions.append(button('✎', 'Rename or describe Changelist', event => { event.stopPropagation(); post('editChangelist', { id: list.id }); }, 'row-action'));
+      if ((state.lists || []).length > 1) {
+        listActions.append(button('×', 'Delete Changelist', event => { event.stopPropagation(); post('deleteChangelist', { id: list.id }); }, 'row-action'));
+      }
+      header.append(listActions);
       const allSelected = list.changes.length > 0 && list.changes.every(change => change.checked);
       header.append(button(allSelected ? 'Clear' : 'Select All', allSelected ? 'Exclude this Changelist from commit' : 'Include this Changelist in commit', event => {
         event.stopPropagation(); post('toggleAll', { checked: !allSelected, listId: list.id });
@@ -1628,6 +1673,7 @@ const logScript = String.raw`
       header.addEventListener('click', toggle);
       header.addEventListener('keydown', event => { if (event.target === header && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); toggle(); } });
       group.append(header);
+      if (!collapsed && list.description) group.append(node('div', 'changelist-description', list.description));
       if (!collapsed) for (const change of list.changes) group.append(changeRow(change));
       pane.append(group);
     }
@@ -1635,32 +1681,55 @@ const logScript = String.raw`
   }
 
   function changeRow(change) {
+    const item = node('div', 'change-item');
     const row = node('div', 'change-row'); row.title = change.path; row.tabIndex = 0; row.setAttribute('role', 'treeitem');
     row.dataset.focusKey = 'change:' + change.path;
+    const hunkKey = (state.selectedRoot || '') + '::' + change.path;
+    const canExpand = !change.conflicted && change.kind !== 'untracked' && change.kind !== 'ignored' && (change.staged || change.unstaged);
+    const expanded = canExpand && expandedChangeHunks.has(hunkKey);
+    const expander = button(expanded ? '⌄' : '›', expanded ? 'Hide change hunks' : 'Show change hunks', event => {
+      event.stopPropagation();
+      if (expandedChangeHunks.has(hunkKey)) {
+        expandedChangeHunks.delete(hunkKey);
+      } else {
+        expandedChangeHunks.add(hunkKey);
+        hunkState.set(hunkKey, { loading: true });
+        post('requestHunks', { path: change.path });
+      }
+      saveUiState({ expandedChangeHunks: [...expandedChangeHunks] }); render();
+    }, 'hunk-toggle');
+    expander.disabled = !canExpand;
     const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = change.checked; checkbox.title = 'Include in commit';
     checkbox.addEventListener('change', () => { post('togglePath', { path: change.path, checked: checkbox.checked }); refreshCommitControls(); });
     const statusClass = change.status === '?' ? 'status-q' : change.status === '!' ? 'status-bang' : 'status-' + change.status;
     const file = node('div', 'change-file'); file.append(node('span', 'file-name', change.fileName));
     if (change.directory) file.append(node('span', 'directory', change.directory));
-    if (change.staged) file.append(node('span', 'stage-mark', 'staged'));
+    if (change.staged) file.append(node('span', 'stage-mark', change.unstaged ? 'index + worktree' : 'index'));
+    else if (change.unstaged) file.append(node('span', 'stage-mark worktree-mark', 'worktree'));
 
     const actions = node('div', 'row-actions');
-    actions.append(button('↔', change.conflicted ? 'Open Merge Conflict Editor' : 'Show Diff', () => post('openDiff', { path: change.path }), 'row-action'));
-    if (change.staged && !change.unstaged) actions.append(button('−', 'Unstage', () => post('unstage', { path: change.path }), 'row-action'));
-    else actions.append(button('+', 'Stage', () => post('stage', { path: change.path }), 'row-action'));
+    const defaultDiffMode = change.unstaged ? 'unstaged' : 'staged';
+    if (change.conflicted) {
+      actions.append(button('↔', 'Open Merge Conflict Editor', () => post('openDiff', { path: change.path }), 'row-action'));
+    } else {
+      if (change.staged) actions.append(button('I', 'Show HEAD ↔ Index diff', () => post('openDiff', { path: change.path, mode: 'staged' }), 'row-action state-diff'));
+      if (change.unstaged) actions.append(button('W', 'Show Index ↔ Working Tree diff', () => post('openDiff', { path: change.path, mode: 'unstaged' }), 'row-action state-diff'));
+    }
+    if (change.staged) actions.append(button('−', 'Unstage indexed changes', () => post('unstage', { path: change.path }), 'row-action'));
+    if (change.unstaged) actions.append(button('+', 'Stage working-tree changes', () => post('stage', { path: change.path }), 'row-action'));
     actions.append(
       button('⇥', 'Move to Changelist', () => post('moveToChangelist', { path: change.path }), 'row-action'),
       button('↶', 'Rollback', () => post('discard', { path: change.path }), 'row-action'),
     );
-    row.append(checkbox, node('span', 'change-status ' + statusClass, change.status), file, actions);
+    row.append(expander, checkbox, node('span', 'change-status ' + statusClass, change.status), file, actions);
     row.addEventListener('dblclick', event => {
       // Row actions and the checkbox handle their own clicks.
       if (event.target.closest('button, input')) return;
-      post('openDiff', { path: change.path });
+      post('openDiff', { path: change.path, mode: defaultDiffMode });
     });
     row.addEventListener('keydown', event => {
       if (event.target !== row) return;
-      if (event.key === 'Enter') { event.preventDefault(); post('openDiff', { path: change.path }); return; }
+      if (event.key === 'Enter') { event.preventDefault(); post('openDiff', { path: change.path, mode: defaultDiffMode }); return; }
       // Space toggles inclusion, as in the IntelliJ commit tool window.
       if (event.key === ' ') {
         event.preventDefault();
@@ -1669,14 +1738,63 @@ const logScript = String.raw`
         refreshCommitControls();
       }
     });
-    attachContextMenu(row, [
-      { icon: '↔', label: change.conflicted ? 'Open Merge Conflict Editor' : 'Show Diff', run: () => post('openDiff', { path: change.path }) },
-      { icon: change.staged && !change.unstaged ? '−' : '+', label: change.staged && !change.unstaged ? 'Unstage' : 'Stage', run: () => post(change.staged && !change.unstaged ? 'unstage' : 'stage', { path: change.path }) },
+    const contextItems = [];
+    if (change.conflicted) contextItems.push({ icon: '↔', label: 'Open Merge Conflict Editor', run: () => post('openDiff', { path: change.path }) });
+    else {
+      if (change.staged) contextItems.push({ icon: 'I', label: 'Show HEAD ↔ Index Diff', run: () => post('openDiff', { path: change.path, mode: 'staged' }) });
+      if (change.unstaged) contextItems.push({ icon: 'W', label: 'Show Index ↔ Working Tree Diff', run: () => post('openDiff', { path: change.path, mode: 'unstaged' }) });
+    }
+    if (change.staged) contextItems.push({ icon: '−', label: 'Unstage Indexed Changes', run: () => post('unstage', { path: change.path }) });
+    if (change.unstaged) contextItems.push({ icon: '+', label: 'Stage Working-tree Changes', run: () => post('stage', { path: change.path }) });
+    contextItems.push(
       { icon: '⇥', label: 'Move to Changelist…', run: () => post('moveToChangelist', { path: change.path }) },
       { separator: true },
       { icon: '↶', label: change.kind === 'untracked' ? 'Delete…' : 'Rollback…', run: () => post('discard', { path: change.path }) },
-    ]);
-    return row;
+    );
+    attachContextMenu(row, contextItems);
+    item.append(row);
+    if (expanded) item.append(changeHunks(change, hunkKey));
+    return item;
+  }
+
+  function changeHunks(change, hunkKey) {
+    const panel = node('div', 'change-hunks');
+    const value = hunkState.get(hunkKey);
+    if (!value || value.loading) {
+      panel.append(node('div', 'hunk-empty', 'Loading change hunks…'));
+      if (!value) {
+        hunkState.set(hunkKey, { loading: true });
+        queueMicrotask(() => post('requestHunks', { path: change.path }));
+      }
+      return panel;
+    }
+    const appendGroup = (title, source, hunks, action) => {
+      if (!hunks.length) return;
+      const group = node('section', 'hunk-group');
+      group.append(node('div', 'hunk-group-title', title + ' · ' + hunks.length));
+      hunks.forEach((hunk, index) => {
+        const block = node('div', 'hunk-block');
+        const header = node('div', 'hunk-header');
+        const apply = button(action, action + ' this hunk', () => {
+          apply.disabled = true;
+          post('applyHunk', { path: change.path, source, index });
+        }, 'small-button');
+        header.append(node('code', '', hunk.header), node('span', 'spacer'), apply);
+        const preview = node('pre', 'hunk-preview');
+        const lines = (hunk.lines || []).slice(0, 120);
+        for (const line of lines) {
+          const part = node('span', line.startsWith('+') ? 'hunk-add' : line.startsWith('-') ? 'hunk-delete' : 'hunk-context', line);
+          preview.append(part, document.createTextNode('\n'));
+        }
+        if ((hunk.lines || []).length > lines.length) preview.append(node('span', 'hunk-context', '…'));
+        block.append(header, preview); group.append(block);
+      });
+      panel.append(group);
+    };
+    appendGroup('HEAD → Index', 'staged', value.staged || [], 'Unstage');
+    appendGroup('Index → Working Tree', 'unstaged', value.unstaged || [], 'Stage');
+    if (!(value.staged || []).length && !(value.unstaged || []).length) panel.append(node('div', 'hunk-empty', 'No text hunks available.'));
+    return panel;
   }
 
   /**
@@ -1688,10 +1806,12 @@ const logScript = String.raw`
     const boxes = [...document.querySelectorAll('#changes-list .change-row input[type="checkbox"]')];
     const selected = boxes.filter(box => box.checked).length;
     state.selectedCount = selected;
+    const mode = document.getElementById('commit-mode')?.value || 'files';
+    const available = mode === 'staged' ? Number(state.stagedCount || 0) : selected;
     const count = document.getElementById('selected-count');
-    if (count) count.textContent = selected + ' ' + t('selected');
+    if (count) count.textContent = mode === 'staged' ? available + ' indexed files' : selected + ' ' + t('selected');
     const message = document.getElementById('commit-message');
-    const disabled = !boxes.length || !selected || !(message?.value || '').trim();
+    const disabled = !available || !(message?.value || '').trim();
     for (const id of ['commit-button', 'commit-push-button']) {
       const buttonElement = document.getElementById(id);
       if (buttonElement) buttonElement.disabled = disabled;
@@ -1703,22 +1823,38 @@ const logScript = String.raw`
     form.append(node('div', 'commit-form-title', 'Commit Changes'));
     const drafts = { ...(uiState.commitMessages || {}) }; const root = state.selectedRoot || '';
     const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = state.totalChanges ? 'Commit Message' : 'No changes to commit'; message.value = drafts[root] || ''; message.disabled = !state.totalChanges;
+    const modeRow = node('div', 'commit-mode-row');
+    const mode = node('select'); mode.id = 'commit-mode'; mode.setAttribute('aria-label', 'Commit source');
+    const stagedMode = node('option', '', 'Staging area (Index)'); stagedMode.value = 'staged';
+    const fileMode = node('option', '', 'Selected files (complete contents)'); fileMode.value = 'files';
+    mode.append(stagedMode, fileMode); mode.value = uiState.commitMode === 'staged' ? 'staged' : 'files';
+    const modeHelp = node('div', 'commit-mode-help');
+    const updateModeHelp = () => {
+      modeHelp.textContent = mode.value === 'staged'
+        ? 'Commits exactly what is in Git Index; working-tree changes stay uncommitted.'
+        : 'Commits all changes in each checked file, including its unstaged changes.';
+    };
+    mode.addEventListener('change', () => { saveUiState({ commitMode: mode.value }); updateModeHelp(); refreshCommitControls(); });
+    updateModeHelp(); modeRow.append(mode, modeHelp);
     const options = node('div', 'commit-options');
     const amend = checkboxOption('Amend', 'amend', root);
     const signoff = checkboxOption('Sign-off', 'signoff', root);
     const noVerify = checkboxOption('Skip hooks', 'noVerify', root);
-    const count = node('span', '', (state.selectedCount || 0) + ' ' + t('selected')); count.id = 'selected-count';
+    const count = node('span', '', ''); count.id = 'selected-count';
     options.append(amend.label, signoff.label, noVerify.label, node('span', 'spacer'), count);
-    const submit = push => post('commit', { message: message.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push });
+    const submit = push => post('commit', { message: message.value, mode: mode.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push });
     const actions = node('div', 'commit-actions');
     const commit = button('Commit', 'Commit selected changes', () => submit(false), 'primary'); commit.id = 'commit-button';
     const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'secondary'); commitPush.id = 'commit-push-button';
     const updateEnabled = () => {
-      const disabled = !state.totalChanges || !state.selectedCount || !message.value.trim(); commit.disabled = disabled; commitPush.disabled = disabled;
+      const available = mode.value === 'staged' ? Number(state.stagedCount || 0) : Number(state.selectedCount || 0);
+      const disabled = !available || !message.value.trim(); commit.disabled = disabled; commitPush.disabled = disabled;
+      count.textContent = mode.value === 'staged' ? available + ' indexed files' : available + ' ' + t('selected');
     };
     message.addEventListener('input', () => { drafts[root] = message.value; saveUiState({ commitMessages: drafts, commitMessage: undefined }); updateEnabled(); });
+    mode.addEventListener('change', updateEnabled);
     updateEnabled(); actions.append(commit, commitPush);
-    form.append(message, options, actions); return form;
+    form.append(modeRow, message, options, actions); return form;
   }
 
   function checkboxOption(text, key, root) {
@@ -2758,6 +2894,11 @@ const logScript = String.raw`
       state.selection = event.data.selection; pendingCommitHash = undefined;
       if (!(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
       updateSelectionWithoutRerender();
+    }
+    if (event.data.type === 'hunks' && typeof event.data.path === 'string') {
+      const key = (state.selectedRoot || '') + '::' + event.data.path;
+      hunkState.set(key, { staged: event.data.staged || [], unstaged: event.data.unstaged || [] });
+      if (activeToolTab === 'changes' && expandedChangeHunks.has(key)) render();
     }
     if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-200); if (activeToolTab === 'console') appendConsoleTrace(event.data.trace); }
     if (event.data.type === 'consoleCleared') { state.traces = []; if (activeToolTab === 'console') render(); }
