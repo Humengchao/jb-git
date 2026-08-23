@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.12
+
+- fix: settle terminated Git commands and hand the shell portable paths
+- feat: resolve conflicts that only have one outcome once the base is known
+- feat: add an interactive rebase sequence editor
+- feat: separate Index from Working Tree and guard push, checkout, rollback
+- fix: harden Git execution, path handling, and conflict semantics
+
 ## 0.1.11
 
 - test: read sources with normalised line endings
