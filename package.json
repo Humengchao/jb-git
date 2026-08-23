@@ -145,6 +145,10 @@
         "title": "JB Git: Rebase onto Ref"
       },
       {
+        "command": "jbGit.interactiveRebase",
+        "title": "JB Git: Interactively Rebase from Commit"
+      },
+      {
         "command": "jbGit.cherryPick",
         "title": "JB Git: Cherry-pick Commit"
       },

@@ -1,0 +1,95 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { isRebaseEditorMessage, originalMessage, planCoversSameCommits } from "../dist/webviews/rebaseEditorProtocol.js";
+
+const OID_A = "a".repeat(40);
+const OID_B = "b".repeat(40);
+
+function source(file) {
+  return readFileSync(new URL(`../${file}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+}
+
+test("validates rebase-editor messages at the extension-host boundary", () => {
+  assert.equal(isRebaseEditorMessage({ type: "ready" }), true);
+  assert.equal(isRebaseEditorMessage({ type: "cancel" }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", steps: [] }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "pick" }] }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "reword", message: "m" }] }), true);
+
+  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "exec" }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: 42, action: "pick" }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "pick", message: 7 }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", steps: "all" }), false);
+  assert.equal(isRebaseEditorMessage({ type: "unknown" }), false);
+  assert.equal(isRebaseEditorMessage(null), false);
+});
+
+test("accepts only a plan that covers exactly the commits that were offered", () => {
+  assert.equal(planCoversSameCommits([{ oid: OID_A, action: "pick" }], [OID_A]), true);
+  // Reordering is the whole point of the editor, so order must not matter here.
+  assert.equal(planCoversSameCommits(
+    [{ oid: OID_B, action: "pick" }, { oid: OID_A, action: "pick" }],
+    [OID_A, OID_B],
+  ), true);
+
+  assert.equal(planCoversSameCommits([{ oid: OID_A, action: "pick" }], [OID_A, OID_B]), false, "a dropped row must not silently shrink the plan");
+  assert.equal(planCoversSameCommits(
+    [{ oid: OID_A, action: "pick" }, { oid: "c".repeat(40), action: "pick" }],
+    [OID_A, OID_B],
+  ), false, "a substituted commit must be rejected");
+  assert.equal(planCoversSameCommits(
+    [{ oid: OID_A, action: "pick" }, { oid: OID_A, action: "pick" }],
+    [OID_A, OID_B],
+  ), false, "a duplicated commit must be rejected");
+});
+
+test("prefills a reword from the complete message without repeating the subject", () => {
+  // Git's %B already starts with the subject line.
+  assert.equal(
+    originalMessage({ subject: "subj line", body: "subj line\n\nbody para" }),
+    "subj line\n\nbody para",
+  );
+  // A single-line commit has %B equal to its subject.
+  assert.equal(originalMessage({ subject: "only subject", body: "only subject" }), "only subject");
+  // An empty %B must still leave something to edit.
+  assert.equal(originalMessage({ subject: "fallback", body: "   " }), "fallback");
+});
+
+test("takes the prefilled message from the extension rather than rebuilding it in the sandbox", () => {
+  const editor = source("src/webviews/rebaseEditor.ts");
+  assert.match(editor, /message: originalMessage\(commit\)/);
+  assert.match(editor, /original: commit\.message/);
+  // Reconstructing subject + body in the Webview is the bug this guards against.
+  assert.ok(!/commit\.subject \+ .\\n\\n. \+ commit\.body/.test(editor));
+  // A squash offers both messages, the way Git's own squash editor does.
+  assert.match(editor, /function prefill\(row, index\)/);
+  assert.match(editor, /leader\.message \|\| leader\.original/);
+});
+
+test("re-checks the sandbox plan on the extension side before running it", () => {
+  const editor = source("src/webviews/rebaseEditor.ts");
+  // The Webview must not be able to widen the rewrite: the commit set, the
+  // subjects and the plan's validity are all resolved from the repository.
+  assert.match(editor, /planCoversSameCommits\(message\.steps, offered\)/);
+  assert.match(editor, /subject: subjects\.get\(step\.oid\)/);
+  assert.match(editor, /validateRebasePlan\(steps\)/);
+  assert.match(editor, /isNoOpPlan\(steps, offered\)/);
+});
+
+test("guards the interactive rebase command and keeps a paused rebase recoverable", () => {
+  const extension = source("src/extension.ts");
+  const command = extension.slice(extension.indexOf('registerCommand("jbGit.interactiveRebase"'));
+  assert.ok(command.length > 0, "the command has to be registered");
+  assert.match(command.slice(0, 400), /requireTrustedWorkspace\(\)/);
+  // A rebase that stopped mid-plan must be explained as recoverable rather than
+  // reported as a plain command failure.
+  assert.match(command.slice(0, 2_200), /operation\.kind === "rebase"/);
+  assert.match(command.slice(0, 2_200), /Continue, or Abort/);
+  // Root commits have no parent, so "from here" cannot offer them.
+  assert.match(command.slice(0, 2_200), /commit\.parents\.length > 0/);
+
+  const manifest = JSON.parse(source("package.json"));
+  const declared = manifest.contributes.commands.filter((entry) => entry.command === "jbGit.interactiveRebase");
+  assert.equal(declared.length, 1, "the command must appear once in the manifest");
+});

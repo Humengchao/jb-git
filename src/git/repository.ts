@@ -1,10 +1,11 @@
 import * as path from "node:path";
 import { constants, type Stats } from "node:fs";
-import { access, lstat, mkdtemp, open, opendir, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, open, opendir, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
 import { parseUnifiedDiff, patchForHunk } from "./patch";
+import { buildRebaseTodo, shellQuote, type RebaseStep } from "../interactiveRebase";
 import {
   GitBranch,
   GitCommitOptions,
@@ -731,6 +732,89 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["rebase", ref], { cwd: this.info.rootPath }));
   }
 
+  /** Upper bound on a plan the sequence editor will build, keeping the todo reviewable and the panel responsive. */
+  private static readonly INTERACTIVE_REBASE_LIMIT = 1_000;
+
+  /**
+   * Lists the commits an interactive rebase from `base` would replay, oldest
+   * first, which is the order Git's todo uses.
+   *
+   * `base` has to be an ancestor of HEAD. That keeps the approved plan and Git's
+   * own todo identical: rebasing onto an unrelated branch lets Git silently drop
+   * commits it considers already upstream, so the user would approve a plan Git
+   * never carries out.
+   */
+  public async interactiveRebaseCandidates(base: string): Promise<GitCommit[]> {
+    const revision = await this.resolveCommit(base);
+    if (!(await this.isAncestor(revision, "HEAD"))) {
+      throw new Error("Interactive rebase needs a starting commit that is an ancestor of the current branch.");
+    }
+    const count = Number(trimOutput(await this.runner.text(["rev-list", "--count", `${revision}..HEAD`], { cwd: this.info.rootPath })));
+    if (!Number.isSafeInteger(count)) throw new Error("Git could not count the commits to rebase.");
+    if (count > GitRepository.INTERACTIVE_REBASE_LIMIT) {
+      // Truncating instead would produce a todo missing commits Git expects,
+      // which rewrites history differently from the reviewed plan.
+      throw new Error(`${count} commits is beyond the ${GitRepository.INTERACTIVE_REBASE_LIMIT}-commit interactive rebase limit. Start from a later commit.`);
+    }
+    const commits = await this.logRange(revision, "HEAD", GitRepository.INTERACTIVE_REBASE_LIMIT);
+    const merges = commits.filter((commit) => commit.parents.length > 1);
+    if (merges.length > 0) {
+      throw new Error(`This range contains ${merges.length} merge commit(s), which an interactive rebase would flatten. Start from a commit after the last merge.`);
+    }
+    return commits.reverse();
+  }
+
+  /**
+   * Runs an interactive rebase from an explicit plan.
+   *
+   * The plan is handed over as a complete todo file, so Git never consults an
+   * editor and the operation cannot stall waiting for one. Scratch files live
+   * under the Git directory rather than the system temp directory because a
+   * conflict suspends the sequence for as long as the user needs, and `exec`
+   * lines must still find their message files on `--continue`.
+   */
+  public async interactiveRebase(base: string, steps: readonly RebaseStep[]): Promise<void> {
+    await this.serial(async () => {
+      const operation = await this.operationState();
+      if (operation.kind !== "none") {
+        throw new Error(`A ${operation.kind} is already in progress. Finish or abort it before rebasing.`);
+      }
+      const status = await this.status();
+      if (status.changes.length > 0) {
+        // Autostash would mix an unrelated stash into a history rewrite, and a
+        // failed restore afterwards is far harder to reason about than refusing.
+        throw new Error(`${status.changes.length} local change(s) would block the rebase. Commit, shelve, or stash them first.`);
+      }
+      const revision = await this.resolveCommit(base);
+      const scratch = path.join(this.info.gitDir, "jb-git-rebase");
+      // A previous plan's files are dead once a new one starts, and cleanup
+      // cannot run at the end of a rebase that paused on a conflict.
+      await rm(scratch, { recursive: true, force: true });
+      await mkdir(scratch, { recursive: true });
+      const plan = buildRebaseTodo(steps, scratch, this.runner.gitPath);
+      const todoPath = path.join(scratch, "todo");
+      await writeFile(todoPath, plan.todo, "utf8");
+      for (const message of plan.messages) {
+        await writeFile(path.join(scratch, message.name), message.content, "utf8");
+      }
+      await this.runner.run([
+        // Config that rewrites the todo is pinned off so the plan Git runs is
+        // the plan that was reviewed, whatever the user has configured.
+        "-c", "rebase.autoSquash=false",
+        "-c", "rebase.autoStash=false",
+        "-c", "rebase.updateRefs=false",
+        "-c", "rebase.rebaseMerges=false",
+        "rebase", "--interactive", revision,
+      ], {
+        cwd: this.info.rootPath,
+        // An inherited GIT_SEQUENCE_EDITOR outranks `sequence.editor`, so the
+        // user's real editor would open and block while holding the mutex.
+        // Git runs this through its own shell, which `cp` is always part of.
+        env: { GIT_SEQUENCE_EDITOR: `cp ${shellQuote(todoPath)}` },
+      });
+    });
+  }
+
   public async cherryPick(hash: string): Promise<void> {
     await this.serial(() => this.runner.run(["cherry-pick", "--end-of-options", hash], { cwd: this.info.rootPath }));
   }
@@ -1114,6 +1198,17 @@ export class GitRepository {
       return await operation();
     } finally {
       release();
+    }
+  }
+
+  /** True when `ancestor` is reachable from `descendant`, distinguishing Git's "no" (exit 1) from a real failure. */
+  private async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
+    try {
+      await this.runner.run(["merge-base", "--is-ancestor", ancestor, descendant], { cwd: this.info.rootPath });
+      return true;
+    } catch (error) {
+      if (error instanceof GitCommandError && error.exitCode === 1) return false;
+      throw error;
     }
   }
 

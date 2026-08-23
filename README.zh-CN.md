@@ -22,7 +22,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 | SHA-1 / SHA-256 对象 ID | 已实现 | Log 选择与消息校验接受完整的 40 位和 64 位十六进制对象 ID，最终对象解析仍交由 Git 校验。 |
 | 合并冲突解决 | 部分实现 | 文本冲突具备可调宽的左/结果/右三栏、可编辑结果、逐块或整文件取舍、冲突导航、草稿恢复、外部修改防覆盖和 Apply 后暂存。Rebase 中会正确标为 **Rebase Target** 与 **Replayed Commit**，不会把 stage 2/3 错标成普通 ours/theirs。当前仍不是 IDEA 完整的、以 Base 为中心的三方 Merge：Base/Result 比较、完整语义对齐及全部 simple/non-conflicting 控制仍有差距。 |
 | Merge / Rebase / Cherry-pick / Revert / Reset | 部分实现 | 启动操作及 Continue/Abort/Skip 已实现，但历史编辑深度仍低于 IDEA。 |
-| Interactive Rebase 编辑器 | 规划中 | 尚无用于重排、reword、squash、fixup 和 drop 的可视化序列编辑器。 |
+| Interactive Rebase 编辑器 | 已实现 | `JB Git: Interactively Rebase from Commit` 会打开可视化序列编辑器，支持重排以及 `pick`、`reword`、`squash`、`fixup`、`drop`。改写消息的动作会降级为 Git 可无人值守执行的 todo，因此不会启动任何编辑器；冲突暂停后 `Continue` 仍会正确应用 reword 的消息。相比 IDEA 更窄：起始提交必须是 HEAD 的祖先，范围内含 merge 时直接拒绝而不是压平，工作区有改动时拒绝而不是 autostash，且不提供 `exec`/`break` 行。 |
 | File History 与 Blame | 部分实现 | File History 和命令输出式 Blame 已实现，并能安全处理特殊路径。 |
 | 编辑器 gutter Blame | 规划中 | 行级标注、上一版本跳转和移动检测尚未实现。 |
 | 多根仓库、嵌套仓库与 Worktree | 部分实现 | 已有仓库发现、按仓库串行写操作、linked worktree 元数据监视和外部普通文件变化刷新。刷新请求按 root/generation 精确保留，重新发现相同仓库时沿用对象及 mutation lock；跨仓库事务回滚仍在规划中。 |

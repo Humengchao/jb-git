@@ -11,6 +11,7 @@ import { ShelfStore } from "./shelves/store";
 import { RepositoryManager } from "./repositoryManager";
 import { IntelliJGitToolWindowProvider } from "./webviews/logPanel";
 import { conflictSideLabels, MergeConflictEditor } from "./webviews/mergeEditor";
+import { openRebaseEditor } from "./webviews/rebaseEditor";
 import { validateGitRefName, validatePathInput, validateRemoteName, validateSingleLine } from "./inputValidation";
 import { canonicalPath, deepestContaining } from "./pathRouting";
 import { moveUntrackedToTrash } from "./discardSafety";
@@ -505,6 +506,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { label: "History rewriting", kind: vscode.QuickPickItemKind.Separator },
         { label: "$(git-merge) Merge…", command: "jbGit.merge" },
         { label: "$(git-compare) Rebase…", command: "jbGit.rebase" },
+        { label: "$(list-ordered) Interactively Rebase…", command: "jbGit.interactiveRebase" },
         { label: "$(git-commit) Cherry-pick…", command: "jbGit.cherryPick" },
         { label: "$(discard) Revert…", command: "jbGit.revert" },
         { label: "$(debug-restart) Reset HEAD…", command: "jbGit.reset" },
@@ -704,6 +706,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       if (!ref) return;
       await runWithNotification(`Rebasing onto ${ref}`, () => manager.rebase(first.repository.info.rootPath, ref));
+    }),
+    vscode.commands.registerCommand("jbGit.interactiveRebase", async (rootPath?: string, fromCommit?: string) => {
+      if (!(await requireTrustedWorkspace())) return;
+      const first = await pickRepository(rootPath);
+      if (!first) return;
+      const root = first.repository.info.rootPath;
+
+      let from = fromCommit;
+      if (!from) {
+        const recent = await first.repository.logRef("HEAD", 50);
+        // A root commit has no parent to rebase onto, so "from here" cannot include it.
+        const choices = recent.filter((commit) => commit.parents.length > 0).map((commit) => ({
+          label: `${commit.hash.slice(0, 8)} ${commit.subject}`,
+          description: commit.author,
+          hash: commit.hash,
+        }));
+        if (!choices.length) return void vscode.window.showInformationMessage("There is no commit this branch can be interactively rebased from.");
+        const picked = await vscode.window.showQuickPick(choices, {
+          placeHolder: "Edit this commit and everything after it",
+          matchOnDescription: true,
+        });
+        if (!picked) return;
+        from = picked.hash;
+      }
+
+      try {
+        // The plan starts one commit earlier, so the chosen commit is itself editable.
+        const started = await openRebaseEditor(manager, root, `${from}^`, async (steps) => {
+          // withProgress directly, not runWithNotification: a rebase that stops
+          // on a conflict needs the conflict-aware message below, not a raw dialog.
+          await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: `Rebasing ${steps.length} commit(s)` },
+            () => manager.interactiveRebase(root, `${from}^`, steps),
+          );
+        });
+        if (started) await vscode.window.showInformationMessage("The interactive rebase finished.");
+      } catch (error) {
+        if (manager.snapshot(root)?.operation.kind === "rebase") {
+          await vscode.window.showWarningMessage(
+            "The rebase stopped before the end of the plan. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back.",
+          );
+        } else {
+          await vscode.window.showErrorMessage(formatGitError(error));
+        }
+      }
     }),
     vscode.commands.registerCommand("jbGit.cherryPick", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;

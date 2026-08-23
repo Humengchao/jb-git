@@ -2,7 +2,8 @@ import * as vscode from "vscode";
 import { discoverRepositories, discoverRepository, GitRepository } from "./git/repository";
 import * as path from "node:path";
 import { GitRunner, isGitAbort } from "./git/runner";
-import { GitBlameEntry, GitBranch, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
+import { RebaseStep } from "./interactiveRebase";
+import { GitBlameEntry, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -199,6 +200,14 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async rebase(rootPath: string, ref: string): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).rebase(ref));
+  }
+
+  public async interactiveRebaseCandidates(rootPath: string, base: string): Promise<GitCommit[]> {
+    return this.requireRepository(rootPath).interactiveRebaseCandidates(base);
+  }
+
+  public async interactiveRebase(rootPath: string, base: string, steps: readonly RebaseStep[]): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).interactiveRebase(base, steps));
   }
 
   public async cherryPick(rootPath: string, hash: string): Promise<void> {

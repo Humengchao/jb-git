@@ -40,7 +40,7 @@ The implementation is clean-room TypeScript. Any future source reuse requires pe
 | Log and object IDs | Partial | Graph, filters, branch comparison, progressive 300-commit loading, virtualization after 500 entries and a 5,000-entry cap are present. Full 40-character SHA-1 and 64-character SHA-256 IDs pass through UI validation. Persistent indexing and exhaustive huge-history search remain planned. |
 | Conflict resolution | Partial | A recoverable left/result/right editor provides editable result, per-block and whole-file choices, navigation, external-change detection, drafts and staged Apply. Rebase stage labels correctly say **Rebase Target** and **Replayed Commit** using replay metadata. It is not yet IDEA's complete Base-aware three-way merge: Base/Result comparison modes, full semantic alignment and all simple/non-conflicting resolution actions are missing. |
 | Merge/Rebase/Cherry-pick/Revert/Reset | Partial | Start plus Continue/Abort/Skip operations are present, but history-editing depth remains below IDEA. |
-| Interactive rebase editor | Planned | No visual sequence editor yet provides reorder, reword, squash, fixup and drop. |
+| Interactive rebase editor | Implemented | A visual sequence editor reorders commits and applies `pick`, `reword`, `squash`, `fixup` and `drop`. Every message-changing action is lowered onto a todo Git can run unattended, so no editor is ever spawned and a paused rebase resumes from persisted message files. The plan is re-validated against the repository's own commit set before it runs. Narrower than IDEA: the starting commit must be an ancestor of HEAD, ranges containing merges are refused rather than flattened, a dirty worktree is refused instead of autostashed, `exec`/`break` rows are not offered, and the range is capped at 1,000 commits. |
 | File History and Blame | Partial | File History and command/output Blame are implemented, including literal special-path handling. |
 | Editor-gutter Blame | Planned | Inline annotations, previous-revision traversal and movement detection are not implemented. |
 | Multi-root, nested repositories and Worktrees | Partial | Discovery, per-repository mutation serialization and linked-worktree metadata watching are present. External ordinary working-file changes now trigger debounced refreshes while `.git`, dependency and cache noise is ignored. Pending refreshes are retained by root/generation, and rediscovery reuses the same repository object and mutation lock when identity is unchanged. Cross-repository transactional rollback remains planned. |
@@ -54,18 +54,18 @@ The implementation is clean-room TypeScript. Any future source reuse requires pe
 | P1 — Git Core and repository lifecycle | Implemented | Argument-array Git runner, porcelain-v2 parsing, discovery, serialized mutations, operation-state detection and stable rediscovery identity. |
 | P2 — daily Git workflow | Implemented | Local Changes, two-layer Diff, file/Hunk stage/unstage, two commit sources, branch operations, Smart Checkout, remotes, Fetch/Pull and guarded Push. |
 | P3 — Changelist, Shelf, Patch, History and Blame | Partial | Core UI, commit-patch export/import and safe recovery are present; advanced same-file Changelist ownership and gutter Blame remain. |
-| P4 — Log and history-changing operations | Partial | Log graph/UI, Merge/Rebase/Cherry-pick/Revert/Reset, Continue/Abort/Skip and a usable conflict editor are present; interactive rebase and complete Base-aware merge parity remain. |
+| P4 — Log and history-changing operations | Partial | Log graph/UI, Merge/Rebase/Cherry-pick/Revert/Reset, Continue/Abort/Skip, an interactive-rebase sequence editor and a usable conflict editor are present; complete Base-aware merge parity remains. |
 | P5 — workspace scale and advanced repositories | Partial | Multi-root/nested/Bare discovery, Worktree, Submodule, Sparse Checkout, LFS pull, Bisect, progressive Log loading, virtualization and reliable external refresh are present; persistent log indexing and cross-root transaction semantics remain. |
 | P6 — hardening and delivery | Partial | Windows/macOS/Linux unit CI, VS Code 1.95/stable Extension Host CI and the automated release pipeline are implemented. Accessibility depth, SSH/WSL/Dev Container/remote-host verification and systematic Git-version fallbacks still need work. |
 
 ## Prioritized parity work
 
-1. Build an interactive-rebase sequence editor with validation and recovery for reorder, reword, squash, fixup and drop.
-2. Extend conflict resolution into a complete Base-aware three-way Merge workflow, including Base/Result comparisons and IDEA-equivalent non-conflicting/simple-conflict actions.
-3. Add editor-gutter Blame with navigation, previous revisions and movement/copy detection.
-4. Model Changelist ownership below the file level so independent or overlapping changes in one file can be separated safely.
-5. Add explicit multi-repository transaction planning, partial-failure reporting and compensating rollback where operations are reversible.
-6. Add persistent large-history indexing/search and benchmark graph behavior beyond the current 5,000-commit window.
+1. Extend conflict resolution into a complete Base-aware three-way Merge workflow, including Base/Result comparisons and IDEA-equivalent non-conflicting/simple-conflict actions.
+2. Add editor-gutter Blame with navigation, previous revisions and movement/copy detection.
+3. Model Changelist ownership below the file level so independent or overlapping changes in one file can be separated safely.
+4. Add explicit multi-repository transaction planning, partial-failure reporting and compensating rollback where operations are reversible.
+5. Add persistent large-history indexing/search and benchmark graph behavior beyond the current 5,000-commit window.
+6. Widen interactive rebase towards IDEA: merge-preserving ranges, an offer to stash a dirty worktree, and `exec`/`break` rows.
 7. Expand capability-based Git fallbacks, accessibility testing and SSH/WSL/Dev Container/remote Extension Host coverage.
 
 ## Release and signing status
