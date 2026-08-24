@@ -1096,7 +1096,7 @@ export class GitRepository {
     });
   }
 
-  public async fileContent(pathSpec: string, revision?: string): Promise<Buffer> {
+  public async fileContent(pathSpec: string, revision?: string, signal?: AbortSignal): Promise<Buffer> {
     if (!revision) {
       try {
         return await readFile(path.resolve(this.info.rootPath, pathSpec));
@@ -1107,7 +1107,7 @@ export class GitRepository {
     }
     try {
       const objectSpec = revision === "INDEX" ? `:${pathSpec}` : `${revision}:${pathSpec}`;
-      const result = await this.runner.run(["show", objectSpec], { cwd: this.info.rootPath });
+      const result = await this.runner.run(["show", objectSpec], { cwd: this.info.rootPath, signal });
       return result.stdout;
     } catch (error) {
       if (error instanceof GitCommandError && /(?:does not exist|exists on disk, but not in|path .* not in|invalid object name ['\"]?(?:HEAD|INDEX))/i.test(error.stderr)) return Buffer.alloc(0);

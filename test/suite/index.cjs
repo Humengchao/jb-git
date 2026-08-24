@@ -146,6 +146,25 @@ async function run() {
     await assert.rejects(vscode.workspace.fs.delete(uri), "deletes must be refused");
     const untitled = await vscode.workspace.openTextDocument({ content: "x\n", language: "diff" });
     assert.equal(untitled.isDirty, true, "the pattern this replaced is what caused the save prompt");
+
+    // A binary side must reach the editor as bytes. Reporting "this file is
+    // binary" in a notification instead left nothing on screen, and awaited from
+    // inside a progress task it held the spinner open with no cancel button.
+    const { diffSide } = require(path.join(extension.extensionPath, "dist", "views", "diffProvider.js"));
+    const png = Buffer.from("89504e470d0a1a0a0000000d4948445200000001", "hex");
+    const left = diffSide(diffProvider, parent, "logo:left", "logo.png", png);
+    assert.deepEqual(
+      Buffer.from(await vscode.workspace.fs.readFile(left)),
+      png,
+      "binary bytes must survive registration; a UTF-8 round trip would replace them with U+FFFD",
+    );
+    const right = diffSide(diffProvider, parent, "logo:right", "logo.png", Buffer.concat([png, Buffer.from([1, 2, 3])]));
+    // How it renders is the editor's business; what matters is that it opens.
+    await vscode.commands.executeCommand("vscode.diff", left, right, "logo.png", { preview: true });
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    // Text still arrives as text, so ordinary diffs are untouched.
+    const textSide = diffSide(diffProvider, parent, "note:left", "note.txt", Buffer.from("hello\n", "utf8"));
+    assert.equal((await vscode.workspace.openTextDocument(textSide)).getText(), "hello\n");
   } finally {
     providerRegistration.dispose();
     diffProvider.dispose();

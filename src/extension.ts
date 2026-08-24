@@ -446,7 +446,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await openMergeConflictEditor(manager, mergeEditor, node);
         return;
       }
-      await runWithNotification(`Loading diff for ${node.change.path}`, () => openChangeDiff(manager, diffProvider, node));
+      // Cancellable: reading a large blob out of Git is the one step here that
+      // can take long enough for a notification with no way out to feel stuck.
+      await runWithNotification(
+        `Loading diff for ${node.change.path}`,
+        (signal) => openChangeDiff(manager, diffProvider, node, signal),
+        true,
+      );
     }),
     vscode.commands.registerCommand("jbGit.showHistory", () => gitToolWindow.open()),
     vscode.commands.registerCommand("jbGit.openGitToolWindow", (rootPath?: string) => gitToolWindow.open(rootPath)),

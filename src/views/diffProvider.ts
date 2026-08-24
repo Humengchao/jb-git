@@ -22,7 +22,7 @@ export class DiffContentProvider implements vscode.FileSystemProvider, vscode.Di
   /** The scheme is injectable so tests can register a probe alongside the activated extension. */
   public constructor(private readonly scheme: string = DiffContentProvider.scheme) {}
 
-  public registerFile(repositoryRoot: string, label: string, filePath: string, content: string): vscode.Uri {
+  public registerFile(repositoryRoot: string, label: string, filePath: string, content: string | Buffer): vscode.Uri {
     const id = ++this.sequence;
     const normalizedPath = filePath.replaceAll("\\", "/").replace(/^\/+/, "");
     const uri = vscode.Uri.from({
@@ -35,8 +35,8 @@ export class DiffContentProvider implements vscode.FileSystemProvider, vscode.Di
     return uri;
   }
 
-  private remember(uri: vscode.Uri, content: string): void {
-    this.contents.set(uri.toString(), Buffer.from(content, "utf8"));
+  private remember(uri: vscode.Uri, content: string | Buffer): void {
+    this.contents.set(uri.toString(), typeof content === "string" ? Buffer.from(content, "utf8") : content);
     while (this.contents.size > 100) {
       const open = new Set(vscode.workspace.textDocuments.map((document) => document.uri.toString()));
       const oldest = [...this.contents.keys()].find((key) => !open.has(key));
@@ -106,6 +106,7 @@ export async function openChangeDiff(
   manager: RepositoryManager,
   provider: DiffContentProvider,
   node: ChangeNode,
+  signal?: AbortSignal,
 ): Promise<void> {
   const snapshot = manager.snapshot(node.repositoryRoot);
   const repository = snapshot?.repository;
@@ -118,17 +119,33 @@ export async function openChangeDiff(
   const leftRevision = staged ? "HEAD" : change.indexStatus !== " " ? "INDEX" : "HEAD";
   const rightRevision = staged ? "INDEX" : undefined;
   const [left, right] = await Promise.all([
-    repository.fileContent(oldPath, leftRevision),
-    repository.fileContent(path, rightRevision),
+    repository.fileContent(oldPath, leftRevision, signal),
+    repository.fileContent(path, rightRevision, signal),
   ]);
-  if (isBinaryContent(left) || isBinaryContent(right)) {
-    await vscode.window.showInformationMessage(`${path} is binary and cannot be shown in the text diff editor.`);
-    return;
-  }
   const label = `${path} (${staged ? "Index" : "Working Tree"})`;
-  const leftUri = provider.registerFile(node.repositoryRoot, `${label}:left`, oldPath, left.toString("utf8"));
-  const rightUri = provider.registerFile(node.repositoryRoot, `${label}:right`, path, right.toString("utf8"));
+  const leftUri = diffSide(provider, node.repositoryRoot, `${label}:left`, oldPath, left);
+  const rightUri = diffSide(provider, node.repositoryRoot, `${label}:right`, path, right);
   await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
+}
+
+/**
+ * Registers one side of a diff, keeping binary content as bytes.
+ *
+ * Reporting "this file is binary" in a notification was worse than useless: it
+ * left nothing on screen to look at, and shown from inside a progress task it
+ * held that progress open until the notification was dismissed, so the diff
+ * appeared to load forever behind a spinner with no cancel button. Handing the
+ * editor the real bytes is what VS Code's own Git view and IDEA do — an image
+ * gets an image diff, and anything else gets the editor's own notice.
+ */
+export function diffSide(
+  provider: DiffContentProvider,
+  repositoryRoot: string,
+  label: string,
+  filePath: string,
+  content: Buffer,
+): vscode.Uri {
+  return provider.registerFile(repositoryRoot, label, filePath, isBinaryContent(content) ? content : content.toString("utf8"));
 }
 
 export function isBinaryContent(content: Buffer): boolean {

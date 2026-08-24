@@ -458,3 +458,26 @@ test("keeps commit controls and selection honest while replies are pending", () 
   // An error reply will never be followed by a selection, so drop the loading placeholder.
   assert.match(script, /type === 'error'[\s\S]{0,300}pendingCommitHash = undefined; updateSelectionWithoutRerender\(\);/);
 });
+
+test("draws the dropdowns and checkboxes from the theme, not from the browser", () => {
+  assert.ok(scriptMatch);
+  // A native select and native checkboxes were the only browser-default controls
+  // left in the panel, which made the commit form read as a web form dropped
+  // into the editor.
+  assert.match(source, /\.select-shell select \{[^}]*appearance: none/);
+  assert.match(source, /\.select-shell select \{[^}]*var\(--vscode-dropdown-background/);
+  assert.match(source, /input\[type="checkbox"\] \{[^}]*appearance: none/);
+  assert.match(source, /input\[type="checkbox"\]:checked::after \{/);
+  // The chevron is drawn with borders: a CSP with no img-src cannot load a
+  // background image, so a data URI arrow would silently not appear.
+  assert.match(source, /\.select-shell::after \{[^}]*transform: rotate\(45deg\)/);
+  assert.doesNotMatch(source, /\.select-shell[^}]*background-image/);
+  // Every select goes through the shell, or the styled one would be the odd
+  // control out instead of the plain ones.
+  const created = scriptMatch[1].match(/node\('select'\)/g) ?? [];
+  const wrapped = scriptMatch[1].match(/selectShell\(/g) ?? [];
+  assert.ok(created.length >= 4, "the panel should still build its selects here");
+  assert.equal(wrapped.length, created.length, "every select must be wrapped for the chevron and theming");
+  // Commit and Commit & Push are one decision, so they carry one style.
+  assert.match(scriptMatch[1], /button\('Commit & Push',[\s\S]{0,90}?'primary'\)/);
+});

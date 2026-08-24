@@ -96,3 +96,21 @@ test("routes every user-facing push through target preview and branch protection
   assert.match(preview, /isProtectedBranch\(target\.branch/);
   assert.match(preview, /const refspec = `\$\{sourceRef\}:refs\/heads\/\$\{target\.branch\}`/);
 });
+
+test("never blocks a progress notification on a toast being dismissed", () => {
+  // A notification promise settles only when the notification is dismissed, so
+  // awaiting one from inside a progress task pins that progress on screen — and
+  // a non-cancellable progress has no close button, which is what made a binary
+  // diff look like it was comparing forever.
+  const checkout = readSource("../src/smartCheckout.ts", import.meta.url);
+  for (const [, args] of checkout.matchAll(/await vscode\.window\.show\w+Message\(([\s\S]{0,300}?)\);/g)) {
+    assert.match(args, /modal: true/, `only a modal question may be awaited here: ${args.slice(0, 60)}`);
+  }
+  assert.match(checkout, /void vscode\.window\.showInformationMessage\(`Checked out \$\{branch\.name} and restored/);
+  // The diff path stopped reporting binary content in a notification altogether.
+  const diff = readSource("../src/views/diffProvider.ts", import.meta.url);
+  assert.doesNotMatch(diff, /vscode\.window\.show\w+Message/);
+  assert.match(diff, /isBinaryContent\(content\) \? content : content\.toString\("utf8"\)/);
+  // The one long step left in a diff is reading a blob, so it can be cancelled.
+  assert.match(extension, /\(signal\) => openChangeDiff\(manager, diffProvider, node, signal\),\r?\n\s*true,/);
+});

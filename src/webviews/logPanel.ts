@@ -6,7 +6,7 @@ import { GitTraceEvent, isGitAbort } from "../git/runner";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
 import { ChangeNode } from "../views/nodes";
-import { DiffContentProvider, isBinaryContent } from "../views/diffProvider";
+import { DiffContentProvider, diffSide, isBinaryContent } from "../views/diffProvider";
 import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
 import { validateGitRefName, validatePathInput } from "../inputValidation";
@@ -543,10 +543,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
               snapshot.repository.fileContent(file.path, commit.hash),
               snapshot.repository.fileContent(file.path),
             ]);
-            if (isBinaryContent(left) || isBinaryContent(right)) return void vscode.window.showInformationMessage(`${file.path} is binary and cannot be shown in the text diff editor.`);
             const label = `${file.path} (${commit.hash.slice(0, 8)} ↔ Local)`;
-            const leftUri = this.diffProvider.registerFile(root, `${label}:commit`, file.path, left.toString("utf8"));
-            const rightUri = this.diffProvider.registerFile(root, `${label}:local`, file.path, right.toString("utf8"));
+            const leftUri = diffSide(this.diffProvider, root, `${label}:commit`, file.path, left);
+            const rightUri = diffSide(this.diffProvider, root, `${label}:local`, file.path, right);
             await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
             return;
           }
@@ -958,9 +957,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       file.status.startsWith("D") ? Promise.resolve(Buffer.alloc(0)) : repository.fileContent(file.path, commit.hash),
     ]);
     const label = `${file.path} (${commit.hash.slice(0, 8)})`;
-    if (isBinaryContent(left) || isBinaryContent(right)) return void vscode.window.showInformationMessage(`${file.path} is binary and cannot be shown in the text diff editor.`);
-    const leftUri = this.diffProvider.registerFile(root, `${label}:parent`, oldPath, left.toString("utf8"));
-    const rightUri = this.diffProvider.registerFile(root, `${label}:commit`, file.path, right.toString("utf8"));
+    const leftUri = diffSide(this.diffProvider, root, `${label}:parent`, oldPath, left);
+    const rightUri = diffSide(this.diffProvider, root, `${label}:commit`, file.path, right);
     await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
   }
 }
@@ -1198,12 +1196,27 @@ const logStyles = String.raw`
   .commit-form { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(60px, 1fr) auto auto; gap: 0; background: var(--vscode-panel-background, var(--vscode-editor-background)); }
   .commit-form-title { height: 28px; display: flex; align-items: center; padding: 0 9px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
   .commit-mode-row { display: grid; grid-template-columns: minmax(160px, auto) minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
-  .commit-mode-row select { min-width: 0; }
   .commit-mode-help { color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.25; }
+  /* A native select and native checkboxes were the only browser-default controls
+     left in the panel, so the commit form read as a web form dropped into the
+     editor. Both are drawn from the theme instead; the select's own arrow is
+     dropped for a chevron on the shell, because a CSP with no img-src cannot
+     load a background image for it. */
+  .select-shell { position: relative; display: flex; min-width: 0; }
+  .select-shell::after { content: ''; position: absolute; right: 9px; top: 50%; width: 5px; height: 5px; margin-top: -4px; border-right: 1px solid var(--vscode-dropdown-foreground, var(--vscode-foreground)); border-bottom: 1px solid var(--vscode-dropdown-foreground, var(--vscode-foreground)); transform: rotate(45deg); opacity: .7; pointer-events: none; }
+  .select-shell select { width: 100%; min-width: 0; height: 26px; padding: 0 24px 0 8px; appearance: none; font: inherit; color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); background: var(--vscode-dropdown-background, var(--vscode-input-background)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); border-radius: 3px; cursor: pointer; text-overflow: ellipsis; }
+  .select-shell select:hover { border-color: var(--vscode-focusBorder); }
+  .select-shell select:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  input[type="checkbox"] { appearance: none; flex: none; width: 15px; height: 15px; margin: 0; position: relative; border: 1px solid var(--vscode-checkbox-border, var(--vscode-dropdown-border, var(--vscode-panel-border))); border-radius: 3px; background: var(--vscode-checkbox-background, var(--vscode-input-background)); cursor: pointer; }
+  input[type="checkbox"]:hover { border-color: var(--vscode-focusBorder); }
+  input[type="checkbox"]:checked { background: var(--vscode-button-background); border-color: var(--vscode-button-background); }
+  input[type="checkbox"]:checked::after { content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid var(--vscode-button-foreground); border-width: 0 1.6px 1.6px 0; transform: rotate(45deg); }
+  input[type="checkbox"]:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
   .commit-message { width: calc(100% - 14px); min-height: 60px; margin: 7px; padding: 7px 8px; resize: none; border: 1px solid var(--vscode-input-border, transparent); background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
   .commit-message::placeholder { color: var(--vscode-input-placeholderForeground); }
-  .commit-options { min-height: 30px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 8px; color: var(--vscode-descriptionForeground); }
-  .commit-options label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .commit-options { min-height: 32px; display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 4px 9px 7px; color: var(--vscode-foreground); }
+  .commit-options label { display: flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; user-select: none; }
+  .commit-options #selected-count { color: var(--vscode-descriptionForeground); }
   .commit-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, auto); gap: 4px; padding: 0 7px 7px; }
   .primary { min-height: 29px; padding: 4px 10px; border-radius: 2px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .primary:hover { background: var(--vscode-button-hoverBackground); }
@@ -1224,7 +1237,7 @@ const logStyles = String.raw`
   }
   @media (max-width: 760px) { .filter-button .filter-value { display: none; } }
   @media (max-width: 650px) { .toolbar, .changes-toolbar { overflow-x: auto; } }
-  @media (max-width: 760px) { .commit-options { gap: 5px; font-size: 11px; } }
+  @media (max-width: 760px) { .commit-options { gap: 9px; font-size: 11px; } }
   @media (max-width: 520px) {
     .changes-workspace { --commit-height: 220px; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(150px, 1fr) 9px var(--commit-height); }
     .changes-splitter { min-height: 9px; cursor: row-resize; }
@@ -1279,6 +1292,11 @@ const logScript = String.raw`
     'No local changes': '没有本地更改', 'No changes to commit': '没有可提交的更改',
     'Commit Changes': '提交更改', 'Commit Message': '提交消息', 'Amend': '修正提交',
     'Sign-off': '添加签署', 'Skip hooks': '跳过钩子', 'Commit': '提交', 'Commit & Push': '提交并推送',
+    'Staging area (Index)': '暂存区（Index）', 'Selected files (complete contents)': '所选文件（完整内容）',
+    'Commits exactly what is in Git Index; working-tree changes stay uncommitted.': '只提交 Git Index 中已暂存的内容，工作区里未暂存的修改保持不提交。',
+    'Commits all changes in each checked file, including its unstaged changes.': '提交每个勾选文件的全部改动，包括其中尚未暂存的部分。',
+    'Commit selected changes': '提交所选更改', 'Commit selected changes and push': '提交所选更改并推送',
+    'Commit source': '提交内容来源',
     'selected': '已选择',
     'No shelved changes': '没有已搁置的更改', 'Unshelve': '取消搁置',
     'Branch': '分支', 'User': '用户', 'Date': '日期', 'Paths': '路径',
@@ -1310,6 +1328,7 @@ const logScript = String.raw`
   const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
   const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = t(text); return n; };
   const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = t(title); b.addEventListener('click', handler); return b; };
+  const selectShell = select => { const shell = node('div', 'select-shell'); shell.append(select); return shell; };
   const saveUiState = extra => { uiState = { ...uiState, ...extra }; vscode.setState(uiState); };
   const selectToolTab = tab => {
     closeContextMenu(); activeToolTab = tab; saveUiState({ activeToolTab: tab });
@@ -1537,7 +1556,7 @@ const logScript = String.raw`
       const pause = button(consolePaused ? 'Resume scroll' : 'Pause scroll', consolePaused ? 'Resume automatic scrolling' : 'Pause automatic scrolling', () => {
         consolePaused = !consolePaused; saveUiState({ consolePaused }); render();
       }, 'action');
-      consoleBar.append(node('span', '', 'Git Console'), filter, node('span', 'spacer'), pause, button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
+      consoleBar.append(node('span', '', 'Git Console'), selectShell(filter), node('span', 'spacer'), pause, button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
       root.append(consoleBar, consolePanel()); finishRender(root, saved); return;
     }
     if (activeToolTab === 'changes') {
@@ -1561,7 +1580,7 @@ const logScript = String.raw`
       option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option);
     }
     repositories.addEventListener('change', () => { post('selectRepository', { root: repositories.value }); repositories.blur(); });
-    return repositories;
+    return selectShell(repositories);
   }
 
   function changesToolbar() {
@@ -1824,18 +1843,18 @@ const logScript = String.raw`
     const drafts = { ...(uiState.commitMessages || {}) }; const root = state.selectedRoot || '';
     const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = state.totalChanges ? 'Commit Message' : 'No changes to commit'; message.value = drafts[root] || ''; message.disabled = !state.totalChanges;
     const modeRow = node('div', 'commit-mode-row');
-    const mode = node('select'); mode.id = 'commit-mode'; mode.setAttribute('aria-label', 'Commit source');
+    const mode = node('select'); mode.id = 'commit-mode'; mode.setAttribute('aria-label', t('Commit source')); mode.title = t('Commit source');
     const stagedMode = node('option', '', 'Staging area (Index)'); stagedMode.value = 'staged';
     const fileMode = node('option', '', 'Selected files (complete contents)'); fileMode.value = 'files';
     mode.append(stagedMode, fileMode); mode.value = uiState.commitMode === 'staged' ? 'staged' : 'files';
     const modeHelp = node('div', 'commit-mode-help');
     const updateModeHelp = () => {
-      modeHelp.textContent = mode.value === 'staged'
+      modeHelp.textContent = t(mode.value === 'staged'
         ? 'Commits exactly what is in Git Index; working-tree changes stay uncommitted.'
-        : 'Commits all changes in each checked file, including its unstaged changes.';
+        : 'Commits all changes in each checked file, including its unstaged changes.');
     };
     mode.addEventListener('change', () => { saveUiState({ commitMode: mode.value }); updateModeHelp(); refreshCommitControls(); });
-    updateModeHelp(); modeRow.append(mode, modeHelp);
+    updateModeHelp(); modeRow.append(selectShell(mode), modeHelp);
     const options = node('div', 'commit-options');
     const amend = checkboxOption('Amend', 'amend', root);
     const signoff = checkboxOption('Sign-off', 'signoff', root);
@@ -1845,7 +1864,7 @@ const logScript = String.raw`
     const submit = push => post('commit', { message: message.value, mode: mode.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push });
     const actions = node('div', 'commit-actions');
     const commit = button('Commit', 'Commit selected changes', () => submit(false), 'primary'); commit.id = 'commit-button';
-    const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'secondary'); commitPush.id = 'commit-push-button';
+    const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'primary'); commitPush.id = 'commit-push-button';
     const updateEnabled = () => {
       const available = mode.value === 'staged' ? Number(state.stagedCount || 0) : Number(state.selectedCount || 0);
       const disabled = !available || !message.value.trim(); commit.disabled = disabled; commitPush.disabled = disabled;
@@ -1926,7 +1945,7 @@ const logScript = String.raw`
     for (const repo of state.repositories || []) { const option = node('option', '', repo.name); option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option); }
     repositories.addEventListener('change', () => { post('selectRepository', { root: repositories.value }); repositories.blur(); });
     bar.append(
-      repositories,
+      selectShell(repositories),
       button('Refresh', 'Refresh repository', () => post('refresh'), 'icon-button'),
       button(state.branch || 'detached HEAD', 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
       node('span', 'spacer'),
