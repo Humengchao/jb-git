@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -148,9 +148,18 @@ test("treats option-like revision input as a revision, not a flag", async () => 
   git(root, "commit", "-qm", "init");
   const repository = await discoverRepository(root, new GitRunner());
   assert.ok(repository);
-  await assert.rejects(repository.revert("--no-commit"), /bad revision/i);
-  await assert.rejects(repository.cherryPick("--abort"), /bad revision/i);
+  const head = git(root, "rev-parse", "HEAD");
+  await assert.rejects(repository.revert("--no-commit"), /bad revision|needed a single revision/i);
+  await assert.rejects(repository.cherryPick("--abort"), /bad revision|needed a single revision/i);
   await assert.rejects(repository.bisectStart("--term-new=x", "HEAD"), /bad revision|needed a single revision/i);
   await assert.rejects(repository.createTag("v1", "--delete"), /bad revision|needed a single revision/i);
   assert.equal(git(root, "tag", "-l", "v1"), "", "the tag must not be created from a flag-like revision");
+  // Rejecting the input is only half of it: `revert`/`cherry-pick` hand their
+  // leftovers to a second option parser, so a flag that slipped through would
+  // have run as a flag. Nothing may have moved.
+  assert.equal(git(root, "rev-parse", "HEAD"), head, "no flag-like revision may move HEAD");
+  assert.equal(git(root, "status", "--porcelain"), "", "no flag-like revision may touch the working tree");
+  for (const stateFile of ["REVERT_HEAD", "CHERRY_PICK_HEAD", "sequencer"]) {
+    assert.equal(existsSync(join(root, ".git", stateFile)), false, `${stateFile} must not exist`);
+  }
 });

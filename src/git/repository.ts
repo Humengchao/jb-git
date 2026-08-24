@@ -900,11 +900,22 @@ export class GitRepository {
   }
 
   public async cherryPick(hash: string): Promise<void> {
-    await this.serial(() => this.runner.run(["cherry-pick", "--end-of-options", hash], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      // `cherry-pick` and `revert` hand whatever survives their own option
+      // parser to `setup_revisions()`, which parses option-like tokens a
+      // second time. The `--end-of-options` that stopped the first parser has
+      // already been consumed by then, so free-form input is pinned to a
+      // resolved commit hash the same way `bisect` is.
+      const revision = await this.resolveCommit(hash);
+      await this.runner.run(["cherry-pick", revision], { cwd: this.info.rootPath });
+    });
   }
 
   public async revert(hash: string): Promise<void> {
-    await this.serial(() => this.runner.run(["revert", "--no-edit", "--end-of-options", hash], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      const revision = await this.resolveCommit(hash);
+      await this.runner.run(["revert", "--no-edit", revision], { cwd: this.info.rootPath });
+    });
   }
 
   public async reset(ref: string, mode: "soft" | "mixed" | "hard"): Promise<void> {
