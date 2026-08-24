@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.18
+
+- fix: survive a render throw, and finish the tool window's colours and locale
+
 ## 0.1.17
 
 - feat: give the merge editor an undo it can trust, and mark deletions
