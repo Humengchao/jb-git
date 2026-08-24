@@ -388,6 +388,12 @@ const mergeStyles = String.raw`
   .band.is-current { --alpha: 27%; }
   .band.side { --alpha: 10%; }
   .band.side.is-current { --alpha: 22%; }
+  /* A conflict that took nothing from our side is a zero-length range: with no
+     text to shade it was invisible in the result, so it is drawn the way IDEA
+     draws a deletion — a coloured line at the exact spot. */
+  .band-empty { position: relative; }
+  .band-empty::after { content: ''; position: absolute; left: -8px; top: -1px; width: 56px; border-top: 2px solid color-mix(in srgb, var(--state) 75%, transparent); }
+  .band-empty.is-current::after { border-top-width: 3px; border-top-color: var(--state); }
   .footer-group { display: flex; align-items: center; gap: 8px; }
   .hint { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 850px) { .non-conflicting, .hint { display: none; } .toolbar button { padding-left: 7px; padding-right: 7px; } }
@@ -495,6 +501,10 @@ const mergeScript = String.raw`
   let loaded = false;
   let synchronizing = false;
   const HIGHLIGHT_MARGIN = 40;
+  const UNDO_LIMIT = 100;
+  let undoStack = [];
+  let redoStack = [];
+  let typingRun = false;
   let highlightWindows = [undefined, undefined, undefined];
   let highlightFrame;
   let updateFrame;
@@ -739,9 +749,9 @@ const mergeScript = String.raw`
   function bandsFor(index) {
     if (!model.regions.length) return [];
     if (index === 1) {
+      // Zero-length regions stay: updateHighlight draws them as deletion marks.
       return model.regions
-        .map((region, position) => ({ start: region.start, end: region.end, className: bandClass(region, position, false) }))
-        .filter((band) => band.end > band.start);
+        .map((region, position) => ({ start: region.start, end: region.end, className: bandClass(region, position, false) }));
     }
     const offsets = chunkOffsets[index] || [];
     const bands = [];
@@ -814,6 +824,14 @@ const mergeScript = String.raw`
     const fragment = document.createDocumentFragment();
     let cursor = view.start;
     for (const band of bandsFor(index)) {
+      if (band.start === band.end) {
+        if (band.start < cursor || band.start > view.end) continue;
+        if (band.start > cursor) { tokenizeInto(fragment, editor.value.slice(cursor, band.start)); cursor = band.start; }
+        const mark = document.createElement('span');
+        mark.className = band.className + ' band-empty';
+        fragment.append(mark);
+        continue;
+      }
       if (band.end <= cursor || band.start >= view.end) continue;
       const start = Math.max(band.start, cursor);
       const end = Math.min(band.end, view.end);
@@ -908,8 +926,46 @@ const mergeScript = String.raw`
 
   function saveDraft(immediate = false) {
     if (draftTimer) clearTimeout(draftTimer);
-    const send = () => { draftTimer = undefined; vscode.postMessage({ type: 'dirty', result: serializeResult(), deleted: resultDeleted }); };
+    // A draft send also closes the current typing burst, so the next keystroke
+    // after a pause becomes its own undo step.
+    const send = () => { draftTimer = undefined; typingRun = false; vscode.postMessage({ type: 'dirty', result: serializeResult(), deleted: resultDeleted }); };
     if (immediate) send(); else draftTimer = setTimeout(send, 300);
+  }
+
+  /**
+   * One undo step per decision. Assigning textarea.value discards the control's
+   * native history, so after any gutter or toolbar action Ctrl+Z silently did
+   * nothing at all; the model keeps its own stacks instead, where every action
+   * is one step and a typing burst collapses into one.
+   */
+  function captureState() { return { text: model.text, regions: model.regions, deleted: resultDeleted }; }
+
+  function pushUndo(state) {
+    undoStack.push(state);
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack = [];
+    typingRun = false;
+  }
+
+  function restoreState(state) {
+    model = { text: state.text, regions: state.regions };
+    setResultText(model.text);
+    resultDeleted = state.deleted;
+    typingRun = false;
+    saveDraft();
+    updateControls();
+  }
+
+  function undoStep() {
+    if (!undoStack.length || applying) return;
+    redoStack.push(captureState());
+    restoreState(undoStack.pop());
+  }
+
+  function redoStep() {
+    if (!redoStack.length || applying) return;
+    undoStack.push(captureState());
+    restoreState(redoStack.pop());
   }
 
   function setResultText(text) {
@@ -928,6 +984,7 @@ const mergeScript = String.raw`
 
   function resolveAs(index, side) {
     if (!model.regions[index]) return;
+    pushUndo(captureState());
     model = MergeRegions.resolveRegion(model, index, side);
     setResultText(model.text);
     resultDeleted = false;
@@ -938,6 +995,7 @@ const mergeScript = String.raw`
 
   function ignoreAt(index) {
     if (!model.regions[index]) return;
+    pushUndo(captureState());
     model = MergeRegions.ignoreRegion(model, index);
     advanceFrom(index);
     saveDraft();
@@ -947,6 +1005,7 @@ const mergeScript = String.raw`
   /** Undoes one change's resolution, leaving every other decision alone. */
   function resetAt(index) {
     if (!model.regions[index]) return;
+    pushUndo(captureState());
     model = MergeRegions.resetRegion(model, index);
     setResultText(model.text);
     resultDeleted = false;
@@ -980,11 +1039,18 @@ const mergeScript = String.raw`
   result.addEventListener('input', () => {
     // The regions follow the user's edit; one that was touched becomes manual.
     const previous = model.text;
+    if (!typingRun) { pushUndo({ text: previous, regions: model.regions, deleted: resultDeleted }); typingRun = true; }
     model = { text: result.value, regions: MergeRegions.applyEdit(model.regions, MergeRegions.textDelta(previous, result.value)) };
     resultDeleted = false;
     alignmentCache.clear();
     saveDraft();
     scheduleUpdate();
+  });
+  // The textarea's own history is unusable once .value has been assigned, so
+  // its undo gestures are intercepted wherever they come from.
+  result.addEventListener('beforeinput', (event) => {
+    if (event.inputType === 'historyUndo') { event.preventDefault(); undoStep(); }
+    else if (event.inputType === 'historyRedo') { event.preventDefault(); redoStep(); }
   });
   result.addEventListener('click', () => {
     const index = model.regions.findIndex((region) => result.selectionStart >= region.start && result.selectionStart <= region.end);
@@ -1029,6 +1095,7 @@ const mergeScript = String.raw`
   document.getElementById('accept-left').addEventListener('click', () => vscode.postMessage({ type: 'confirm', action: 'acceptLeft' }));
   document.getElementById('accept-right').addEventListener('click', () => vscode.postMessage({ type: 'confirm', action: 'acceptRight' }));
   document.getElementById('reset').addEventListener('click', () => {
+    pushUndo(captureState());
     model = MergeRegions.buildModel(initialResult);
     setResultText(model.text);
     resultDeleted = initialResultDeleted;
@@ -1058,6 +1125,16 @@ const mergeScript = String.raw`
       apply.click();
       return;
     }
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && (event.key === 'z' || event.key === 'Z')) {
+      event.preventDefault();
+      if (event.shiftKey) redoStep(); else undoStep();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && (event.key === 'y' || event.key === 'Y')) {
+      event.preventDefault();
+      redoStep();
+      return;
+    }
     if (event.key === 'F7' && model.regions.length) {
       event.preventDefault();
       document.getElementById(event.shiftKey ? 'previous' : 'next').click();
@@ -1075,6 +1152,13 @@ const mergeScript = String.raw`
   });
 
   document.querySelectorAll('.splitter').forEach((splitter) => {
+    // The wide strips sit between the panes; without this, 38px of the editor
+    // is a dead zone where the wheel scrolls nothing.
+    splitter.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      result.scrollTop += event.deltaMode === 1 ? event.deltaY * lineHeightOf(1) : event.deltaY;
+      syncFrom(result);
+    }, { passive: false });
     const previous = splitter.previousElementSibling;
     const next = splitter.nextElementSibling;
     const resizeBy = (delta) => {
@@ -1147,11 +1231,13 @@ const mergeScript = String.raw`
     }
     if (message.type === 'confirmed') {
       if (message.action === 'acceptLeft') {
+        pushUndo(captureState());
         model = { text: left.value, regions: [] };
         setResultText(model.text);
         resultDeleted = !window.mergeVersions.oursExists;
         saveDraft(); updateControls();
       } else if (message.action === 'acceptRight') {
+        pushUndo(captureState());
         model = { text: right.value, regions: [] };
         setResultText(model.text);
         resultDeleted = !window.mergeVersions.theirsExists;

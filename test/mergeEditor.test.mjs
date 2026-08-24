@@ -120,6 +120,40 @@ test("keeps the change an action moved to on screen, and closes on Escape", () =
   assert.match(scriptMatch[1], /mt\('Could not apply the merge result'\)/);
 });
 
+test("undoes any decision or typing burst as one step", () => {
+  // Assigning textarea.value discards the control's native history, so after a
+  // gutter or toolbar action Ctrl+Z silently did nothing at all. The model
+  // keeps its own stacks; every mutation source pushes exactly one step.
+  assert.match(scriptMatch[1], /function undoStep\(\)/);
+  assert.match(scriptMatch[1], /function redoStep\(\)/);
+  // resolveAs, ignoreAt, resetAt, Reset, Accept Left, Accept Right.
+  assert.equal(scriptMatch[1].match(/pushUndo\(captureState\(\)\);/g)?.length, 6);
+  // The first keystroke of a burst pushes the pre-burst state once…
+  assert.match(scriptMatch[1], /if \(!typingRun\) \{ pushUndo\(\{ text: previous, regions: model\.regions, deleted: resultDeleted \}\); typingRun = true; \}/);
+  // …and a draft send closes the burst so the next pause starts a new step.
+  assert.match(scriptMatch[1], /typingRun = false; vscode\.postMessage\(\{ type: 'dirty'/);
+  // Native undo gestures are intercepted wherever they come from.
+  assert.match(scriptMatch[1], /event\.inputType === 'historyUndo'/);
+  assert.match(scriptMatch[1], /event\.key === 'z' \|\| event\.key === 'Z'/);
+  assert.match(scriptMatch[1], /event\.shiftKey\) redoStep\(\); else undoStep\(\);/);
+});
+
+test("draws a conflict that took nothing from our side as a deletion mark", () => {
+  // A zero-length region has no text to shade, so it was invisible in the
+  // result even while it was the current change.
+  assert.match(scriptMatch[1], /if \(band\.start === band\.end\) \{/);
+  assert.match(scriptMatch[1], /band\.className \+ ' band-empty'/);
+  assert.match(source, /\.band-empty::after \{[^}]*border-top: 2px solid/);
+  assert.match(source, /\.band-empty\.is-current::after \{/);
+  // The result keeps its zero-length bands instead of filtering them away.
+  assert.doesNotMatch(scriptMatch[1], /filter\(\(band\) => band\.end > band\.start\)/);
+});
+
+test("keeps the wheel scrolling over the strips between the panes", () => {
+  assert.match(scriptMatch[1], /splitter\.addEventListener\('wheel'/);
+  assert.match(scriptMatch[1], /event\.deltaMode === 1 \? event\.deltaY \* lineHeightOf\(1\) : event\.deltaY/);
+});
+
 test("shows every change on a marker strip that jumps to it", () => {
   // IDEA's strip: a long merge shows where the work is left without scrolling.
   assert.match(scriptMatch[1], /function renderRuler\(\)/);
