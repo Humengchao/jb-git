@@ -24,7 +24,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 | Merge / Rebase / Cherry-pick / Revert / Reset | 部分实现 | 启动操作及 Continue/Abort/Skip 已实现，但历史编辑深度仍低于 IDEA。 |
 | Interactive Rebase 编辑器 | 已实现 | `JB Git: Interactively Rebase from Commit` 会打开可视化序列编辑器（界面已本地化），支持拖拽手柄或 Alt+↑/↓ 重排以及 `pick`、`reword`、`squash`、`fixup`、`drop`。改写消息的动作会降级为 Git 可无人值守执行的 todo，因此不会启动任何编辑器；冲突暂停后 `Continue` 仍会正确应用 reword 的消息。相比 IDEA 更窄：起始提交必须是 HEAD 的祖先，范围内含 merge 时直接拒绝而不是压平，工作区有改动时拒绝而不是 autostash，且不提供 `exec`/`break` 行。 |
 | File History 与 Blame | 部分实现 | File History 和命令输出式 Blame 已实现，并能安全处理特殊路径。 |
-| 编辑器 gutter Blame | 规划中 | 行级标注、上一版本跳转和移动检测尚未实现。 |
+| 编辑器 gutter Blame | 部分实现 | `JB Git: Annotate with Git Blame` 为每一行加上标注：作者、日期，以及可选的缩写对象 ID，各占一列并对齐，按该提交在本文件中的新旧程度着色。悬停可看到提交主题、作者、提交自身的日期与距今多久，并提供三个操作：在 Log 中定位该提交、复制 revision number、标注上一版本——后者用 Git 自己给出的 `previous <commit> <path>`，因此能沿改名回溯，而不是拿今天的路径去昨天的树里找。未保存的缓冲区通过 `git blame --contents` 标注，所以文档一变脏标注也不会错位；提交、amend 或 checkout 之后会重新读取。移动/复制检测（`-M`/`-C`）、blame 侧的空白字符选项，以及从 gutter 标注任意指定版本仍是差距。 |
 | 多根仓库、嵌套仓库与 Worktree | 部分实现 | 已有仓库发现、按仓库串行写操作、linked worktree 元数据监视和外部普通文件变化刷新。刷新请求按 root/generation 精确保留，重新发现相同仓库时沿用对象及 mutation lock；跨仓库事务回滚仍在规划中。 |
 | JetBrains 原生 UI、资源与像素级复刻 | 明确不做 | JB Git 是 clean-room VS Code 扩展，Panel 与编辑器外框由 VS Code 渲染，不复制 JetBrains 源码、控件、UI 资源或商标。 |
 
@@ -89,7 +89,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - 查看仓库历史、文件历史和提交详情。
 - 本地分支、远端分支和标签使用不同图标区分，选中提交的全部引用会显示在右侧详情中。
 - 双击提交或使用 `Compare with Local` 打开的差异为只读编辑器，关闭时不会提示保存。
-- 对当前文件执行输出式 Blame；当前不提供编辑器 gutter 行级标注。
+- 对当前文件执行输出式 Blame，或用 `JB Git: Annotate with Git Blame` 在编辑器里逐行标注，并从悬停跳转到提交或上一版本。
 - Log 与提交选择支持 Git 的完整 SHA-1（40 位）和 SHA-256（64 位）对象 ID。
 - Merge、Rebase、Cherry-pick、Revert 和 Reset。
 - Continue、Abort 或 Skip 正在进行的 Git 操作。
@@ -214,7 +214,7 @@ npm run package
 
 当前版本已经按 IntelliJ IDEA 的主要工作流组织为底部 Git 工具窗口、Branches 弹窗和 Git Operations Popup；VS Code 自身的 Panel 标题栏、菜单与原生控件仍由 VS Code 渲染。上面的能力对照表是“已实现”与“IDEA 完整对等”之间的边界，不应把命令存在等同于完整 parity。
 
-接下来的主要差距是 Interactive Rebase 序列编辑、完整 Base-aware 三方 Merge、编辑器 gutter Blame、同文件多 Hunk 的 Changelist ownership、跨仓库事务回滚、持久化大历史索引，以及 SSH、WSL、Dev Container、远程 Extension Host、无障碍和不同 Git 版本的系统性验证。
+接下来的主要差距是完整 Base-aware 三方 Merge、Blame 的移动/复制检测、同文件多 Hunk 的 Changelist ownership、跨仓库事务回滚、持久化大历史索引，以及 SSH、WSL、Dev Container、远程 Extension Host、无障碍和不同 Git 版本的系统性验证。
 
 发布不再属于待办：跨平台测试、版本递增、VSIX、标签和 GitHub Release 流水线已经实现，Marketplace 上传只取决于 `VSCE_PAT`。项目目前不宣称提供 VSIX/代码的密码学签名，也没有实现 Git Commit 的 GPG 签名；这两类“签名”与现有 Sign-off 不是同一能力。
 

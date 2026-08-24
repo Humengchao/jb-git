@@ -1,7 +1,8 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GitCommandError, GitRunner, isGitAbort, redactGitText } from "./git/runner";
-import { DiffContentProvider, openChangeDiff } from "./views/diffProvider";
+import { DiffContentProvider, diffSide, openChangeDiff } from "./views/diffProvider";
+import { BlameAnnotationController } from "./views/blameDecorations";
 import {
   ChangeNode, ChangelistChangeNode, ChangelistNode, HunkNode,
   RemoteNode, ShelfNode, StashNode, SubmoduleNode, WorktreeNode,
@@ -24,6 +25,12 @@ function workspacePaths(): string[] {
 
 function configurationGitPath(): string {
   return vscode.workspace.getConfiguration("jbGit").get<string>("gitPath", "git");
+}
+
+/** What a blame hover link and a palette invocation both reduce to. */
+export interface BlameLineArgument {
+  uri: string;
+  line: number;
 }
 
 export interface RefreshGenerationBatch {
@@ -160,6 +167,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const diffProvider = new DiffContentProvider();
   const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore, diffProvider, context.workspaceState);
   const mergeEditor = new MergeConflictEditor(manager, context.workspaceState);
+  const blameAnnotations = new BlameAnnotationController(manager, async (target, content) => diffSide(
+    diffProvider,
+    target.repositoryRoot,
+    `${target.relativePath} @ ${target.revision?.slice(0, 8) ?? "working tree"}`,
+    target.relativePath,
+    content,
+  ));
   const traceRegistration = runner.onDidRun((event) => gitToolWindow.appendTrace(event));
   const toolWindowRegistration = vscode.window.registerWebviewViewProvider(
     IntelliJGitToolWindowProvider.viewType,
@@ -390,10 +404,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
+  /** The document a blame command should act on: the one passed by a menu, else the active one. */
+  const blameDocument = async (resource?: vscode.Uri): Promise<vscode.TextDocument | undefined> => {
+    const active = vscode.window.activeTextEditor?.document;
+    if (!(resource instanceof vscode.Uri)) return active;
+    if (active?.uri.toString() === resource.toString()) return active;
+    return vscode.workspace.openTextDocument(resource);
+  };
+  /** A hover link carries its own line; from the palette the caret is the line. */
+  const blameLocation = (argument?: BlameLineArgument): { uri: vscode.Uri; line: number } | undefined => {
+    if (argument && typeof argument.uri === "string" && Number.isInteger(argument.line)) {
+      return { uri: vscode.Uri.parse(argument.uri), line: argument.line };
+    }
+    const editor = vscode.window.activeTextEditor;
+    return editor ? { uri: editor.document.uri, line: editor.selection.active.line } : undefined;
+  };
+  const annotatedLine = (argument?: BlameLineArgument) => {
+    const location = blameLocation(argument);
+    if (!location) return undefined;
+    const entry = blameAnnotations.entryAt(location.uri, location.line);
+    const target = blameAnnotations.targetFor(location.uri);
+    if (!entry || !target || entry.uncommitted) return undefined;
+    return { entry, target };
+  };
+  const requireAnnotatedLine = async (argument?: BlameLineArgument) => {
+    const found = annotatedLine(argument);
+    if (!found) {
+      await vscode.window.showInformationMessage(
+        "Run 'JB Git: Annotate with Git Blame' on the file and put the caret on a committed line first.",
+      );
+    }
+    return found;
+  };
+
   context.subscriptions.push(
     manager,
     changelistStore,
     shelfStore,
+    blameAnnotations,
     gitToolWindow,
     mergeEditor,
     traceRegistration,
@@ -417,6 +465,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel,
     manager.onDidChange(() => {
       updateStatusBar();
+      // A commit, an amend or a checkout changes who each line belongs to.
+      blameAnnotations.refresh();
       rebuildRepositoryWatchers();
       for (const snapshot of manager.all) {
         if (snapshot.status) {
@@ -562,6 +612,41 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const entries = await runWithNotification(`Blaming ${relativePath}`, () => manager.blame(snapshot.repository.info.rootPath, relativePath));
       if (!entries) return;
       showOutput(`Blame · ${relativePath}`, entries.map((entry) => `${String(entry.finalLine).padStart(5)} ${entry.hash.slice(0, 12)} ${entry.author} ${entry.authorTime.slice(0, 10)}  ${entry.content}`).join("\n"));
+    }),
+    vscode.commands.registerCommand("jbGit.toggleBlameAnnotations", async (resource?: vscode.Uri) => {
+      const document = await blameDocument(resource);
+      if (!document) {
+        await vscode.window.showInformationMessage("Open or select a file before annotating it.");
+        return;
+      }
+      if (vscode.window.activeTextEditor?.document !== document) await vscode.window.showTextDocument(document, { preview: false });
+      await blameAnnotations.toggle(document);
+    }),
+    vscode.commands.registerCommand("jbGit.annotatePreviousRevision", async (argument?: BlameLineArgument) => {
+      const location = blameLocation(argument);
+      if (!location) return;
+      await blameAnnotations.annotatePrevious(location.uri, location.line);
+    }),
+    vscode.commands.registerCommand("jbGit.copyRevisionNumber", async (argument?: BlameLineArgument) => {
+      const found = await requireAnnotatedLine(argument);
+      if (!found) return;
+      await vscode.env.clipboard.writeText(found.entry.hash);
+      await vscode.window.showInformationMessage(`Copied ${found.entry.hash} to the clipboard.`);
+    }),
+    vscode.commands.registerCommand("jbGit.blameShowCommit", async (argument?: BlameLineArgument) => {
+      const found = await requireAnnotatedLine(argument);
+      if (!found) return;
+      const short = found.entry.hash.slice(0, 8);
+      if (await gitToolWindow.revealCommit(found.target.repositoryRoot, found.entry.hash)) return;
+      // The Log holds a window of history. Rather than quietly selecting some
+      // other commit, show the one that was asked for as its own patch.
+      const repository = manager.snapshot(found.target.repositoryRoot)?.repository;
+      if (!repository) return;
+      const patch = await runWithNotification(`Reading commit ${short}`, () => repository.showCommit(found.entry.hash));
+      if (patch === undefined) return;
+      const uri = diffProvider.registerFile(found.target.repositoryRoot, `Commit ${short}`, `${short}.diff`, patch);
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: true });
+      await vscode.window.showInformationMessage(`Commit ${short} is older than the history the Log has loaded, so it opened as a patch.`);
     }),
     vscode.commands.registerCommand("jbGit.initializeRepository", async () => {
       if (!(await requireTrustedWorkspace())) return;

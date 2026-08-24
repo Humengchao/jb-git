@@ -6,5 +6,11 @@
   "configuration.autoRefresh": "Refresh repository state when files or Git metadata change.",
   "configuration.refreshDebounceMs": "Debounce interval for repository refreshes.",
   "configuration.confirmDiscard": "Ask for confirmation before discarding changes.",
-  "configuration.protectedBranches": "Branch-name patterns where force push is unavailable in Push Preview. Supports * and ?."
+  "configuration.protectedBranches": "Branch-name patterns where force push is unavailable in Push Preview. Supports * and ?.",
+  "configuration.blame.showAuthor": "Show the author in the Git Blame annotation column.",
+  "configuration.blame.showDate": "Show the date in the Git Blame annotation column.",
+  "configuration.blame.showRevision": "Show the abbreviated object ID in the Git Blame annotation column.",
+  "configuration.blame.dateFormat": "Whether the Git Blame annotation shows the commit's own date or how long ago it was.",
+  "configuration.blame.maxAuthorWidth": "Characters of the author name shown before the Git Blame annotation truncates it.",
+  "configuration.blame.heatMap": "Tint each Git Blame annotation by how recent its commit is within the file."
 }

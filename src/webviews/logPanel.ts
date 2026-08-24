@@ -144,6 +144,33 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     await this.open(root, undefined, "changes");
   }
 
+  /**
+   * Opens the Log with `hash` selected.
+   *
+   * Reports whether the commit was actually reached: the Log holds a window of
+   * history, so a commit older than that window cannot be selected, and
+   * `update()` falls back to the newest one. The caller needs to know that it
+   * is now looking at a different commit rather than the one it asked for.
+   */
+  public async revealCommit(root: string, hash: string): Promise<boolean> {
+    if (!this.manager.snapshot(root)) return false;
+    if (root !== this.selectedRoot) {
+      this.logOptions = { ...this.logOptions, author: undefined, since: undefined };
+      this.logLimit = 300;
+      this.logCache = undefined;
+    }
+    this.selectedRoot = root;
+    this.requestedTab = "log";
+    this.pendingOpenTab = this.view ? undefined : "log";
+    this.filePath = undefined;
+    this.selectedRef = undefined;
+    this.selectedHash = hash;
+    await vscode.commands.executeCommand(`${IntelliJGitToolWindowProvider.viewType}.focus`);
+    await this.view?.webview.postMessage({ type: "activateTab", tab: "log" });
+    await this.update();
+    return this.currentCommits.some((commit) => commit.hash === hash);
+  }
+
   public appendTrace(event: GitTraceEvent): void {
     const trace = { ...event, background: isBackgroundTrace(event) };
     this.traces.push(trace);

@@ -112,8 +112,8 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).diffHunks(pathSpec, staged);
   }
 
-  public async blame(rootPath: string, pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
-    return this.requireRepository(rootPath).blame(pathSpec, revision);
+  public async blame(rootPath: string, pathSpec: string, revision?: string, contents?: string | Buffer): Promise<GitBlameEntry[]> {
+    return this.requireRepository(rootPath).blame(pathSpec, revision, contents);
   }
 
   public async commitFiles(rootPath: string, hash: string): Promise<GitCommitFile[]> {

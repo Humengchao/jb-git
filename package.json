@@ -97,6 +97,22 @@
         "title": "JB Git: Blame Active File"
       },
       {
+        "command": "jbGit.toggleBlameAnnotations",
+        "title": "JB Git: Annotate with Git Blame"
+      },
+      {
+        "command": "jbGit.annotatePreviousRevision",
+        "title": "JB Git: Annotate Previous Revision"
+      },
+      {
+        "command": "jbGit.copyRevisionNumber",
+        "title": "JB Git: Copy Revision Number"
+      },
+      {
+        "command": "jbGit.blameShowCommit",
+        "title": "JB Git: Show Commit for Annotated Line"
+      },
+      {
         "command": "jbGit.commit",
         "title": "JB Git: Commit Staged Changes"
       },
@@ -366,6 +382,11 @@
     "menus": {
       "editor/title": [
         {
+          "command": "jbGit.toggleBlameAnnotations",
+          "when": "resourceScheme == file && jbGit.hasRepository",
+          "group": "navigation@79"
+        },
+        {
           "command": "jbGit.blame",
           "when": "resourceScheme == file && jbGit.hasRepository",
           "group": "navigation@80"
@@ -383,9 +404,14 @@
           "group": "jbGit@10"
         },
         {
-          "command": "jbGit.blame",
+          "command": "jbGit.toggleBlameAnnotations",
           "when": "resourceScheme == file && jbGit.hasRepository",
           "group": "jbGit@11"
+        },
+        {
+          "command": "jbGit.blame",
+          "when": "resourceScheme == file && jbGit.hasRepository",
+          "group": "jbGit@12"
         }
       ],
       "explorer/context": [
@@ -464,6 +490,42 @@
             "release/*"
           ],
           "description": "%configuration.protectedBranches%"
+        },
+        "jbGit.blame.showAuthor": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.blame.showAuthor%"
+        },
+        "jbGit.blame.showDate": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.blame.showDate%"
+        },
+        "jbGit.blame.showRevision": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.blame.showRevision%"
+        },
+        "jbGit.blame.dateFormat": {
+          "type": "string",
+          "enum": [
+            "short",
+            "relative"
+          ],
+          "default": "short",
+          "description": "%configuration.blame.dateFormat%"
+        },
+        "jbGit.blame.maxAuthorWidth": {
+          "type": "number",
+          "default": 20,
+          "minimum": 4,
+          "maximum": 80,
+          "description": "%configuration.blame.maxAuthorWidth%"
+        },
+        "jbGit.blame.heatMap": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.blame.heatMap%"
         }
       }
     }

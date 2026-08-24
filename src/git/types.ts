@@ -152,7 +152,19 @@ export interface GitBlameEntry {
   originalLine: number;
   finalLine: number;
   author: string;
+  authorMail: string;
+  /** ISO 8601 in UTC. `authorTimestamp`/`authorTimezone` keep the commit's own offset. */
   authorTime: string;
+  authorTimestamp: number;
+  authorTimezone: string;
   summary: string;
   content: string;
+  filename: string;
+  /** The commit and path this line came from, which is where annotating the previous revision goes. */
+  previousHash?: string;
+  previousPath?: string;
+  /** Git stopped walking here, so there is no earlier revision to annotate. */
+  boundary: boolean;
+  /** A line that is in no commit yet: unsaved, unstaged or uncommitted work. */
+  uncommitted: boolean;
 }

@@ -4,6 +4,7 @@ import { access, lstat, mkdir, mkdtemp, open, opendir, readFile, readlink, realp
 import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
+import { parsePorcelainBlame } from "./blame";
 import { parseUnifiedDiff, patchForHunk } from "./patch";
 import { buildRebaseTodo, posixPath, shellQuote, type RebaseStep } from "../interactiveRebase";
 import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
@@ -276,42 +277,27 @@ export class GitRepository {
     }
   }
 
-  public async blame(pathSpec: string, revision?: string): Promise<GitBlameEntry[]> {
+  /**
+   * Annotates a file, optionally at `revision`, and optionally against
+   * `contents` instead of what is on disk so an unsaved editor buffer stays
+   * aligned with its own lines.
+   */
+  public async blame(pathSpec: string, revision?: string, contents?: string | Buffer): Promise<GitBlameEntry[]> {
+    // `git blame` hands its leftover arguments to the revision parser, so
+    // `--end-of-options` does not keep an option-like revision out of blame's
+    // own option parser: `-L1,1` would run as a flag and silently return one
+    // line as if that were the whole file. Pin the input to a commit hash.
+    const commit = revision ? await this.resolveCommit(revision) : undefined;
     const output = await this.runner.text([
       "--literal-pathspecs",
       "blame",
-      "--line-porcelain",
-      ...(revision ? [revision] : []),
+      "--porcelain",
+      ...(contents !== undefined ? ["--contents", "-"] : []),
+      ...(commit ? [commit] : []),
       "--",
       pathSpec,
-    ], { cwd: this.info.rootPath });
-    const entries: GitBlameEntry[] = [];
-    let current: GitBlameEntry | undefined;
-    for (const line of output.replace(/\r\n/g, "\n").split("\n")) {
-      const header = /^([0-9a-f]{7,64}) (\d+) (\d+)(?: \d+)?$/.exec(line);
-      if (header) {
-        current = {
-          hash: header[1],
-          originalLine: Number(header[2]),
-          finalLine: Number(header[3]),
-          author: "",
-          authorTime: "",
-          summary: "",
-          content: "",
-        };
-        continue;
-      }
-      if (!current) continue;
-      if (line.startsWith("author ")) current.author = line.slice("author ".length);
-      else if (line.startsWith("author-time ")) current.authorTime = new Date(Number(line.slice("author-time ".length)) * 1000).toISOString();
-      else if (line.startsWith("summary ")) current.summary = line.slice("summary ".length);
-      else if (line.startsWith("\t")) {
-        current.content = line.slice(1);
-        entries.push(current);
-        current = undefined;
-      }
-    }
-    return entries;
+    ], { cwd: this.info.rootPath, ...(contents !== undefined ? { input: contents } : {}) });
+    return parsePorcelainBlame(output);
   }
 
   /** Returns raw patch bytes: shelf content may be in any encoding, and a UTF-8 round-trip would corrupt it. */
