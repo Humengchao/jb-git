@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.17
+
+- feat: give the merge editor an undo it can trust, and mark deletions
+
 ## 0.1.16
 
 - fix: stop a binary diff from pinning a progress notification open
