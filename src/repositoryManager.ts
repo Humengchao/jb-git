@@ -3,7 +3,7 @@ import { discoverRepositories, discoverRepository, GitRepository } from "./git/r
 import * as path from "node:path";
 import { GitRunner, isGitAbort } from "./git/runner";
 import { RebaseStep } from "./interactiveRebase";
-import { Diff3Labels } from "./mergeAnalysis";
+import { Diff3Labels, MergeBlock } from "./mergeAnalysis";
 import { GitBlameEntry, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
@@ -166,6 +166,11 @@ export class RepositoryManager implements vscode.Disposable {
 
   public async conflictVersions(rootPath: string, pathSpec: string): Promise<GitConflictVersions> {
     return this.requireRepository(rootPath).conflictVersions(pathSpec);
+  }
+
+  /** Replays the merge in `diff3` so each conflict carries the base it started from. Read-only: it works on copies of the stages. */
+  public async conflictAnalysis(rootPath: string, pathSpec: string): Promise<MergeBlock[]> {
+    return this.requireRepository(rootPath).conflictAnalysis(pathSpec);
   }
 
   public async applyConflictResult(rootPath: string, pathSpec: string, content: string, deleted = false): Promise<void> {

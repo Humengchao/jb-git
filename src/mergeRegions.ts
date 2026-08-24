@@ -19,6 +19,14 @@ export interface MergeRegion {
   /** The competing versions, kept so a side can still be applied later. */
   readonly ours: string;
   readonly theirs: string;
+  /**
+   * What both sides started from, when it is known.
+   *
+   * Git's working-tree conflict carries only the two sides, so this is filled
+   * in from a separate `diff3` replay and stays undefined whenever that replay
+   * could not be trusted to describe the same conflicts.
+   */
+  readonly base?: string;
   /** How the region reached its current text, or undefined while it is unresolved. */
   readonly resolution?: "ours" | "theirs" | "both" | "manual" | "ignored";
 }
@@ -73,7 +81,13 @@ export function buildModel(markerText: string): MergeModel {
     const parsed = readConflict(markerText, start);
     if (!parsed) break;
     text += markerText.slice(cursor, start.index);
-    regions.push({ start: text.length, end: text.length + parsed.ours.length, ours: parsed.ours, theirs: parsed.theirs });
+    regions.push({
+      start: text.length,
+      end: text.length + parsed.ours.length,
+      ours: parsed.ours,
+      theirs: parsed.theirs,
+      ...(parsed.base === undefined ? {} : { base: parsed.base }),
+    });
     text += parsed.ours;
     cursor = parsed.end;
     START_MARKER.lastIndex = parsed.end;
@@ -82,19 +96,21 @@ export function buildModel(markerText: string): MergeModel {
   return { text, regions };
 }
 
-/** Reads the `ours`/`theirs` sections that follow a `<<<<<<<` line. */
-function readConflict(text: string, start: RegExpExecArray): { ours: string; theirs: string; end: number } | undefined {
+/** Reads the `ours`/`theirs` sections that follow a `<<<<<<<` line, and the base when the conflict carries one. */
+function readConflict(text: string, start: RegExpExecArray): { ours: string; theirs: string; base?: string; end: number } | undefined {
   const from = start.index + start[0].length;
-  const base = matchAt(/^\|{7,}[^\r\n]*(?:\r?\n|$)/gm, text, from);
+  const baseMarker = matchAt(/^\|{7,}[^\r\n]*(?:\r?\n|$)/gm, text, from);
   const divider = matchAt(/^={7,}(?:\r?\n|$)/gm, text, from);
   if (!divider) return undefined;
   const end = matchAt(/^>{7,}[^\r\n]*(?:\r?\n|$)/gm, text, divider.index + divider[0].length);
   if (!end) return undefined;
   // A diff3-style conflict puts the base between ours and the divider.
-  const oursEnd = base && base.index < divider.index ? base.index : divider.index;
+  const hasBase = baseMarker !== null && baseMarker.index < divider.index;
+  const oursEnd = hasBase ? baseMarker.index : divider.index;
   return {
     ours: text.slice(from, oursEnd),
     theirs: text.slice(divider.index + divider[0].length, end.index),
+    ...(hasBase ? { base: text.slice(baseMarker.index + baseMarker[0].length, divider.index) } : {}),
     end: end.index + end[0].length,
   };
 }
@@ -168,8 +184,17 @@ export function resetRegion(model: MergeModel, index: number): MergeModel {
   const shift = region.ours.length - (region.end - region.start);
   const regions = model.regions.map((other, position) => {
     // Rebuilt without a resolution rather than spread, so the region is
-    // indistinguishable from one buildModel just produced.
-    if (position === index) return { start: other.start, end: other.start + region.ours.length, ours: other.ours, theirs: other.theirs };
+    // indistinguishable from one buildModel just produced. The base is not a
+    // decision, so it survives.
+    if (position === index) {
+      return {
+        start: other.start,
+        end: other.start + region.ours.length,
+        ours: other.ours,
+        theirs: other.theirs,
+        ...(other.base === undefined ? {} : { base: other.base }),
+      };
+    }
     if (other.start >= region.end) return { ...other, start: other.start + shift, end: other.end + shift };
     return other;
   });

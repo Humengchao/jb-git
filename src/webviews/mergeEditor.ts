@@ -6,6 +6,8 @@ import { GitConflictVersions } from "../git/types";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { webviewDocument } from "./html";
 import { isMergeEditorMessage } from "./mergeEditorProtocol";
+import { basesForConflicts } from "../mergeAnalysis";
+import { buildModel } from "../mergeRegions";
 
 // The webview sandbox has no allow-modals, so window.confirm() silently
 // returns false there; confirmations must round-trip through the host.
@@ -79,6 +81,29 @@ export class MergeConflictEditor implements vscode.Disposable {
     }
   }
 
+  /**
+   * The base text of each conflict in `result`, in the order they appear.
+   *
+   * Git's working-tree conflict carries only the two sides, so the base comes
+   * from replaying the merge in `diff3` on copies of the three stages. That
+   * replay is a separate computation from the merge Git already performed, so
+   * `basesForConflicts` hands back nothing unless it framed the same conflicts;
+   * undefined here means the editor simply offers no base for this file, which
+   * is the only safe answer when the alternative is labelling a block with
+   * another block's history.
+   */
+  private async conflictBases(rootPath: string, pathSpec: string, result: string): Promise<string[] | undefined> {
+    const { regions } = buildModel(result);
+    if (!regions.length) return undefined;
+    try {
+      return basesForConflicts(regions, await this.manager.conflictAnalysis(rootPath, pathSpec));
+    } catch {
+      // A binary conflict, or one whose own content holds marker lines, cannot
+      // be analysed line by line. That is not a reason to refuse the editor.
+      return undefined;
+    }
+  }
+
   private async openPanel(key: string, rootPath: string, pathSpec: string): Promise<boolean> {
     const versions = await this.manager.conflictVersions(rootPath, pathSpec);
     if (versions.binary) return false;
@@ -93,6 +118,7 @@ export class MergeConflictEditor implements vscode.Disposable {
       ? { ...versions, result: restoredDraft.result, resultExists: !restoredDraft.deleted }
       : versions;
 
+    const bases = await this.conflictBases(rootPath, pathSpec, displayedVersions.result);
     const snapshot = this.manager.snapshot(rootPath);
     const sideLabels = await conflictSideLabels(snapshot);
     const labels: MergeEditorLabels = {
@@ -133,6 +159,7 @@ export class MergeConflictEditor implements vscode.Disposable {
           versions: displayedVersions,
           originalResult: versions.result,
           originalResultExists: versions.resultExists,
+          bases,
           labels,
           title,
           restoredDraft: Boolean(restoredDraft),
@@ -394,6 +421,20 @@ const mergeStyles = String.raw`
   .band-empty { position: relative; }
   .band-empty::after { content: ''; position: absolute; left: -8px; top: -1px; width: 56px; border-top: 2px solid color-mix(in srgb, var(--state) 75%, transparent); }
   .band-empty.is-current::after { border-top-width: 3px; border-top-color: var(--state); }
+  /* IDEA answers "what did this change start from?" with a frame showing the
+     previous contents over the editor. The same idea per conflict block: the
+     base text of the change you are on, floated above it when there is room
+     and below it when there is not. */
+  .base-frame { position: absolute; left: 0; right: 0; z-index: 3; max-height: 45%; display: flex; flex-direction: column; overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--merge-edited) 55%, transparent); border-radius: 3px;
+    background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
+  .base-frame-title { flex: 0 0 auto; padding: 1px 9px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--vscode-descriptionForeground); background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
+  .base-frame-text { margin: 0; padding: 5px 10px; overflow: auto; white-space: pre; tab-size: var(--vscode-editor-tab-size, 4);
+    color: var(--vscode-editor-foreground); font: var(--vscode-editor-font-size, 13px) / var(--vscode-editor-line-height, 20px) var(--vscode-editor-font-family, monospace); }
+  .base-frame-text.empty { color: var(--vscode-descriptionForeground); font-style: italic; }
+  button[aria-pressed="true"] { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
   .footer-group { display: flex; align-items: center; gap: 8px; }
   .hint { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 850px) { .non-conflicting, .hint { display: none; } .toolbar button { padding-left: 7px; padding-right: 7px; } }
@@ -408,6 +449,8 @@ const mergeScript = String.raw`
     'Previous change': '上一个更改', 'Next change': '下一个更改',
     '✓ Non-conflicting changes are already applied': '✓ 非冲突更改已自动应用',
     '← Left': '← 左侧', 'Both': '两者都保留', 'Right →': '右侧 →', 'Reset': '重置',
+    'Base': '基线', 'Show what this change started from': '显示此更改的原始内容',
+    '(this block is not in the base)': '（基线中没有这一块）',
     'Loading conflict…': '正在加载冲突…', 'Current branch': '当前分支', 'Result': '结果',
     'Incoming changes': '传入更改', 'Accept Left': '接受左侧', 'Accept Right': '接受右侧',
     'Use the arrows between the panes to apply a side, × to ignore it, or edit the result directly.': '使用面板之间的箭头应用某一侧，× 忽略该更改，也可以直接编辑中间结果。',
@@ -433,6 +476,8 @@ const mergeScript = String.raw`
         '<button id="take-both" class="secondary" title="Keep both sides of the current conflict">Both</button>',
         '<button id="take-right" class="secondary" title="Use the current conflict from the right pane">Right →</button>',
         '<button id="reset" class="secondary" title="Restore the original conflicted result" disabled>Reset</button>',
+        '<span class="toolbar-separator"></span>',
+        '<button id="show-base" class="secondary" title="Show what this change started from" aria-pressed="false" disabled>Base</button>',
         '<span class="toolbar-spacer"></span>',
         '<span id="counter" class="counter">Loading conflict…</span>',
       '</div>',
@@ -444,7 +489,7 @@ const mergeScript = String.raw`
         '<div id="strip-left" class="splitter" role="separator" aria-orientation="vertical" tabindex="0"><svg aria-hidden="true"></svg><div class="strip-buttons"></div></div>',
         '<section id="result-pane" class="pane result">',
           '<div id="result-title" class="pane-title">Result</div>',
-          '<div class="code-shell"><pre id="result-lines" class="line-numbers" aria-hidden="true"></pre><div class="editor-stack"><pre id="result-highlight" class="syntax-layer" aria-hidden="true"></pre><textarea id="result" spellcheck="false" aria-label="Editable merge result"></textarea></div><div id="ruler" class="ruler" title="Changes in this file"></div></div>',
+          '<div class="code-shell"><pre id="result-lines" class="line-numbers" aria-hidden="true"></pre><div class="editor-stack"><pre id="result-highlight" class="syntax-layer" aria-hidden="true"></pre><textarea id="result" spellcheck="false" aria-label="Editable merge result"></textarea><div id="base-frame" class="base-frame" hidden><div class="base-frame-title">Base</div><pre id="base-frame-text" class="base-frame-text"></pre></div></div><div id="ruler" class="ruler" title="Changes in this file"></div></div>',
         '</section>',
         '<div id="strip-right" class="splitter" role="separator" aria-orientation="vertical" tabindex="0"><svg aria-hidden="true"></svg><div class="strip-buttons"></div></div>',
         '<section id="right-pane" class="pane">',
@@ -478,6 +523,9 @@ const mergeScript = String.raw`
   const apply = document.getElementById('apply');
   const conflictButtons = ['previous', 'next', 'take-left', 'take-both', 'take-right'].map((id) => document.getElementById(id));
   const wholeFileButtons = ['accept-left', 'accept-right', 'reset'].map((id) => document.getElementById(id));
+  const showBaseButton = document.getElementById('show-base');
+  const baseFrame = document.getElementById('base-frame');
+  const baseFrameText = document.getElementById('base-frame-text');
   const editors = [left, result, right];
   const gutters = [document.getElementById('left-lines'), document.getElementById('result-lines'), document.getElementById('right-lines')];
   const highlights = [document.getElementById('left-highlight'), document.getElementById('result-highlight'), document.getElementById('right-highlight')];
@@ -497,6 +545,7 @@ const mergeScript = String.raw`
   let initialResultDeleted = false;
   let resultDeleted = false;
   let currentConflict = 0;
+  let showBase = false;
   let applying = false;
   let loaded = false;
   let synchronizing = false;
@@ -654,6 +703,62 @@ const mergeScript = String.raw`
         action.style.top = String(Math.round(y)) + 'px';
       }
     }
+    renderBaseFrame(lineHeights[1], yOf(1, geometry[currentConflict] ? geometry[currentConflict].res[0] : 0));
+  }
+
+  /**
+   * Puts the host's base texts onto the regions they belong to.
+   *
+   * The host already refused to send anything unless its diff3 replay framed
+   * the same conflicts, and the count is checked again here so a protocol that
+   * ever drifts leaves the editor with no base rather than a shifted one.
+   */
+  function withBases(built, bases) {
+    if (!Array.isArray(bases) || bases.length !== built.regions.length) return built;
+    return {
+      text: built.text,
+      regions: built.regions.map((region, index) => (
+        typeof bases[index] === 'string' ? Object.assign({}, region, { base: bases[index] }) : region
+      )),
+    };
+  }
+
+  /** True when the change you are on knows what it started from. */
+  function currentBase() {
+    const region = model.regions[currentConflict];
+    return region && typeof region.base === 'string' ? region.base : undefined;
+  }
+
+  /**
+   * Draws IDEA's "previous contents" frame for the change you are on.
+   *
+   * The frame sits above the change when there is room for it and below it when
+   * there is not, so it never covers the lines it is explaining. It is hidden
+   * outright when the change scrolls away, rather than parked at an edge where
+   * it would look like it belonged to whatever is there instead.
+   */
+  function renderBaseFrame(lineHeight, changeTop) {
+    const base = currentBase();
+    if (!showBase || base === undefined) { baseFrame.hidden = true; return; }
+    const stack = result.parentElement;
+    const available = stack.clientHeight;
+    if (changeTop < -lineHeight || changeTop > available) { baseFrame.hidden = true; return; }
+    const empty = base === '';
+    baseFrameText.className = 'base-frame-text' + (empty ? ' empty' : '');
+    baseFrameText.textContent = empty ? mt('(this block is not in the base)') : base.replace(/\r?\n$/, '');
+    baseFrame.hidden = false;
+    // Measured only once the text is in place, because the frame's height is
+    // what decides whether it fits above the change.
+    const height = baseFrame.offsetHeight;
+    const above = changeTop - height - 3;
+    const below = Math.min(changeTop + lineHeight + 3, Math.max(0, available - height));
+    baseFrame.style.top = String(Math.round(above >= 0 ? above : below)) + 'px';
+  }
+
+  function setShowBase(next) {
+    showBase = next;
+    showBaseButton.setAttribute('aria-pressed', next ? 'true' : 'false');
+    scheduleOverlays();
   }
 
   /** One tick per change, placed by its share of the file, like IDEA's strip. */
@@ -880,6 +985,9 @@ const mergeScript = String.raw`
     const remaining = MergeRegions.unresolved(model.regions);
     conflictButtons.forEach((button) => { button.disabled = total === 0 || applying; });
     wholeFileButtons.forEach((button) => { button.disabled = !loaded || applying; });
+    // Offered only where there is a base to show: a conflict whose replay could
+    // not be paired has no previous contents this editor is willing to claim.
+    showBaseButton.disabled = currentBase() === undefined || applying;
     apply.disabled = !loaded || remaining !== 0 || applying;
     counter.className = 'counter' + (remaining === 0 ? ' resolved' : '');
     counter.textContent = remaining === 0
@@ -1066,6 +1174,7 @@ const mergeScript = String.raw`
     currentConflict = (currentConflict + 1) % model.regions.length;
     updateControls('jump');
   });
+  showBaseButton.addEventListener('click', () => setShowBase(!showBase));
   document.getElementById('take-left').addEventListener('click', () => resolveAs(currentConflict, 'ours'));
   document.getElementById('take-both').addEventListener('click', () => resolveAs(currentConflict, 'both'));
   document.getElementById('take-right').addEventListener('click', () => resolveAs(currentConflict, 'theirs'));
@@ -1210,7 +1319,7 @@ const mergeScript = String.raw`
       left.value = message.versions.ours;
       right.value = message.versions.theirs;
       // The displayed result drops Git's markers; each conflict lives on as a range.
-      model = MergeRegions.buildModel(message.versions.result);
+      model = withBases(MergeRegions.buildModel(message.versions.result), message.bases);
       setResultText(model.text);
       initialResult = message.originalResult;
       initialSerialized = MergeRegions.toMarkerText(MergeRegions.buildModel(message.originalResult), markerLabels);

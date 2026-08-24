@@ -216,6 +216,36 @@ export function resolveSimpleConflicts(blocks: readonly MergeBlock[], labels: Di
   return { text: parts.join("\n"), resolved, remaining };
 }
 
+/** The part of a merge region that identifies which conflict it is. */
+export interface ConflictSides {
+  readonly ours: string;
+  readonly theirs: string;
+}
+
+/**
+ * Lines each replayed conflict's base up with the conflicts in the file the
+ * user is actually editing.
+ *
+ * The working tree was produced by Git's own merge, while the base comes from a
+ * separate `merge-file --diff3` replay, and the two do not have to frame their
+ * conflicts identically: Git's merge strategy can match lines that the plain
+ * three-way replay does not. Showing a block the base of a *different* block
+ * would be worse than showing none, so the pairing is taken only when the
+ * replay produced the same conflicts, in the same order, with the same two
+ * sides. Anything else returns undefined and the caller shows no base.
+ */
+export function basesForConflicts(
+  regions: readonly ConflictSides[],
+  blocks: readonly MergeBlock[],
+): string[] | undefined {
+  const conflicts = blocks.filter((block): block is Extract<MergeBlock, { kind: "conflict" }> => block.kind === "conflict");
+  if (conflicts.length !== regions.length) return undefined;
+  for (const [index, region] of regions.entries()) {
+    if (conflicts[index].ours !== region.ours || conflicts[index].theirs !== region.theirs) return undefined;
+  }
+  return conflicts.map((block) => block.base);
+}
+
 /** Counts each conflict by what it turned out to be, for a summary the user can act on. */
 export function summarize(blocks: readonly MergeBlock[]): Record<ConflictKind, number> {
   const counts: Record<ConflictKind, number> = {
