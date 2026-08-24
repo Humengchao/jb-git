@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.16
+
+- fix: stop a binary diff from pinning a progress notification open
+
 ## 0.1.15
 
 - perf: paint only the visible slice, and keep the acted-on change in view
