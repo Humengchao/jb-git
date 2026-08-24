@@ -1168,12 +1168,20 @@ const logStyles = String.raw`
   .hunk-toggle:disabled { visibility: hidden; }
   .change-status { width: 18px; font-weight: 700; text-align: center; }
   .status-M { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
-  .status-A, .status-q { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
+  .status-A { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-gitDecoration-untrackedResourceForeground)); }
+  .status-q { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
+  .status-R, .status-C { color: var(--vscode-gitDecoration-renamedResourceForeground, var(--vscode-gitDecoration-modifiedResourceForeground)); }
   .status-D { color: var(--vscode-gitDecoration-deletedResourceForeground); }
   .status-R { color: var(--vscode-gitDecoration-renamedResourceForeground); }
   .status-bang { color: var(--vscode-gitDecoration-conflictingResourceForeground); }
   .change-file { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
+  /* The file name inherits its row's status colour, the way IDEA colours the
+     names themselves; directory and stage marks keep their own muted colour. */
   .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .render-error { max-width: 560px; margin: 40px auto; padding: 0 16px; display: grid; gap: 10px; }
+  .render-error-title { font-weight: 600; font-size: 14px; }
+  .render-error-detail { margin: 0; padding: 8px 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-errorForeground); background: var(--vscode-input-background); border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
+  .render-error-actions { display: flex; gap: 8px; }
   .directory, .stage-mark { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; }
   .stage-mark { margin-left: auto; padding: 0 4px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
   .worktree-mark { border-style: dashed; }
@@ -1195,7 +1203,9 @@ const logStyles = String.raw`
   .hunk-empty { padding: 8px; color: var(--vscode-descriptionForeground); }
   .commit-form { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(60px, 1fr) auto auto; gap: 0; background: var(--vscode-panel-background, var(--vscode-editor-background)); }
   .commit-form-title { height: 28px; display: flex; align-items: center; padding: 0 9px; font-weight: 600; background: var(--vscode-editorGroupHeader-tabsBackground); border-bottom: 1px solid var(--vscode-panel-border); }
-  .commit-mode-row { display: grid; grid-template-columns: minmax(160px, auto) minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+  /* Stacked, not side by side: the commit column is ~340px, and next to the
+     select the help text wrapped into a six-line sliver. */
+  .commit-mode-row { display: grid; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
   .commit-mode-help { color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.25; }
   /* A native select and native checkboxes were the only browser-default controls
      left in the panel, so the commit form read as a web form dropped into the
@@ -1251,20 +1261,33 @@ const logScript = String.raw`
   const app = document.getElementById('app');
   let state = { repositories: [], branches: [], commits: [] };
   let uiState = vscode.getState() || {};
-  let expandedChangeHunks = new Set(uiState.expandedChangeHunks || []);
   const hunkState = new Map();
-  let search = uiState.search || '';
-  let branchFilter = uiState.branchFilter || '';
-  let activeToolTab = uiState.activeToolTab || 'log';
-  let selectedBranchKeys = new Set(uiState.selectedBranchKeys || []);
-  let authorFilter = uiState.authorFilter || '';
-  let knownAuthors = new Set(uiState.knownAuthors || []);
-  let dateFilter = uiState.dateFilter || 'all';
-  let sortMode = uiState.sortMode === 'topological' ? 'topological' : 'date';
-  let firstParent = Boolean(uiState.firstParent);
-  let noMerges = Boolean(uiState.noMerges);
-  let collapsedGraphSeries = new Set(uiState.collapsedGraphSeries || []);
-  let selectedGraphSeries = uiState.selectedGraphSeries || '';
+  let expandedChangeHunks; let search; let branchFilter; let activeToolTab; let selectedBranchKeys;
+  let authorFilter; let knownAuthors; let dateFilter; let sortMode; let firstParent; let noMerges;
+  let collapsedGraphSeries; let selectedGraphSeries; let consoleFilter; let consolePaused;
+
+  /** (Re)derives every view local from persisted state, so recovery can reset them together. */
+  function deriveUiState() {
+    expandedChangeHunks = new Set(uiState.expandedChangeHunks || []);
+    search = uiState.search || '';
+    branchFilter = uiState.branchFilter || '';
+    activeToolTab = uiState.activeToolTab || 'log';
+    selectedBranchKeys = new Set(uiState.selectedBranchKeys || []);
+    authorFilter = uiState.authorFilter || '';
+    knownAuthors = new Set(uiState.knownAuthors || []);
+    dateFilter = uiState.dateFilter || 'all';
+    sortMode = uiState.sortMode === 'topological' ? 'topological' : 'date';
+    firstParent = Boolean(uiState.firstParent);
+    noMerges = Boolean(uiState.noMerges);
+    collapsedGraphSeries = new Set(uiState.collapsedGraphSeries || []);
+    selectedGraphSeries = uiState.selectedGraphSeries || '';
+    consoleFilter = uiState.consoleFilter || 'operations';
+    consolePaused = Boolean(uiState.consolePaused);
+  }
+  // The state VS Code restores was written by whatever version ran last, so a
+  // shape this build cannot read must fall back to defaults, not leave the
+  // whole window blank before the first render.
+  try { deriveUiState(); } catch (error) { uiState = {}; deriveUiState(); }
   let hoveredGraphSeries = '';
   let currentGraphFragments = new Map();
   let pendingCommitHash;
@@ -1272,8 +1295,6 @@ const logScript = String.raw`
   let openMenu;
   let menuInvoker;
   let deferredState;
-  let consoleFilter = uiState.consoleFilter || 'operations';
-  let consolePaused = Boolean(uiState.consolePaused);
   let virtualCommits = [];
   let virtualGraph = [];
   let virtualRenderFrame;
@@ -1282,7 +1303,8 @@ const logScript = String.raw`
   const commitRowHeight = 27;
   const virtualThreshold = 500;
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
-  const zh = document.documentElement.lang.toLowerCase().startsWith('zh') ? {
+  const isZh = document.documentElement.lang.toLowerCase().startsWith('zh');
+  const zh = isZh ? {
     'Log': '日志', 'Git Log': 'Git 日志', 'Console': '控制台', 'Git Console': 'Git 控制台',
     'Local Changes': '本地更改', 'Shelf': '搁置', 'Shelved Changes': '已搁置的更改',
     'User operations': '用户操作', 'Errors only': '仅错误', 'All commands': '全部命令',
@@ -1292,6 +1314,19 @@ const logScript = String.raw`
     'No local changes': '没有本地更改', 'No changes to commit': '没有可提交的更改',
     'Commit Changes': '提交更改', 'Commit Message': '提交消息', 'Amend': '修正提交',
     'Sign-off': '添加签署', 'Skip hooks': '跳过钩子', 'Commit': '提交', 'Commit & Push': '提交并推送',
+    'Select All': '全选', 'Clear Selection': '取消全选', '+ Changelist': '+ 更改列表', '+ Shelve': '+ 搁置',
+    'Include in commit': '包含在提交中', 'Filter loaded commits': '筛选已加载的提交', 'Filter branches': '筛选分支',
+    'Filter the loaded commits by text or hash': '按文本或哈希筛选已加载的提交',
+    'Filter branches, remotes and tags by name': '按名称筛选分支、远程和标签',
+    'src/path or file name': 'src/路径 或 文件名', 'No branch matches the filter': '没有匹配的分支',
+    'No user Git operations yet. Background refresh commands are hidden.': '还没有用户 Git 操作。后台刷新命令已隐藏。',
+    'No matching Git command output.': '没有匹配的 Git 命令输出。', 'background': '后台', 'Git root': 'Git 仓库根',
+    'Shelve selected local changes': '搁置所选本地更改', 'Shelve selected changes': '搁置所选更改',
+    'Click a graph line to select or collapse its series': '点击图形线条以选择或折叠该系列',
+    'Drag to resize commit message': '拖动以调整提交消息高度', 'More Git actions': '更多 Git 操作',
+    'The Git tool window failed to render': 'Git 工具窗口渲染失败', 'Reset view state': '重置视图状态',
+    'Clear saved view state and render again': '清除保存的视图状态并重新渲染', 'Try again': '重试',
+    'Render again without changing anything': '不做更改，重新渲染',
     'Staging area (Index)': '暂存区（Index）', 'Selected files (complete contents)': '所选文件（完整内容）',
     'Commits exactly what is in Git Index; working-tree changes stay uncommitted.': '只提交 Git Index 中已暂存的内容，工作区里未暂存的修改保持不提交。',
     'Commits all changes in each checked file, including its unstaged changes.': '提交每个勾选文件的全部改动，包括其中尚未暂存的部分。',
@@ -1305,7 +1340,7 @@ const logScript = String.raw`
     'Sort': '排序', 'By Commit Date': '按提交日期', 'Topologically': '按拓扑', 'Options': '选项',
     'First Parent': '仅第一父提交', 'No Merges': '隐藏合并提交', 'Branch Actions': '分支操作',
     'Collapse Linear Branches': '折叠线性分支', 'Expand Linear Branches': '展开线性分支',
-    'Author': '作者', 'Commit': '提交', 'Parents': '父提交',
+    'Author': '作者', 'Parents': '父提交',
     'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
     'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
     'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
@@ -1329,6 +1364,8 @@ const logScript = String.raw`
   const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = t(text); return n; };
   const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = t(title); b.addEventListener('click', handler); return b; };
   const selectShell = select => { const shell = node('div', 'select-shell'); shell.append(select); return shell; };
+  const statusClassFor = letter => letter === '?' ? 'status-q' : letter === '!' ? 'status-bang' : 'status-' + letter;
+  const fileCount = count => isZh ? String(count) + ' 个文件' : String(count) + (count === 1 ? ' file' : ' files');
   const saveUiState = extra => { uiState = { ...uiState, ...extra }; vscode.setState(uiState); };
   const selectToolTab = tab => {
     closeContextMenu(); activeToolTab = tab; saveUiState({ activeToolTab: tab });
@@ -1520,6 +1557,29 @@ const logScript = String.raw`
   }
 
   function render() {
+    try {
+      renderView();
+    } catch (error) {
+      // Rendering runs again on every state message, so one throw here would
+      // otherwise leave the tool window permanently blank with nothing to act
+      // on. Show the failure and offer the two ways out.
+      app.replaceChildren();
+      const panel = node('div', 'render-error');
+      panel.append(node('div', 'render-error-title', 'The Git tool window failed to render'));
+      panel.append(node('pre', 'render-error-detail', String((error && error.stack) || error)));
+      const actions = node('div', 'render-error-actions');
+      actions.append(
+        button('Reset view state', 'Clear saved view state and render again', () => {
+          uiState = {}; vscode.setState(undefined); deriveUiState(); render();
+        }, 'primary'),
+        button('Try again', 'Render again without changing anything', () => render(), 'secondary'),
+      );
+      panel.append(actions);
+      app.append(panel);
+    }
+  }
+
+  function renderView() {
     const saved = captureScroll();
     app.replaceChildren(); const root = node('div', 'root');
     const tabs = node('div', 'tool-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Git tool window');
@@ -1574,7 +1634,7 @@ const logScript = String.raw`
   }
 
   function repositorySelect() {
-    const repositories = node('select'); repositories.title = 'Git root';
+    const repositories = node('select'); repositories.title = t('Git root');
     for (const repo of state.repositories || []) {
       const option = node('option', '', repo.name + (repo.branch ? ' · ' + repo.branch : ''));
       option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option);
@@ -1680,7 +1740,7 @@ const logScript = String.raw`
       }
       header.append(listActions);
       const allSelected = list.changes.length > 0 && list.changes.every(change => change.checked);
-      header.append(button(allSelected ? 'Clear' : 'Select All', allSelected ? 'Exclude this Changelist from commit' : 'Include this Changelist in commit', event => {
+      header.append(button(allSelected ? 'Clear Selection' : 'Select All', allSelected ? 'Exclude this Changelist from commit' : 'Include this Changelist in commit', event => {
         event.stopPropagation(); post('toggleAll', { checked: !allSelected, listId: list.id });
         group.querySelectorAll('.change-row input[type="checkbox"]').forEach(box => { box.checked = !allSelected; });
         refreshCommitControls();
@@ -1718,10 +1778,10 @@ const logScript = String.raw`
       saveUiState({ expandedChangeHunks: [...expandedChangeHunks] }); render();
     }, 'hunk-toggle');
     expander.disabled = !canExpand;
-    const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = change.checked; checkbox.title = 'Include in commit';
+    const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = change.checked; checkbox.title = t('Include in commit');
     checkbox.addEventListener('change', () => { post('togglePath', { path: change.path, checked: checkbox.checked }); refreshCommitControls(); });
-    const statusClass = change.status === '?' ? 'status-q' : change.status === '!' ? 'status-bang' : 'status-' + change.status;
-    const file = node('div', 'change-file'); file.append(node('span', 'file-name', change.fileName));
+    const statusClass = statusClassFor(change.status);
+    const file = node('div', 'change-file ' + statusClass); file.append(node('span', 'file-name', change.fileName));
     if (change.directory) file.append(node('span', 'directory', change.directory));
     if (change.staged) file.append(node('span', 'stage-mark', change.unstaged ? 'index + worktree' : 'index'));
     else if (change.unstaged) file.append(node('span', 'stage-mark worktree-mark', 'worktree'));
@@ -1841,7 +1901,7 @@ const logScript = String.raw`
     const form = node('div', 'commit-form');
     form.append(node('div', 'commit-form-title', 'Commit Changes'));
     const drafts = { ...(uiState.commitMessages || {}) }; const root = state.selectedRoot || '';
-    const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = state.totalChanges ? 'Commit Message' : 'No changes to commit'; message.value = drafts[root] || ''; message.disabled = !state.totalChanges;
+    const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = t(state.totalChanges ? 'Commit Message' : 'No changes to commit'); message.value = drafts[root] || ''; message.disabled = !state.totalChanges;
     const modeRow = node('div', 'commit-mode-row');
     const mode = node('select'); mode.id = 'commit-mode'; mode.setAttribute('aria-label', t('Commit source')); mode.title = t('Commit source');
     const stagedMode = node('option', '', 'Staging area (Index)'); stagedMode.value = 'staged';
@@ -1897,7 +1957,7 @@ const logScript = String.raw`
     if (!(state.shelves || []).length) { pane.append(node('div', 'empty', 'No shelved changes')); return pane; }
     for (const shelf of state.shelves) {
       const item = node('div', 'shelf-row');
-      item.append(node('div', 'shelf-name', shelf.name), node('div', 'shelf-meta', new Date(shelf.createdAt).toLocaleString() + ' · ' + shelf.paths.length + ' files'));
+      item.append(node('div', 'shelf-name', shelf.name), node('div', 'shelf-meta', new Date(shelf.createdAt).toLocaleString() + ' · ' + fileCount(shelf.paths.length)));
       const actions = node('div', 'shelf-actions');
       actions.append(button('Unshelve', 'Apply shelved changes', () => post('applyShelf', { id: shelf.id }), 'small-button'), button('×', 'Delete Shelf', () => post('deleteShelf', { id: shelf.id }), 'row-action'));
       item.append(actions); pane.append(item);
@@ -1941,7 +2001,7 @@ const logScript = String.raw`
 
   function toolbar() {
     const bar = node('div', 'toolbar');
-    const repositories = node('select'); repositories.title = 'Git root';
+    const repositories = node('select'); repositories.title = t('Git root');
     for (const repo of state.repositories || []) { const option = node('option', '', repo.name); option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option); }
     repositories.addEventListener('change', () => { post('selectRepository', { root: repositories.value }); repositories.blur(); });
     bar.append(
@@ -2144,7 +2204,7 @@ const logScript = String.raw`
     );
     pane.append(title);
     const filter = node('input', 'branch-filter'); filter.id = 'branch-filter'; filter.type = 'search'; filter.placeholder = t('Filter branches'); filter.value = branchFilter;
-    filter.setAttribute('aria-label', 'Filter branches, remotes and tags by name');
+    filter.setAttribute('aria-label', t('Filter branches, remotes and tags by name'));
     filter.addEventListener('input', () => { branchFilter = filter.value; saveUiState({ branchFilter }); refreshBranchPane(); });
     pane.append(filter);
     const needle = branchFilter.trim().toLowerCase();
@@ -2228,9 +2288,10 @@ const logScript = String.raw`
 
   function commitFilterBar() {
     const bar = node('div', 'commit-filters');
-    const input = node('input', 'commit-search'); input.id = 'commit-search'; input.type = 'search'; input.placeholder = 'Filter loaded commits'; input.value = search;
-    input.setAttribute('aria-label', 'Filter the loaded commits by text or hash');
-    input.title = 'Filters the ' + String(state.logLimit || (state.commits || []).length) + ' commits currently loaded';
+    const input = node('input', 'commit-search'); input.id = 'commit-search'; input.type = 'search'; input.placeholder = t('Filter loaded commits'); input.value = search;
+    input.setAttribute('aria-label', t('Filter the loaded commits by text or hash'));
+    const loadedCount = String(state.logLimit || (state.commits || []).length);
+    input.title = isZh ? '筛选当前已加载的 ' + loadedCount + ' 个提交' : 'Filters the ' + loadedCount + ' commits currently loaded';
     input.addEventListener('input', () => { search = input.value; saveUiState({ search }); renderCommitRows(); refreshDetailsForFilter(); });
     const branch = filterButton('Branch', state.selectedRef ? shortRef(state.selectedRef) : '', 'Filter by branch', Boolean(state.selectedRef), branchFilterItems);
     const user = filterButton('User', authorFilter, 'Filter by author', Boolean(authorFilter), userFilterItems);
@@ -2327,7 +2388,7 @@ const logScript = String.raw`
     menuInvoker = anchor;
     const popover = node('form', 'filter-popover');
     popover.append(node('div', 'filter-popover-title', 'Show commits affecting this path'));
-    const input = node('input'); input.type = 'text'; input.placeholder = 'src/path or file name'; input.value = state.filePath || '';
+    const input = node('input'); input.type = 'text'; input.placeholder = t('src/path or file name'); input.value = state.filePath || '';
     const actions = node('div', 'filter-popover-actions');
     const clear = button('Clear', 'Clear path filter', () => { closeContextMenu(); post('setPathFilter', {}); }, 'action');
     clear.disabled = !state.filePath;
@@ -2367,7 +2428,8 @@ const logScript = String.raw`
     if (!commits.length) {
       pendingCommitHash = undefined;
       list.replaceChildren();
-      list.append(node('div', 'empty', 'No match in the ' + String(state.logLimit || (state.commits || []).length) + ' loaded commits.'));
+      const loaded = String(state.logLimit || (state.commits || []).length);
+      list.append(node('div', 'empty', isZh ? '已加载的 ' + loaded + ' 个提交中没有匹配项。' : 'No match in the ' + loaded + ' loaded commits.'));
       if (state.hasMoreCommits) list.append(button('Load 300 more commits', 'Load older history', () => post('loadMore'), 'load-more'));
       return;
     }
@@ -2394,7 +2456,7 @@ const logScript = String.raw`
       row.dataset.index = String(index); row.setAttribute('aria-posinset', String(index + 1)); row.setAttribute('aria-setsize', String(virtualCommits.length));
       row.tabIndex = selected || (!currentHash && index === 0) ? 0 : -1; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
       row.setAttribute('aria-label', (commit.subject || 'No subject') + ', ' + commit.author + ', ' + formatDate(commit.authoredAt) + ', ' + commit.hash.slice(0, 8));
-      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(virtualGraph[index]); canvas.title = 'Click a graph line to select or collapse its series'; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
+      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(virtualGraph[index]); canvas.title = t('Click a graph line to select or collapse its series'); canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
       const ordered = orderedRefs(commit.refs);
       const refs = node('div', 'refs'); for (const ref of ordered.slice(0, 2)) refs.append(refChip(ref));
       if (ordered.length > 2) { const more = node('span', 'ref', '+' + String(ordered.length - 2)); more.title = ordered.slice(2).map(shortRef).join('\n'); refs.append(more); }
@@ -2546,9 +2608,9 @@ const logScript = String.raw`
     for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', new Date(commit.authoredAt).toLocaleString()], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
     details.append(meta); if (commit.body && commit.body !== commit.subject) details.append(node('div', 'detail-body', commit.body));
     const files = node('div', 'files'); files.id = 'changed-files'; files.setAttribute('role', 'tree');
-    files.append(node('div', 'pane-title', 'Changed Files (' + selection.files.length + ')'));
+    files.append(node('div', 'pane-title', t('Changed Files') + ' (' + selection.files.length + ')'));
     const tree = node('div', 'file-tree-root'); tree.append(fileTree(selection.files, commit)); files.append(tree);
-    const splitter = node('div', 'detail-splitter'); splitter.tabIndex = 0; splitter.setAttribute('role', 'separator'); splitter.setAttribute('aria-orientation', 'horizontal'); splitter.title = 'Drag to resize commit message';
+    const splitter = node('div', 'detail-splitter'); splitter.tabIndex = 0; splitter.setAttribute('role', 'separator'); splitter.setAttribute('aria-orientation', 'horizontal'); splitter.title = t('Drag to resize commit message');
     setupDetailSplitter(pane, splitter);
     pane.append(files, splitter, details);
     requestAnimationFrame(() => { setMessagePaneHeight(pane, Number(uiState.messagePaneHeight) || 160, false); setupTreeKeyboard(files); });
@@ -2597,7 +2659,7 @@ const logScript = String.raw`
     const row = node('div', 'tree-row'); row.tabIndex = 0; row.style.paddingLeft = (8 + depth * 16) + 'px'; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-expanded', String(!collapsed));
     const count = countTreeFiles(directory);
     const twisty = node('span', 'tree-twisty', collapsed ? '›' : '⌄');
-    row.append(twisty, node('span', 'tree-folder', '▱ ' + compacted.name), node('span', 'tree-count', count + (count === 1 ? ' file' : ' files')));
+    row.append(twisty, node('span', 'tree-folder', '▱ ' + compacted.name), node('span', 'tree-count', fileCount(count)));
     const children = node('div'); children.hidden = collapsed;
     for (const child of directory.directories.values()) children.append(renderDirectory(child, depth + 1, commit));
     for (const file of directory.files) children.append(commitFileRow(file, depth + 1, commit));
@@ -2629,7 +2691,8 @@ const logScript = String.raw`
     const row = node('div', 'file-row' + (selected ? ' selected' : '')); row.dataset.filePath = file.path; row.style.paddingLeft = (10 + depth * 16) + 'px';
     row.tabIndex = 0; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-selected', String(selected));
     row.title = file.originalPath ? file.originalPath + ' → ' + file.path : file.path;
-    row.append(node('span', 'file-status', file.status[0]), node('span', 'file-path', file.path.split('/').pop()));
+    const statusClass = statusClassFor(file.status[0]);
+    row.append(node('span', 'file-status ' + statusClass, file.status[0]), node('span', 'file-path ' + statusClass, file.path.split('/').pop()));
     const selectFile = () => {
       selectedFilePath = file.path;
       document.querySelectorAll('.file-row').forEach(item => {

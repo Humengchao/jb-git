@@ -481,3 +481,56 @@ test("draws the dropdowns and checkboxes from the theme, not from the browser", 
   // Commit and Commit & Push are one decision, so they carry one style.
   assert.match(scriptMatch[1], /button\('Commit & Push',[\s\S]{0,90}?'primary'\)/);
 });
+
+test("recovers from a render throw instead of leaving the window blank", () => {
+  assert.ok(scriptMatch);
+  // Rendering runs again on every state message, so one throw used to leave
+  // the whole tool window permanently blank with nothing to act on.
+  assert.match(scriptMatch[1], /function render\(\) \{\r?\n    try \{\r?\n      renderView\(\);/);
+  assert.match(scriptMatch[1], /render-error-title/);
+  assert.match(scriptMatch[1], /button\('Reset view state'/);
+  assert.match(scriptMatch[1], /uiState = \{\}; vscode\.setState\(undefined\); deriveUiState\(\); render\(\);/);
+  // Persisted state written by an older version may not parse; the first
+  // derivation heals itself rather than dying before the first render.
+  assert.match(scriptMatch[1], /try \{ deriveUiState\(\); \} catch \(error\) \{ uiState = \{\}; deriveUiState\(\); \}/);
+});
+
+test("colours file names by status in both trees, like IDEA", () => {
+  assert.ok(scriptMatch);
+  assert.match(scriptMatch[1], /const statusClassFor = letter =>/);
+  // One call in changeRow, one in commitFileRow.
+  assert.equal((scriptMatch[1].match(/statusClassFor\(/g) ?? []).length, 2);
+  // The name itself carries the colour, not only the status letter.
+  assert.match(scriptMatch[1], /node\('div', 'change-file ' \+ statusClass\)/);
+  assert.match(scriptMatch[1], /node\('span', 'file-path ' \+ statusClass/);
+  assert.match(source, /\.status-R, \.status-C \{ color: var\(--vscode-gitDecoration-renamedResourceForeground/);
+  assert.match(source, /\.status-A \{ color: var\(--vscode-gitDecoration-addedResourceForeground/);
+});
+
+test("keeps every commit-form control readable in a narrow column", () => {
+  // Beside the select, the mode help wrapped into a six-line sliver.
+  assert.match(source, /\.commit-mode-row \{ display: grid; gap: 4px;/);
+  assert.doesNotMatch(source, /\.commit-mode-row \{[^}]*minmax\(160px, auto\)/);
+});
+
+test("routes user-visible strings through the translator with no duplicate keys", () => {
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  // Strings assigned to properties bypass node()/button() and must call t().
+  assert.match(script, /checkbox\.title = t\('Include in commit'\)/);
+  assert.match(script, /message\.placeholder = t\(state\.totalChanges \? 'Commit Message' : 'No changes to commit'\)/);
+  assert.match(script, /input\.placeholder = t\('Filter loaded commits'\)/);
+  assert.match(script, /input\.placeholder = t\('src\/path or file name'\)/);
+  assert.match(script, /repositories\.title = t\('Git root'\)/);
+  // Counted nouns cannot be dictionary keys, so they go through one helper.
+  assert.match(script, /const fileCount = count =>/);
+  assert.doesNotMatch(script, /\+ ' files'/);
+  // A duplicated dictionary key silently shadows its earlier entry.
+  const dictSource = script.slice(script.indexOf("const zh = isZh ? {"), script.indexOf("} : {};"));
+  const keys = [...dictSource.matchAll(/'((?:[^'\\]|\\.)+)'\s*:/g)].map((entry) => entry[1]);
+  const seen = new Set();
+  for (const key of keys) {
+    assert.ok(!seen.has(key), `duplicate dictionary key: ${key}`);
+    seen.add(key);
+  }
+});
