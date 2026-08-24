@@ -126,16 +126,38 @@ function matchAt(pattern: RegExp, text: string, from: number): RegExpExecArray |
  * A region the edit reached is marked `manual`: the user rewrote that text
  * themselves, so the tool must stop claiming it is unresolved, and must never
  * later overwrite it with a side the user did not ask for.
+ *
+ * One edit can reach more than one region — selecting across the boundary
+ * between two adjacent conflicts and typing is enough — and then no part of
+ * the new text belongs to either change on its own, so they become a single
+ * region. Growing each of them separately produced ranges that overlapped, and
+ * `toMarkerText` walks the ranges in order, so a serialized draft came back
+ * with text duplicated. The surviving sides are concatenated in order, which
+ * keeps revert and apply meaningful across the whole span.
  */
 export function applyEdit(regions: readonly MergeRegion[], delta: TextDelta): MergeRegion[] {
   const shift = delta.newEnd - delta.oldEnd;
-  return regions.map((region) => {
-    if (region.end <= delta.start) return region;
-    if (region.start >= delta.oldEnd) return { ...region, start: region.start + shift, end: region.end + shift };
-    const start = Math.min(region.start, delta.start);
-    const end = Math.max(region.end + shift, delta.newEnd);
-    return { ...region, start, end: Math.max(start, end), resolution: "manual" as const };
-  });
+  const before: MergeRegion[] = [];
+  const touched: MergeRegion[] = [];
+  const after: MergeRegion[] = [];
+  for (const region of regions) {
+    if (region.end <= delta.start) before.push(region);
+    else if (region.start >= delta.oldEnd) after.push({ ...region, start: region.start + shift, end: region.end + shift });
+    else touched.push(region);
+  }
+  if (touched.length === 0) return [...before, ...after];
+  const start = Math.min(delta.start, touched[0].start);
+  const end = Math.max(delta.newEnd, touched[touched.length - 1].end + shift);
+  const bases = touched.map((region) => region.base);
+  return [...before, {
+    start,
+    end: Math.max(start, end),
+    ours: touched.map((region) => region.ours).join(""),
+    theirs: touched.map((region) => region.theirs).join(""),
+    // Only a span whose every part knew its base can describe one.
+    ...(bases.every((base) => base !== undefined) ? { base: bases.join("") } : {}),
+    resolution: "manual" as const,
+  }, ...after];
 }
 
 /** Replaces one region with the chosen side and moves the regions after it. */
@@ -151,7 +173,11 @@ export function resolveRegion(
   const shift = replacement.length - (region.end - region.start);
   const regions = model.regions.map((other, position) => {
     if (position === index) return { ...other, end: other.start + replacement.length, resolution: side };
-    if (other.start >= region.end) return { ...other, start: other.start + shift, end: other.end + shift };
+    // Regions are held in order, so position decides what moves. Comparing
+    // offsets instead reordered a zero-length region that shared this one's
+    // start — a conflict that took nothing from one side is exactly that — and
+    // the resulting overlap made `toMarkerText` duplicate text.
+    if (position > index) return { ...other, start: other.start + shift, end: other.end + shift };
     return other;
   });
   return { text, regions };
@@ -195,7 +221,7 @@ export function resetRegion(model: MergeModel, index: number): MergeModel {
         ...(other.base === undefined ? {} : { base: other.base }),
       };
     }
-    if (other.start >= region.end) return { ...other, start: other.start + shift, end: other.end + shift };
+    if (position > index) return { ...other, start: other.start + shift, end: other.end + shift };
     return other;
   });
   return { text, regions };
@@ -221,11 +247,24 @@ export function toMarkerText(model: MergeModel, labels: { ours: string; theirs: 
   for (const region of model.regions) {
     output += model.text.slice(cursor, region.start);
     if (region.resolution === undefined) {
-      output += `<<<<<<< ${labels.ours}\n${region.ours}=======\n${region.theirs}>>>>>>> ${labels.theirs}\n`;
+      // A conflict marker exists only as a whole line. An edit can leave an
+      // unresolved region mid-line — deleting the line break just above it is
+      // enough, and that edit does not touch the region itself, so it stays
+      // unresolved — and a `<<<<<<<` that does not start a line is not found
+      // again on the way back in, so the conflict would vanish out of the
+      // restored draft. The break goes back in; the closing marker has always
+      // ended its own line for the same reason.
+      if (output && !output.endsWith("\n")) output += "\n";
+      output += `<<<<<<< ${labels.ours}\n${line(region.ours)}=======\n${line(region.theirs)}>>>>>>> ${labels.theirs}\n`;
     } else {
       output += model.text.slice(region.start, region.end);
     }
     cursor = region.end;
   }
   return output + model.text.slice(cursor);
+}
+
+/** A marker section is a run of whole lines, or nothing at all. */
+function line(value: string): string {
+  return value === "" || value.endsWith("\n") ? value : `${value}\n`;
 }
