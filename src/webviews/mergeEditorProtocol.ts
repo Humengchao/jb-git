@@ -3,6 +3,7 @@ export type MergeEditorMessage =
   | { type: "apply"; result: string; deleted?: boolean }
   | { type: "dirty"; result: string; deleted?: boolean }
   | { type: "cancel" }
+  | { type: "compare"; result: string }
   | { type: "confirm"; action: "acceptLeft" | "acceptRight" | "cancel" };
 
 const CONFIRM_ACTIONS = new Set(["acceptLeft", "acceptRight", "cancel"]);
@@ -12,6 +13,9 @@ export function isMergeEditorMessage(value: unknown): value is MergeEditorMessag
   if (!isRecord(value) || typeof value.type !== "string") return false;
   if (value.type === "ready" || value.type === "cancel") return true;
   if (value.type === "confirm") return typeof value.action === "string" && CONFIRM_ACTIONS.has(value.action);
+  // A comparison carries the result as it stands right now, which only the
+  // sandbox knows; the other three versions come from the repository.
+  if (value.type === "compare") return typeof value.result === "string";
   if (value.type === "apply" || value.type === "dirty") {
     return typeof value.result === "string" && (value.deleted === undefined || typeof value.deleted === "boolean");
   }

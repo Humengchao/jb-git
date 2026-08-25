@@ -116,6 +116,31 @@ test("hands the editor a base only when the replay can be trusted", () => {
   assert.match(source, /const bases = await this\.conflictBases\(rootPath, pathSpec, displayedVersions\.result\);/);
 });
 
+test("compares any two of the four versions through a native read-only diff", () => {
+  const source = readSource("../src/webviews/mergeEditor.ts", import.meta.url);
+  const method = source.slice(source.indexOf("private async compareVersions("));
+  // All six pairings of Left/Base/Result/Right.
+  assert.match(method.slice(0, 2600), /\["base", "result"\], \["left", "result"\], \["result", "right"\],/);
+  assert.match(method.slice(0, 2600), /\["left", "right"\], \["base", "left"\], \["base", "right"\],/);
+  // An add/add conflict has no common ancestor, and diffing against nothing
+  // says nothing.
+  assert.match(method.slice(0, 2600), /\(left !== "base" && right !== "base"\) \|\| versions\.baseExists/);
+  // An untitled document opens dirty, which is what diffSide exists to avoid.
+  assert.match(method.slice(0, 2600), /diffSide\(this\.diffProvider,/);
+  assert.doesNotMatch(method.slice(0, 2600), /openTextDocument\(\{\s*content/);
+  // The result is the one version the host does not have.
+  const script = source.slice(source.indexOf("const mergeScript = String.raw"));
+  assert.match(script, /vscode\.postMessage\(\{ type: 'compare', result: model\.text \}\)/);
+  assert.match(script, /'Compare…': '比较…'/);
+});
+
+test("validates a compare message at the extension-host boundary", async () => {
+  const { isMergeEditorMessage } = await import("../dist/webviews/mergeEditorProtocol.js");
+  assert.equal(isMergeEditorMessage({ type: "compare", result: "text" }), true);
+  assert.equal(isMergeEditorMessage({ type: "compare" }), false);
+  assert.equal(isMergeEditorMessage({ type: "compare", result: 5 }), false);
+});
+
 test("reads the base of a real Git conflict through the editor's own path", async () => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-merge-base-"));
   const git = (...args) => execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd: root, encoding: "utf8" });

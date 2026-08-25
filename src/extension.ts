@@ -166,7 +166,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const shelfStore = new ShelfStore(context.globalStorageUri.fsPath);
   const diffProvider = new DiffContentProvider();
   const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore, diffProvider, context.workspaceState);
-  const mergeEditor = new MergeConflictEditor(manager, context.workspaceState);
+  const mergeEditor = new MergeConflictEditor(manager, context.workspaceState, diffProvider);
   const blameAnnotations = new BlameAnnotationController(manager, async (target, content) => diffSide(
     diffProvider,
     target.repositoryRoot,

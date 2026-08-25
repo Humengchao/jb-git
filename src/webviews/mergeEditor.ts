@@ -8,6 +8,7 @@ import { webviewDocument } from "./html";
 import { isMergeEditorMessage } from "./mergeEditorProtocol";
 import { basesForConflicts } from "../mergeAnalysis";
 import { buildModel } from "../mergeRegions";
+import { DiffContentProvider, diffSide } from "../views/diffProvider";
 
 // The webview sandbox has no allow-modals, so window.confirm() silently
 // returns false there; confirmations must round-trip through the host.
@@ -53,7 +54,12 @@ export class MergeConflictEditor implements vscode.Disposable {
   private draftSaveTimer?: NodeJS.Timeout;
   private disposed = false;
 
-  public constructor(private readonly manager: RepositoryManager, private readonly workspaceState: vscode.Memento) {
+  public constructor(
+    private readonly manager: RepositoryManager,
+    private readonly workspaceState: vscode.Memento,
+    /** Comparisons open as native read-only diffs; an untitled document would open dirty. */
+    private readonly diffProvider: DiffContentProvider,
+  ) {
     const persisted = workspaceState.get<PersistedMergeDrafts>(MERGE_DRAFTS_KEY);
     const cutoff = Date.now() - MERGE_DRAFT_TTL_MS;
     this.drafts = Object.fromEntries(Object.entries(persisted?.version === 1 ? persisted.drafts : {})
@@ -102,6 +108,57 @@ export class MergeConflictEditor implements vscode.Disposable {
       // be analysed line by line. That is not a reason to refuse the editor.
       return undefined;
     }
+  }
+
+  /**
+   * IDEA's Compare contents: any two of the four versions, side by side.
+   *
+   * The pair is picked in a native Quick Pick and shown in a native diff rather
+   * than as a fourth thing to render inside the Webview, which also means the
+   * editor's own folding, search and whitespace settings apply to it.
+   */
+  private async compareVersions(
+    rootPath: string,
+    pathSpec: string,
+    labels: MergeEditorLabels,
+    versions: GitConflictVersions,
+    result: string,
+  ): Promise<void> {
+    // The result is whatever the user is looking at now, which only the sandbox
+    // knows; the other three are the merge's own stages.
+    const sides = new Map<string, { label: string; content: string }>([
+      ["left", { label: labels.ours, content: versions.ours }],
+      ["base", { label: "Base", content: versions.base }],
+      ["result", { label: labels.result, content: result }],
+      ["right", { label: labels.theirs, content: versions.theirs }],
+    ]);
+    const pairs: Array<[string, string]> = [
+      ["base", "result"], ["left", "result"], ["result", "right"],
+      ["left", "right"], ["base", "left"], ["base", "right"],
+    ];
+    const choice = await vscode.window.showQuickPick(
+      pairs
+        // The base of a conflict that has no common ancestor — an add/add — is
+        // nothing at all, and diffing against nothing says nothing.
+        .filter(([left, right]) => (left !== "base" && right !== "base") || versions.baseExists)
+        .map(([left, right]) => ({
+          label: `${sides.get(left)!.label}  ↔  ${sides.get(right)!.label}`,
+          pair: [left, right] as const,
+        })),
+      { title: `Compare contents of ${path.basename(pathSpec)}`, placeHolder: "Select two versions to compare" },
+    );
+    if (!choice) return;
+    const [leftKey, rightKey] = choice.pair;
+    const left = sides.get(leftKey)!;
+    const right = sides.get(rightKey)!;
+    const title = `${path.basename(pathSpec)}: ${left.label} ↔ ${right.label}`;
+    await vscode.commands.executeCommand(
+      "vscode.diff",
+      diffSide(this.diffProvider, rootPath, `${title}:left`, pathSpec, Buffer.from(left.content, "utf8")),
+      diffSide(this.diffProvider, rootPath, `${title}:right`, pathSpec, Buffer.from(right.content, "utf8")),
+      title,
+      { preview: true, viewColumn: vscode.ViewColumn.Beside },
+    );
   }
 
   private async openPanel(key: string, rootPath: string, pathSpec: string): Promise<boolean> {
@@ -185,6 +242,10 @@ export class MergeConflictEditor implements vscode.Disposable {
         delete this.drafts[key];
         await this.saveDrafts();
         panel.dispose();
+        return;
+      }
+      if (message.type === "compare") {
+        await this.compareVersions(rootPath, pathSpec, labels, displayedVersions, message.result);
         return;
       }
       if (message.type === "confirm") {
@@ -451,6 +512,7 @@ const mergeScript = String.raw`
     '← Left': '← 左侧', 'Both': '两者都保留', 'Right →': '右侧 →', 'Reset': '重置',
     'Base': '基线', 'Show what this change started from': '显示此更改的原始内容',
     '(this block is not in the base)': '（基线中没有这一块）',
+    'Compare…': '比较…', 'Compare any two of the four versions side by side': '并排比较四个版本中的任意两个',
     'Loading conflict…': '正在加载冲突…', 'Current branch': '当前分支', 'Result': '结果',
     'Incoming changes': '传入更改', 'Accept Left': '接受左侧', 'Accept Right': '接受右侧',
     'Use the arrows between the panes to apply a side, × to ignore it, or edit the result directly.': '使用面板之间的箭头应用某一侧，× 忽略该更改，也可以直接编辑中间结果。',
@@ -478,6 +540,7 @@ const mergeScript = String.raw`
         '<button id="reset" class="secondary" title="Restore the original conflicted result" disabled>Reset</button>',
         '<span class="toolbar-separator"></span>',
         '<button id="show-base" class="secondary" title="Show what this change started from" aria-pressed="false" disabled>Base</button>',
+        '<button id="compare" class="secondary" title="Compare any two of the four versions side by side">Compare…</button>',
         '<span class="toolbar-spacer"></span>',
         '<span id="counter" class="counter">Loading conflict…</span>',
       '</div>',
@@ -1175,6 +1238,9 @@ const mergeScript = String.raw`
     updateControls('jump');
   });
   showBaseButton.addEventListener('click', () => setShowBase(!showBase));
+  // The result has to travel with the request: it is the one version the
+  // extension host does not have, because the user is still editing it.
+  document.getElementById('compare').addEventListener('click', () => vscode.postMessage({ type: 'compare', result: model.text }));
   document.getElementById('take-left').addEventListener('click', () => resolveAs(currentConflict, 'ours'));
   document.getElementById('take-both').addEventListener('click', () => resolveAs(currentConflict, 'both'));
   document.getElementById('take-right').addEventListener('click', () => resolveAs(currentConflict, 'theirs'));
