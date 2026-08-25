@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { GitRunner, isGitAbort } from "./git/runner";
 import { RebaseStep } from "./interactiveRebase";
 import { Diff3Labels, MergeBlock } from "./mergeAnalysis";
-import { GitBlameEntry, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
+import { GitBlameEntry, GitBlameOptions, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -112,8 +112,14 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).diffHunks(pathSpec, staged);
   }
 
-  public async blame(rootPath: string, pathSpec: string, revision?: string, contents?: string | Buffer): Promise<GitBlameEntry[]> {
-    return this.requireRepository(rootPath).blame(pathSpec, revision, contents);
+  public async blame(
+    rootPath: string,
+    pathSpec: string,
+    revision?: string,
+    contents?: string | Buffer,
+    options?: GitBlameOptions,
+  ): Promise<GitBlameEntry[]> {
+    return this.requireRepository(rootPath).blame(pathSpec, revision, contents, options);
   }
 
   public async commitFiles(rootPath: string, hash: string): Promise<GitCommitFile[]> {

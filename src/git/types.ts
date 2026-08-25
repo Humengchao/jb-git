@@ -147,6 +147,16 @@ export interface GitDiffHunk {
   lines: string[];
 }
 
+/** IDEA's annotation Options: what Git should look through before crediting a line. */
+export interface GitBlameOptions {
+  /** `-w`: a reindent stops being the last change to a line. */
+  ignoreWhitespace?: boolean;
+  /** `-M`: credit a block moved inside the file to where it came from. */
+  detectMovementsWithinFile?: boolean;
+  /** `-C`: also follow a block copied in from another file the same commit touched. */
+  detectMovementsAcrossFiles?: boolean;
+}
+
 export interface GitBlameEntry {
   hash: string;
   originalLine: number;

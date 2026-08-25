@@ -302,6 +302,50 @@ test("refuses an option-like blame revision instead of running it as a flag", as
   assert.equal((await repository.blame("f.txt", "HEAD")).length, 3);
 });
 
+test("looks through a reindent when asked to ignore whitespace", async () => {
+  const root = createRepository("jb-git-blame-w-");
+  writeFileSync(join(root, "f.txt"), "alpha\nbeta\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const first = git(root, "rev-parse", "HEAD");
+  // The only change is leading whitespace, which is exactly what -w exists for.
+  writeFileSync(join(root, "f.txt"), "    alpha\n    beta\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "reindent");
+  const reindent = git(root, "rev-parse", "HEAD");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  const plain = await repository.blame("f.txt");
+  assert.deepEqual(plain.map((entry) => entry.hash), [reindent, reindent]);
+  const ignoring = await repository.blame("f.txt", undefined, undefined, { ignoreWhitespace: true });
+  assert.deepEqual(ignoring.map((entry) => entry.hash), [first, first], "a reindent is not the last real change to a line");
+  // The content must stay the file's own, not the pre-reindent text.
+  assert.deepEqual(ignoring.map((entry) => entry.content), ["    alpha", "    beta"]);
+});
+
+test("credits a block moved inside the file to where it came from", async () => {
+  const root = createRepository("jb-git-blame-m-");
+  const block = ["one", "two", "three", "four", "five", "six"].map((word) => `line ${word}`);
+  writeFileSync(join(root, "f.txt"), `${block.join("\n")}\nTAIL\n`);
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "first");
+  const first = git(root, "rev-parse", "HEAD");
+  // Move the whole block below TAIL without changing it.
+  writeFileSync(join(root, "f.txt"), `TAIL\n${block.join("\n")}\n`);
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "move the block");
+  const moved = git(root, "rev-parse", "HEAD");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  const detected = await repository.blame("f.txt", undefined, undefined, { detectMovementsWithinFile: true });
+  const forBlock = detected.filter((entry) => entry.content.startsWith("line "));
+  assert.equal(forBlock.length, block.length);
+  assert.deepEqual([...new Set(forBlock.map((entry) => entry.hash))], [first], "the moved block keeps its original commit");
+  assert.notEqual(first, moved);
+});
+
 test("asks Git for the porcelain form that sends each commit once", () => {
   const source = readSource("../src/git/repository.ts", import.meta.url);
   const blame = source.slice(source.indexOf("public async blame("));

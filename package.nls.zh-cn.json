@@ -12,5 +12,9 @@
   "configuration.blame.showRevision": "在 Git Blame 注解列中显示缩写的对象 ID。",
   "configuration.blame.dateFormat": "Git Blame 注解显示提交自身的日期，还是距今多久。",
   "configuration.blame.maxAuthorWidth": "Git Blame 注解截断作者名之前显示的字符数。",
-  "configuration.blame.heatMap": "按提交在该文件中的新旧程度为每条 Git Blame 注解着色。"
+  "configuration.blame.heatMap": "按提交在该文件中的新旧程度为每条 Git Blame 注解着色。",
+  "configuration.blame.highlightCommit": "文件处于注解状态时，高亮光标所在提交改动过的所有行。",
+  "configuration.blame.ignoreWhitespace": "跳过仅空白字符的改动，使重新缩进不算作某行的最后一次修改（git blame -w）。",
+  "configuration.blame.detectMovementsWithinFile": "把文件内移动过的代码块归属到它原本的来源（git blame -M）。",
+  "configuration.blame.detectMovementsAcrossFiles": "同时追踪同一提交里从其他文件复制过来的代码块。历史较大时会变慢（git blame -C）。"
 }

@@ -627,6 +627,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!location) return;
       await blameAnnotations.annotatePrevious(location.uri, location.line);
     }),
+    vscode.commands.registerCommand("jbGit.annotateRevision", async (resource?: vscode.Uri) => {
+      const document = await blameDocument(resource);
+      if (!document) {
+        await vscode.window.showInformationMessage("Open or select a file before annotating it.");
+        return;
+      }
+      // An already-annotated revision document knows the repository and the
+      // path it had back then; anything else is resolved from the workspace.
+      const known = blameAnnotations.targetFor(document.uri);
+      const file = known ?? (document.uri.scheme === "file" ? await (async () => {
+        const snapshot = deepestContaining(manager.all, await canonicalPath(document.uri.fsPath), (item) => item.repository.info.rootPath);
+        return snapshot && {
+          repositoryRoot: snapshot.repository.info.rootPath,
+          relativePath: path.relative(snapshot.repository.info.rootPath, document.uri.fsPath),
+        };
+      })() : undefined);
+      if (!file) {
+        await vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
+        return;
+      }
+      const revision = await vscode.window.showInputBox({
+        prompt: `Annotate ${file.relativePath} as of which revision?`,
+        placeHolder: "Commit, tag or branch — for example HEAD~5",
+        validateInput: (value) => validateSingleLine(value, "Revision"),
+      });
+      if (!revision?.trim()) return;
+      try {
+        await blameAnnotations.annotateAt({ ...file, revision: revision.trim() });
+      } catch (error) {
+        await vscode.window.showErrorMessage(`Could not annotate ${file.relativePath} at ${revision.trim()}: ${formatGitError(error)}`);
+      }
+    }),
     vscode.commands.registerCommand("jbGit.copyRevisionNumber", async (argument?: BlameLineArgument) => {
       const found = await requireAnnotatedLine(argument);
       if (!found) return;

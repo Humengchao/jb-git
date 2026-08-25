@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { RepositoryManager } from "../repositoryManager";
-import { GitBlameEntry } from "../git/types";
+import { GitBlameEntry, GitBlameOptions } from "../git/types";
 import {
   BlameAnnotationOptions,
   DEFAULT_BLAME_ANNOTATION_OPTIONS,
@@ -52,18 +52,42 @@ export class BlameAnnotationController implements vscode.Disposable {
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
   });
 
+  /**
+   * IDEA highlights every line a commit touched when you point at one of them.
+   * VS Code gives an extension no pointer position over a decoration, so the
+   * caret leads instead: put it on a line and the rest of that commit lights up.
+   */
+  private readonly commitHighlight = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    backgroundColor: new vscode.ThemeColor("editor.selectionHighlightBackground"),
+  });
+
   public constructor(
     private readonly manager: RepositoryManager,
     private readonly openRevision: (target: BlameTarget, content: Buffer) => Promise<vscode.Uri>,
   ) {
     this.registrations.push(
       vscode.window.onDidChangeVisibleTextEditors(() => this.renderAll()),
+      vscode.window.onDidChangeTextEditorSelection((event) => {
+        if (this.targets.has(event.textEditor.document.uri.toString())) this.renderCommitHighlight(event.textEditor);
+      }),
       vscode.workspace.onDidChangeTextDocument((event) => {
         if (this.targets.has(event.document.uri.toString()) && event.contentChanges.length) {
           this.schedule(event.document);
         }
       }),
       vscode.workspace.onDidCloseTextDocument((document) => this.forget(document.uri)),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        // The `-w`/`-M`/`-C` options change which commit owns a line, so they
+        // need Git to run again; the rest only changes how it is drawn.
+        if (event.affectsConfiguration("jbGit.blame.ignoreWhitespace")
+          || event.affectsConfiguration("jbGit.blame.detectMovementsWithinFile")
+          || event.affectsConfiguration("jbGit.blame.detectMovementsAcrossFiles")) {
+          this.refresh();
+        } else if (event.affectsConfiguration("jbGit.blame")) {
+          this.renderAll();
+        }
+      }),
     );
   }
 
@@ -131,18 +155,28 @@ export class BlameAnnotationController implements vscode.Disposable {
       );
       return;
     }
-    const previous: BlameTarget = {
+    await this.annotateAt({
       repositoryRoot: target.repositoryRoot,
       relativePath: entry.previousPath,
       revision: entry.previousHash,
-    };
-    const repository = this.manager.snapshot(previous.repositoryRoot)?.repository;
+    });
+  }
+
+  /**
+   * Opens a file as it stood at `revision` and annotates it.
+   *
+   * Shared by "Annotate Previous Revision" and by annotating a revision the
+   * user named, so both land on the same read-only revision document rather
+   * than on two subtly different ones.
+   */
+  public async annotateAt(target: BlameTarget): Promise<void> {
+    const repository = this.manager.snapshot(target.repositoryRoot)?.repository;
     if (!repository) return;
-    const content = await repository.fileContent(previous.relativePath, previous.revision);
-    const revisionUri = await this.openRevision(previous, content);
+    const content = await repository.fileContent(target.relativePath, target.revision);
+    const revisionUri = await this.openRevision(target, content);
     const document = await vscode.workspace.openTextDocument(revisionUri);
     await vscode.window.showTextDocument(document, { preview: false });
-    await this.show(document, previous);
+    await this.show(document, target);
   }
 
   private forget(uri: vscode.Uri): void {
@@ -183,7 +217,7 @@ export class BlameAnnotationController implements vscode.Disposable {
       // against the buffer, which is both what an unsaved edit needs and what
       // lets a read-only revision document be annotated at all.
       const contents = target.revision || document.isDirty ? document.getText() : undefined;
-      const entries = await this.manager.blame(target.repositoryRoot, target.relativePath, target.revision, contents);
+      const entries = await this.manager.blame(target.repositoryRoot, target.relativePath, target.revision, contents, readBlameOptions());
       // The document may have been closed, or the annotation turned off, while Git ran.
       if (this.disposed || !this.targets.has(key)) return;
       this.entries.set(key, entries);
@@ -196,7 +230,10 @@ export class BlameAnnotationController implements vscode.Disposable {
   }
 
   private renderAll(): void {
-    for (const editor of vscode.window.visibleTextEditors) this.render(editor);
+    for (const editor of vscode.window.visibleTextEditors) {
+      this.render(editor);
+      this.renderCommitHighlight(editor);
+    }
   }
 
   private render(editor: vscode.TextEditor): void {
@@ -206,7 +243,11 @@ export class BlameAnnotationController implements vscode.Disposable {
       return;
     }
     const options = readAnnotationOptions();
-    const heatMap = vscode.workspace.getConfiguration("jbGit").get<boolean>("blame.heatMap", true);
+    const configuration = vscode.workspace.getConfiguration("jbGit");
+    const heatMap = configuration.get<boolean>("blame.heatMap", true);
+    // The revision being annotated, so its own lines can be marked the way IDEA
+    // marks them. A working-tree annotation has no such revision.
+    const annotated = this.targets.get(editor.document.uri.toString())?.revision;
     const lines = layoutBlameAnnotations(entries, options);
     const decorations: vscode.DecorationOptions[] = [];
     // The layout keeps the order of `entries`, so the entry a line came from is
@@ -215,12 +256,14 @@ export class BlameAnnotationController implements vscode.Disposable {
       // Blame is of the file Git saw; a buffer edited since can be shorter.
       if (line.line < 0 || line.line >= editor.document.lineCount) continue;
       const entry = entries[index];
+      const own = annotated !== undefined && entry.hash === annotated;
       decorations.push({
         range: new vscode.Range(line.line, 0, line.line, 0),
         hoverMessage: hover(entry, editor.document.uri, line.line),
         renderOptions: {
           before: {
             contentText: nonBreaking(line.text),
+            ...(own ? { fontWeight: "bold" } : {}),
             ...(heatMap ? { backgroundColor: heatColor(line.heat) } : {}),
           },
         },
@@ -229,15 +272,52 @@ export class BlameAnnotationController implements vscode.Disposable {
     editor.setDecorations(this.decoration, decorations);
   }
 
+  /** Lights up every line the caret's commit touched, which is IDEA's hover behaviour. */
+  private renderCommitHighlight(editor: vscode.TextEditor): void {
+    const entries = this.entries.get(editor.document.uri.toString());
+    const enabled = vscode.workspace.getConfiguration("jbGit").get<boolean>("blame.highlightCommit", true);
+    if (!entries?.length || !enabled) {
+      editor.setDecorations(this.commitHighlight, []);
+      return;
+    }
+    const caret = editor.selection.active.line;
+    const current = entries.find((entry) => entry.finalLine === caret + 1);
+    // An uncommitted line has no commit to gather, and gathering every other
+    // uncommitted line would highlight unrelated edits.
+    if (!current || current.uncommitted) {
+      editor.setDecorations(this.commitHighlight, []);
+      return;
+    }
+    const ranges: vscode.Range[] = [];
+    for (const entry of entries) {
+      if (entry.hash !== current.hash) continue;
+      const line = entry.finalLine - 1;
+      if (line < 0 || line >= editor.document.lineCount) continue;
+      ranges.push(new vscode.Range(line, 0, line, 0));
+    }
+    editor.setDecorations(this.commitHighlight, ranges);
+  }
+
   public dispose(): void {
     this.disposed = true;
     for (const timer of this.pending.values()) clearTimeout(timer);
     this.pending.clear();
     for (const registration of this.registrations) registration.dispose();
     this.decoration.dispose();
+    this.commitHighlight.dispose();
     this.targets.clear();
     this.entries.clear();
   }
+}
+
+/** IDEA's annotation Options, which decide what Git looks through before crediting a line. */
+export function readBlameOptions(): GitBlameOptions {
+  const configuration = vscode.workspace.getConfiguration("jbGit");
+  return {
+    ignoreWhitespace: configuration.get<boolean>("blame.ignoreWhitespace", false),
+    detectMovementsWithinFile: configuration.get<boolean>("blame.detectMovementsWithinFile", false),
+    detectMovementsAcrossFiles: configuration.get<boolean>("blame.detectMovementsAcrossFiles", false),
+  };
 }
 
 export function readAnnotationOptions(now = Date.now()): BlameAnnotationOptions {

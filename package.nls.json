@@ -12,5 +12,9 @@
   "configuration.blame.showRevision": "Show the abbreviated object ID in the Git Blame annotation column.",
   "configuration.blame.dateFormat": "Whether the Git Blame annotation shows the commit's own date or how long ago it was.",
   "configuration.blame.maxAuthorWidth": "Characters of the author name shown before the Git Blame annotation truncates it.",
-  "configuration.blame.heatMap": "Tint each Git Blame annotation by how recent its commit is within the file."
+  "configuration.blame.heatMap": "Tint each Git Blame annotation by how recent its commit is within the file.",
+  "configuration.blame.highlightCommit": "Highlight every line the caret's commit touched while a file is annotated.",
+  "configuration.blame.ignoreWhitespace": "Look through whitespace-only changes, so a reindent is not the last change to a line (git blame -w).",
+  "configuration.blame.detectMovementsWithinFile": "Credit a block moved inside the file to where it came from (git blame -M).",
+  "configuration.blame.detectMovementsAcrossFiles": "Also follow a block copied in from another file the same commit touched. Slower on a large history (git blame -C)."
 }

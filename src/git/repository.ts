@@ -16,6 +16,7 @@ import {
   GitConflictVersions,
   GitLogOptions,
   GitBlameEntry,
+  GitBlameOptions,
   GitDiffHunk,
   GitPullStrategy,
   GitOperationState,
@@ -282,7 +283,12 @@ export class GitRepository {
    * `contents` instead of what is on disk so an unsaved editor buffer stays
    * aligned with its own lines.
    */
-  public async blame(pathSpec: string, revision?: string, contents?: string | Buffer): Promise<GitBlameEntry[]> {
+  public async blame(
+    pathSpec: string,
+    revision?: string,
+    contents?: string | Buffer,
+    options: GitBlameOptions = {},
+  ): Promise<GitBlameEntry[]> {
     // `git blame` hands its leftover arguments to the revision parser, so
     // `--end-of-options` does not keep an option-like revision out of blame's
     // own option parser: `-L1,1` would run as a flag and silently return one
@@ -292,6 +298,12 @@ export class GitRepository {
       "--literal-pathspecs",
       "blame",
       "--porcelain",
+      // IDEA's annotation Options, which change which commit a line is
+      // credited to: skip a reindent, follow a block moved inside the file, or
+      // follow one copied in from another file the same commit touched.
+      ...(options.ignoreWhitespace ? ["-w"] : []),
+      ...(options.detectMovementsWithinFile ? ["-M"] : []),
+      ...(options.detectMovementsAcrossFiles ? ["-C"] : []),
       ...(contents !== undefined ? ["--contents", "-"] : []),
       ...(commit ? [commit] : []),
       "--",

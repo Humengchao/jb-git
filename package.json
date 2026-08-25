@@ -105,6 +105,10 @@
         "title": "JB Git: Annotate Previous Revision"
       },
       {
+        "command": "jbGit.annotateRevision",
+        "title": "JB Git: Annotate Revision"
+      },
+      {
         "command": "jbGit.copyRevisionNumber",
         "title": "JB Git: Copy Revision Number"
       },
@@ -409,9 +413,14 @@
           "group": "jbGit@11"
         },
         {
-          "command": "jbGit.blame",
+          "command": "jbGit.annotateRevision",
           "when": "resourceScheme == file && jbGit.hasRepository",
           "group": "jbGit@12"
+        },
+        {
+          "command": "jbGit.blame",
+          "when": "resourceScheme == file && jbGit.hasRepository",
+          "group": "jbGit@13"
         }
       ],
       "explorer/context": [
@@ -526,6 +535,26 @@
           "type": "boolean",
           "default": true,
           "description": "%configuration.blame.heatMap%"
+        },
+        "jbGit.blame.highlightCommit": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.blame.highlightCommit%"
+        },
+        "jbGit.blame.ignoreWhitespace": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.blame.ignoreWhitespace%"
+        },
+        "jbGit.blame.detectMovementsWithinFile": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.blame.detectMovementsWithinFile%"
+        },
+        "jbGit.blame.detectMovementsAcrossFiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.blame.detectMovementsAcrossFiles%"
         }
       }
     }

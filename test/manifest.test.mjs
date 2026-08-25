@@ -60,6 +60,7 @@ test("contributes the annotation commands IDEA's Blame gutter offers", () => {
   for (const command of [
     "jbGit.toggleBlameAnnotations",
     "jbGit.annotatePreviousRevision",
+    "jbGit.annotateRevision",
     "jbGit.copyRevisionNumber",
     "jbGit.blameShowCommit",
   ]) {
@@ -96,4 +97,29 @@ test("annotates through decorations that survive a dirty buffer", () => {
   const extension = readSource("../src/extension.ts", import.meta.url);
   assert.match(extension, /blameAnnotations,/, "the controller belongs to the extension's subscriptions");
   assert.match(extension, /blameAnnotations\.refresh\(\);/, "a commit or checkout changes who each line belongs to");
+});
+
+test("offers IDEA's annotation options and re-reads only when they change the answer", () => {
+  const controller = readSource("../src/views/blameDecorations.ts", import.meta.url);
+  // -w/-M/-C change which commit owns a line, so they need Git again; the rest
+  // only changes how the same answer is drawn.
+  assert.match(controller, /affectsConfiguration\("jbGit\.blame\.ignoreWhitespace"\)/);
+  assert.match(controller, /affectsConfiguration\("jbGit\.blame\.detectMovementsWithinFile"\)/);
+  assert.match(controller, /affectsConfiguration\("jbGit\.blame\.detectMovementsAcrossFiles"\)/);
+  assert.match(controller, /\} else if \(event\.affectsConfiguration\("jbGit\.blame"\)\) \{\s*this\.renderAll\(\);/);
+  assert.match(controller, /readBlameOptions\(\)/);
+  // IDEA lights up the rest of the commit you are pointing at; the caret leads
+  // here because a decoration gives an extension no pointer position.
+  assert.match(controller, /onDidChangeTextEditorSelection/);
+  assert.match(controller, /private renderCommitHighlight\(editor: vscode\.TextEditor\): void/);
+  assert.match(controller, /if \(!current \|\| current\.uncommitted\)/, "uncommitted lines share no commit to gather");
+  assert.match(controller, /this\.commitHighlight\.dispose\(\);/);
+  // Annotating a chosen revision and the previous one land on one code path.
+  assert.match(controller, /public async annotateAt\(target: BlameTarget\): Promise<void>/);
+  assert.match(controller, /await this\.annotateAt\(\{/);
+  const repository = readSource("../src/git/repository.ts", import.meta.url);
+  const blame = repository.slice(repository.indexOf("public async blame("));
+  assert.match(blame.slice(0, 1600), /options\.ignoreWhitespace \? \["-w"\] : \[\]/);
+  assert.match(blame.slice(0, 1600), /options\.detectMovementsWithinFile \? \["-M"\] : \[\]/);
+  assert.match(blame.slice(0, 1600), /options\.detectMovementsAcrossFiles \? \["-C"\] : \[\]/);
 });
