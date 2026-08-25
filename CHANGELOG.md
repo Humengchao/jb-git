@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.19
+
+- feat: drag-and-drop rebase reordering, and the last two webviews learn Chinese
+
 ## 0.1.18
 
 - fix: survive a render throw, and finish the tool window's colours and locale
