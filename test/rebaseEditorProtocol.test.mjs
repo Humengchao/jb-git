@@ -93,3 +93,31 @@ test("guards the interactive rebase command and keeps a paused rebase recoverabl
   const declared = manifest.contributes.commands.filter((entry) => entry.command === "jbGit.interactiveRebase");
   assert.equal(declared.length, 1, "the command must appear once in the manifest");
 });
+
+test("reorders by drag handle and Alt+arrows, and speaks the user's language", () => {
+  const editor = source("src/webviews/rebaseEditor.ts");
+  // Only the handle starts a drag: a draggable row would swallow text
+  // selection in the subject and the message editor.
+  assert.match(editor, /grip\.draggable = true;/);
+  assert.match(editor, /grip\.addEventListener\('dragstart'/);
+  assert.doesNotMatch(editor, /item\.draggable = true/);
+  // Dropping computes the insertion point from the row's midpoint and adjusts
+  // for the removal shifting later indices.
+  assert.match(editor, /let insertAt = index \+ \(before \? 0 : 1\);/);
+  assert.match(editor, /if \(dragIndex < insertAt\) insertAt -= 1;/);
+  // Alt+ArrowUp/Down moves from anywhere inside the row, and preventDefault
+  // keeps Alt+ArrowDown from opening the action dropdown.
+  assert.match(editor, /event\.altKey/);
+  assert.match(editor, /move\(index, event\.key === 'ArrowUp' \? -1 : 1\);/);
+  // The editor was the one webview with no Chinese at all.
+  assert.match(editor, /'Interactive Rebase': '交互式变基'/);
+  assert.match(editor, /'Start Rebase': '开始变基'/);
+  // Every action explains itself; git's own verbs stay untranslated.
+  assert.match(editor, /select\.title = t\(ACTION_HELP\[row\.action\] \|\| ''\)/);
+  // A fresh dialog has nothing to do yet; that is a state, not a failure.
+  assert.match(editor, /quiet: true/);
+  assert.match(editor, /\.problem\.quiet \{ color: var\(--vscode-descriptionForeground\); \}/);
+  // Folded rows tuck under the commit they join, and the select is themed.
+  assert.match(editor, /li\.folded \{ margin-left: 26px;/);
+  assert.match(editor, /\.select-shell select \{[^}]*appearance: none/);
+});

@@ -131,15 +131,26 @@ function styles(): string {
     h1 { font-size: 1.1em; margin: 0 0 4px; }
     .hint { color: var(--vscode-descriptionForeground); margin: 0 0 12px; }
     ol { list-style: none; margin: 0; padding: 0; }
-    li { border: 1px solid var(--vscode-panel-border); border-radius: 4px; margin-bottom: 6px; padding: 6px 8px; display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; align-items: start; }
+    li { border: 1px solid var(--vscode-panel-border); border-radius: 4px; margin-bottom: 6px; padding: 6px 8px; display: grid; grid-template-columns: auto auto auto 1fr auto; gap: 8px; align-items: start; }
+    li.dragging { opacity: 0.45; }
+    li.drop-above { box-shadow: 0 -2px 0 0 var(--vscode-focusBorder); }
+    li.drop-below { box-shadow: 0 2px 0 0 var(--vscode-focusBorder); }
     li.dropped .subject { text-decoration: line-through; opacity: 0.6; }
-    li.folded { border-left: 3px solid var(--vscode-textLink-foreground); }
-    .order { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; padding-top: 4px; }
-    select { background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 2px; padding: 2px 4px; }
+    li.dropped .oid, li.dropped .author { opacity: 0.6; }
+    /* A fold joins the commit above it, so its row tucks under that one the
+       way IDEA indents squash and fixup lines. */
+    li.folded { margin-left: 26px; border-left: 3px solid var(--vscode-textLink-foreground); }
+    .grip { cursor: grab; color: var(--vscode-descriptionForeground); padding: 2px 2px 0; user-select: none; letter-spacing: -1px; }
+    .grip:active { cursor: grabbing; }
+    .order { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; padding-top: 4px; min-width: 16px; text-align: right; }
+    .select-shell { position: relative; display: flex; min-width: 0; }
+    .select-shell::after { content: ''; position: absolute; right: 9px; top: 50%; width: 5px; height: 5px; margin-top: -4px; border-right: 1px solid var(--vscode-dropdown-foreground, var(--vscode-foreground)); border-bottom: 1px solid var(--vscode-dropdown-foreground, var(--vscode-foreground)); transform: rotate(45deg); opacity: .7; pointer-events: none; }
+    .select-shell select { width: 100%; min-width: 88px; height: 26px; padding: 0 24px 0 8px; appearance: none; font: inherit; color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); background: var(--vscode-dropdown-background, var(--vscode-input-background)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); border-radius: 3px; cursor: pointer; text-overflow: ellipsis; }
+    .select-shell select:hover { border-color: var(--vscode-focusBorder); }
     .subject { padding-top: 4px; overflow-wrap: anywhere; }
     .oid { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); margin-right: 6px; }
     .author { color: var(--vscode-descriptionForeground); }
-    textarea { grid-column: 3 / span 2; width: 100%; box-sizing: border-box; min-height: 64px; font-family: var(--vscode-editor-font-family); background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; padding: 4px; resize: vertical; }
+    textarea { grid-column: 4 / span 2; width: 100%; box-sizing: border-box; min-height: 64px; font-family: var(--vscode-editor-font-family); background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; padding: 4px; resize: vertical; }
     .moves { display: flex; gap: 2px; }
     button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 2px; padding: 2px 6px; cursor: pointer; }
     button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
@@ -148,6 +159,8 @@ function styles(): string {
     button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
     footer { position: fixed; bottom: 0; left: 0; right: 0; display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: var(--vscode-editor-background); border-top: 1px solid var(--vscode-panel-border); }
     .problem { color: var(--vscode-errorForeground); flex: 1; }
+    /* A fresh dialog has nothing to do yet; that is a state, not a failure. */
+    .problem.quiet { color: var(--vscode-descriptionForeground); }
     :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
   `;
 }
@@ -158,14 +171,41 @@ function script(): string {
   return `
     const vscode = acquireVsCodeApi();
     const app = document.getElementById('app');
+    const isZh = document.documentElement.lang.toLowerCase().startsWith('zh');
+    const zh = isZh ? {
+      'Interactive Rebase': '交互式变基',
+      'The list runs oldest first, like Git. Drag a row by its handle (or press Alt+↑/↓), choose an action, then start the rebase.':
+        '列表按最旧在前排列，与 Git 一致。拖动行首的手柄（或按 Alt+↑/↓）调整顺序，选择操作，然后开始变基。',
+      'Start Rebase': '开始变基', 'Cancel': '取消',
+      'Dropping every commit would leave nothing to replay.': '丢弃所有提交后将没有可重放的内容。',
+      'The first replayed commit has nothing earlier to fold into.': '第一个重放的提交没有更早的提交可以并入。',
+      'A reword or squash needs a commit message.': 'reword 或 squash 需要提交消息。',
+      'This plan leaves history unchanged.': '当前计划不会改变历史。',
+      'Move earlier': '上移', 'Move later': '下移', 'Drag to reorder': '拖动以重新排序',
+      'Action for commit': '选择操作：提交', 'Message for commit': '提交消息：提交',
+      'Keep this commit as it is': '按原样保留此提交',
+      'Keep the changes and edit the commit message': '保留更改，修改提交消息',
+      'Fold into the previous kept commit and keep both messages': '并入上一个保留的提交，保留两者的消息',
+      'Fold into the previous kept commit and discard this message': '并入上一个保留的提交，丢弃此提交的消息',
+      'Remove this commit': '丢弃此提交',
+    } : {};
+    const t = value => zh[value] || value;
+    const ACTION_HELP = {
+      pick: 'Keep this commit as it is',
+      reword: 'Keep the changes and edit the commit message',
+      squash: 'Fold into the previous kept commit and keep both messages',
+      fixup: 'Fold into the previous kept commit and discard this message',
+      drop: 'Remove this commit',
+    };
     let rows = [];
     let originalOrder = [];
     let actions = ['pick'];
+    let dragIndex;
 
     function node(tag, className, text) {
       const element = document.createElement(tag);
       if (className) element.className = className;
-      if (text !== undefined) element.textContent = text;
+      if (text !== undefined) element.textContent = t(text);
       return element;
     }
 
@@ -189,17 +229,18 @@ function script(): string {
       return [leader.message || leader.original, row.original].filter(Boolean).join('\n\n');
     }
 
+    /** The reason Start is disabled; quiet marks the nothing-to-do-yet state. */
     function localProblem() {
       const applied = rows.filter((row) => row.action !== 'drop');
-      if (!applied.length) return 'Dropping every commit would leave nothing to replay.';
-      if (isFold(applied[0].action)) return 'The first replayed commit has nothing earlier to fold into.';
+      if (!applied.length) return { text: 'Dropping every commit would leave nothing to replay.' };
+      if (isFold(applied[0].action)) return { text: 'The first replayed commit has nothing earlier to fold into.' };
       for (const row of rows) {
-        if (needsMessage(row.action) && !row.message.trim()) return 'A reword or squash needs a commit message.';
+        if (needsMessage(row.action) && !row.message.trim()) return { text: 'A reword or squash needs a commit message.' };
       }
       if (rows.every((row, index) => row.action === 'pick' && row.oid === originalOrder[index])) {
-        return 'This plan leaves history unchanged.';
+        return { text: 'This plan leaves history unchanged.', quiet: true };
       }
-      return '';
+      return undefined;
     }
 
     function move(index, delta) {
@@ -210,32 +251,56 @@ function script(): string {
       render(target);
     }
 
+    function clearDropMarks() {
+      for (const item of app.querySelectorAll('li')) item.classList.remove('drop-above', 'drop-below');
+    }
+
     function render(focusIndex) {
       app.replaceChildren();
       app.append(node('h1', undefined, 'Interactive Rebase'));
-      app.append(node('p', 'hint', 'The list runs oldest first, like Git. Reorder rows, choose an action, then start the rebase.'));
+      app.append(node('p', 'hint', 'The list runs oldest first, like Git. Drag a row by its handle (or press Alt+↑/↓), choose an action, then start the rebase.'));
 
       const list = node('ol');
       rows.forEach((row, index) => {
         const item = node('li');
         if (row.action === 'drop') item.classList.add('dropped');
         if (isFold(row.action)) item.classList.add('folded');
+
+        // Only the handle starts a drag: a draggable row would swallow text
+        // selection in the subject and the message editor.
+        const grip = node('span', 'grip', '⋮⋮');
+        grip.draggable = true;
+        grip.title = t('Drag to reorder');
+        grip.setAttribute('aria-hidden', 'true');
+        grip.addEventListener('dragstart', (event) => {
+          dragIndex = index;
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', String(index));
+          requestAnimationFrame(() => item.classList.add('dragging'));
+        });
+        grip.addEventListener('dragend', () => { dragIndex = undefined; clearDropMarks(); item.classList.remove('dragging'); });
+        item.append(grip);
+
         item.append(node('span', 'order', String(index + 1)));
 
+        const shell = node('div', 'select-shell');
         const select = node('select');
-        select.setAttribute('aria-label', 'Action for commit ' + row.shortOid);
+        select.setAttribute('aria-label', t('Action for commit') + ' ' + row.shortOid);
         for (const action of actions) {
           const option = node('option', undefined, action);
           option.value = action;
+          option.title = t(ACTION_HELP[action] || '');
           if (action === row.action) option.selected = true;
           select.append(option);
         }
+        select.title = t(ACTION_HELP[row.action] || '');
         select.addEventListener('change', () => {
           row.action = select.value;
           if (needsMessage(row.action) && !row.message) row.message = prefill(row, index);
           render(index);
         });
-        item.append(select);
+        shell.append(select);
+        item.append(shell);
 
         const subject = node('div', 'subject');
         subject.append(node('span', 'oid', row.shortOid));
@@ -245,13 +310,13 @@ function script(): string {
 
         const moves = node('div', 'moves');
         const up = node('button', undefined, '↑');
-        up.title = 'Move earlier';
-        up.setAttribute('aria-label', 'Move ' + row.shortOid + ' earlier');
+        up.title = t('Move earlier');
+        up.setAttribute('aria-label', t('Move earlier') + ' ' + row.shortOid);
         up.disabled = index === 0;
         up.addEventListener('click', () => move(index, -1));
         const down = node('button', undefined, '↓');
-        down.title = 'Move later';
-        down.setAttribute('aria-label', 'Move ' + row.shortOid + ' later');
+        down.title = t('Move later');
+        down.setAttribute('aria-label', t('Move later') + ' ' + row.shortOid);
         down.disabled = index === rows.length - 1;
         down.addEventListener('click', () => move(index, 1));
         moves.append(up, down);
@@ -260,10 +325,43 @@ function script(): string {
         if (needsMessage(row.action)) {
           const editor = node('textarea');
           editor.value = row.message;
-          editor.setAttribute('aria-label', 'Message for commit ' + row.shortOid);
+          editor.setAttribute('aria-label', t('Message for commit') + ' ' + row.shortOid);
           editor.addEventListener('input', () => { row.message = editor.value; refreshFooter(); });
           item.append(editor);
         }
+
+        item.addEventListener('dragover', (event) => {
+          if (dragIndex === undefined) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+          const rect = item.getBoundingClientRect();
+          const before = event.clientY < rect.top + rect.height / 2;
+          clearDropMarks();
+          if (index === dragIndex) return;
+          item.classList.add(before ? 'drop-above' : 'drop-below');
+        });
+        item.addEventListener('drop', (event) => {
+          if (dragIndex === undefined) return;
+          event.preventDefault();
+          const rect = item.getBoundingClientRect();
+          const before = event.clientY < rect.top + rect.height / 2;
+          let insertAt = index + (before ? 0 : 1);
+          if (dragIndex < insertAt) insertAt -= 1;
+          const from = dragIndex;
+          dragIndex = undefined;
+          clearDropMarks();
+          if (insertAt === from) return;
+          const moved = rows.splice(from, 1)[0];
+          rows.splice(insertAt, 0, moved);
+          render(insertAt);
+        });
+        // IDEA's keyboard reorder, from anywhere inside the row. preventDefault
+        // also keeps Alt+ArrowDown from opening the action dropdown.
+        item.addEventListener('keydown', (event) => {
+          if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+          event.preventDefault();
+          move(index, event.key === 'ArrowUp' ? -1 : 1);
+        });
         list.append(item);
       });
       app.append(list);
@@ -293,7 +391,7 @@ function script(): string {
       const problem = localProblem();
       const label = app.querySelector('.problem');
       const start = app.querySelector('button.primary');
-      if (label) label.textContent = problem;
+      if (label) { label.textContent = problem ? t(problem.text) : ''; label.classList.toggle('quiet', Boolean(problem && problem.quiet)); }
       if (start) start.disabled = Boolean(problem);
     }
 
@@ -314,7 +412,7 @@ function script(): string {
         render();
       } else if (data.type === 'error') {
         const label = app.querySelector('.problem');
-        if (label) label.textContent = data.message;
+        if (label) { label.textContent = data.message; label.classList.remove('quiet'); }
       }
     });
 

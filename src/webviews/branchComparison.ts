@@ -146,7 +146,14 @@ const comparisonStyles = String.raw`
   .title { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); font-size: 15px; font-weight: 600; }
   .refs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toolbar { display: flex; align-items: center; gap: 3px; padding: 4px 8px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
-  .toolbar input, .toolbar select { height: 27px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; padding: 2px 7px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .toolbar input { height: 27px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; padding: 2px 7px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  /* Same themed dropdown as the tool window: the browser default was the one
+     stock control left on this toolbar. */
+  .select-shell { position: relative; display: flex; min-width: 0; }
+  .select-shell::after { content: ''; position: absolute; right: 9px; top: 50%; width: 5px; height: 5px; margin-top: -4px; border-right: 1px solid var(--vscode-dropdown-foreground, var(--vscode-foreground)); border-bottom: 1px solid var(--vscode-dropdown-foreground, var(--vscode-foreground)); transform: rotate(45deg); opacity: .7; pointer-events: none; }
+  .select-shell select { height: 27px; min-width: 0; padding: 0 24px 0 8px; appearance: none; font: inherit; color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); background: var(--vscode-dropdown-background, var(--vscode-input-background)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); border-radius: 3px; cursor: pointer; text-overflow: ellipsis; }
+  .select-shell select:hover { border-color: var(--vscode-focusBorder); }
+  .select-shell select:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .toolbar input { width: min(260px, 38vw); }
   .toolbar-button { min-width: 28px; height: 27px; padding: 0 7px; border-radius: 3px; color: var(--vscode-descriptionForeground); }
   .toolbar-button:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
@@ -181,28 +188,39 @@ const comparisonScript = String.raw`
   let query = '';
   let statusFilter = 'all';
   const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
-  const node = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; };
-  const button = (label, title, handler, className) => { const element = node('button', className, label); element.type = 'button'; element.title = title; element.addEventListener('click', handler); return element; };
+  const isZh = document.documentElement.lang.toLowerCase().startsWith('zh');
+  const zh = isZh ? {
+    'Filter changed files': '筛选更改的文件', 'Filter by change status': '按更改状态筛选',
+    'All statuses': '全部状态', 'Modified': '已修改', 'Added': '已添加', 'Deleted': '已删除', 'Renamed': '已重命名',
+    'Collapse all folders': '折叠所有文件夹', 'Expand all folders': '展开所有文件夹',
+    'No files match the current filters.': '没有符合当前筛选条件的文件。',
+    'The selected branches have no file differences.': '所选分支之间没有文件差异。',
+  } : {};
+  const t = value => typeof value === 'string' ? (zh[value] || value) : value;
+  const fileCount = count => isZh ? String(count) + ' 个文件' : String(count) + (count === 1 ? ' file' : ' files');
+  const node = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = t(text); return element; };
+  const button = (label, title, handler, className) => { const element = node('button', className, label); element.type = 'button'; element.title = t(title); element.addEventListener('click', handler); return element; };
 
   function render() {
     app.replaceChildren();
     const root = node('div', 'root');
     const title = node('div', 'title');
-    title.append(node('span', '', '↔'), node('span', 'refs', 'Changes Between ' + state.leftRef + ' and ' + state.rightRef));
+    title.append(node('span', '', '↔'), node('span', 'refs', isZh ? '比较 ' + state.leftRef + ' 与 ' + state.rightRef + ' 的更改' : 'Changes Between ' + state.leftRef + ' and ' + state.rightRef));
     const toolbar = node('div', 'toolbar');
-    const search = node('input'); search.type = 'search'; search.placeholder = 'Filter changed files'; search.value = query; search.setAttribute('aria-label', 'Filter changed files');
-    const status = node('select'); status.setAttribute('aria-label', 'Filter by change status');
+    const search = node('input'); search.type = 'search'; search.placeholder = t('Filter changed files'); search.value = query; search.setAttribute('aria-label', t('Filter changed files'));
+    const status = node('select'); status.setAttribute('aria-label', t('Filter by change status')); status.title = t('Filter by change status');
+    const statusShell = node('div', 'select-shell'); statusShell.append(status);
     for (const [value, label] of [['all', 'All statuses'], ['M', 'Modified'], ['A', 'Added'], ['D', 'Deleted'], ['R', 'Renamed']]) { const option = node('option', '', label); option.value = value; option.selected = value === statusFilter; status.append(option); }
     const count = node('span', 'count');
     toolbar.append(
-      search, status,
+      search, statusShell,
       button('⌃', 'Collapse all folders', () => { collapsed = new Set(allDirectoryPaths()); render(); }, 'toolbar-button'),
       button('⌄', 'Expand all folders', () => { collapsed.clear(); render(); }, 'toolbar-button'),
       count,
     );
     const tree = node('div', 'tree'); tree.setAttribute('role', 'tree');
     const refreshTree = () => {
-      tree.replaceChildren(); const files = filteredFiles(); count.textContent = files.length + (files.length === 1 ? ' file' : ' files');
+      tree.replaceChildren(); const files = filteredFiles(); count.textContent = fileCount(files.length);
       if (!files.length) tree.append(node('div', 'empty', state.files.length ? 'No files match the current filters.' : 'The selected branches have no file differences.'));
       else renderTree(tree, buildTree(files));
       setupTreeKeyboard(tree);
@@ -250,7 +268,7 @@ const comparisonScript = String.raw`
     }, 'folder-row');
     row.style.paddingLeft = (6 + depth * 16) + 'px'; row.setAttribute('aria-expanded', String(!isCollapsed));
     const count = countFiles(directory);
-    row.append(node('span', 'twisty', isCollapsed ? '›' : '⌄'), node('span', 'folder-icon', '▱'), node('span', 'folder-name', compacted.name), node('span', 'folder-count', count + (count === 1 ? ' file' : ' files')));
+    row.append(node('span', 'twisty', isCollapsed ? '›' : '⌄'), node('span', 'folder-icon', '▱'), node('span', 'folder-name', compacted.name), node('span', 'folder-count', fileCount(count)));
     const children = node('div'); children.hidden = isCollapsed;
     [...directory.directories.values()].sort(byName).forEach(child => children.append(renderDirectory(child, depth + 1)));
     [...directory.files].sort(byName).forEach(file => children.append(renderFile(file, depth + 1)));
@@ -261,7 +279,7 @@ const comparisonScript = String.raw`
     const status = (file.status || 'M').charAt(0);
     const row = button('', file.path, () => selectFile(file.index), 'file-row' + (file.index === selectedIndex ? ' selected' : '') + (file.index === loadingIndex ? ' loading' : ''));
     row.style.paddingLeft = (22 + depth * 16) + 'px'; row.dataset.index = String(file.index); row.setAttribute('role', 'treeitem'); row.setAttribute('aria-selected', String(file.index === selectedIndex));
-    row.append(node('span', 'status status-' + status, status), node('span', 'file-icon', fileIcon(file.path)), node('span', 'file-name', file.path.split('/').pop()));
+    row.append(node('span', 'status status-' + status, status), node('span', 'file-icon', fileIcon(file.path)), node('span', 'file-name status-' + status, file.path.split('/').pop()));
     if (file.originalPath) row.append(node('span', 'rename', '← ' + file.originalPath));
     return row;
   }
