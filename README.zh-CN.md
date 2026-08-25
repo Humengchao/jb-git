@@ -202,6 +202,17 @@ npm run package
 
 在 VS Code 中按 `F5` 可以启动 Extension Development Host。
 
+### 查看界面实际渲染
+
+测试套件不渲染任何 Webview：它们检查源码文本、驱动真实 Git、激活扩展宿主。这个缺口曾经藏住一个脚本无法解析的序列编辑器——面板标题正确、内容全空，而所有测试都是绿的。`scripts/screenshot.mjs` 会在真实 VS Code 里打开指定界面并截图，这类问题一条命令即可发现：
+
+```bash
+node scripts/screenshot.mjs --list
+node scripts/screenshot.mjs rebase --out /tmp/rebase.png
+```
+
+每次运行会新建一个用完即弃的仓库，需要显示环境和截图工具（`xvfb`、`imagemagick` 以及 Electron 常用的那几个库）。它是手动工具而不是 CI 步骤，因为"看图"本身才是重点。
+
 ## 测试与兼容性
 
 - 核心集成测试会创建临时 Git 仓库，验证真实 Git 操作结果。

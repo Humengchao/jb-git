@@ -47,6 +47,23 @@ npm run package
 
 Press `F5` in VS Code to launch the Extension Development Host.
 
+### Looking at a surface
+
+Nothing in the test suite renders a Webview: the tests read source text, drive
+real Git, and activate the extension host. That gap once hid a sequence editor
+whose script did not parse — the panel opened with the right title and nothing
+in it while every test stayed green. `scripts/screenshot.mjs` opens one surface
+in a real VS Code and photographs it, so that failure is one command away:
+
+```bash
+node scripts/screenshot.mjs --list
+node scripts/screenshot.mjs rebase --out /tmp/rebase.png
+```
+
+It builds a throwaway repository per run, and needs a display and a screen
+grabber (`xvfb`, `imagemagick`, and the usual Electron libraries). It is a
+manual tool rather than a CI step, because reading the picture is the point.
+
 ## Versioning
 
 Every installable update receives a new semantic version and produces a newly named VSIX instead of replacing an earlier package. Patch releases are used for fixes, minor releases for substantial new functionality, and major releases for incompatible changes. Automated tests keep the manifest, lockfile, changelog, and installation documentation aligned.
