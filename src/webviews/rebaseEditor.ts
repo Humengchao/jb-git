@@ -124,7 +124,9 @@ function editorDocument(): string {
 }
 
 function styles(): string {
-  return `
+  // String.raw, like every other Webview here: a plain template literal
+  // rewrites the escapes in the text before the sandbox ever sees it.
+  return String.raw`
     :root { color-scheme: light dark; }
     body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; }
     #app { padding: 12px 16px 72px; }
@@ -168,7 +170,12 @@ function styles(): string {
 function script(): string {
   // The sandbox only reorders rows and labels them; every guarantee about which
   // commits may be rewritten is re-checked on the extension side.
-  return `
+  //
+  // String.raw is not decoration. A plain template literal turns the `\n` in
+  // this script's own source into a real newline, and a real newline inside a
+  // single-quoted string is a syntax error, so the whole script failed to parse
+  // and the sequence editor opened as an empty panel.
+  return String.raw`
     const vscode = acquireVsCodeApi();
     const app = document.getElementById('app');
     const isZh = document.documentElement.lang.toLowerCase().startsWith('zh');

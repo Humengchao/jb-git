@@ -77,6 +77,35 @@ test("re-checks the sandbox plan on the extension side before running it", () =>
   assert.match(editor, /isNoOpPlan\(steps, offered\)/);
 });
 
+test("keeps the embedded rebase editor script syntactically valid", () => {
+  // This script reached the sandbox unparseable and the sequence editor opened
+  // as an empty panel: a plain template literal turned its own `\n` into a real
+  // newline, and a real newline inside a single-quoted string does not parse.
+  // It was the one Webview here with no syntax check of its own.
+  const rebaseEditor = source("src/webviews/rebaseEditor.ts");
+  const match = rebaseEditor.match(/function script\(\): string \{[\s\S]*?\n  return String\.raw`([\s\S]*?)`;\n\}/);
+  assert.ok(match, "the embedded script has to be present and tagged String.raw");
+  assert.doesNotThrow(() => new Function(match[1]));
+});
+
+test("embeds every Webview's script and styles as raw templates", () => {
+  // The tag is what keeps the text the sandbox runs identical to the text in
+  // this repository. A new Webview belongs on this list.
+  const required = [
+    ["branchComparison.ts", /const comparisonStyles = String\.raw`/],
+    ["branchComparison.ts", /const comparisonScript = String\.raw`/],
+    ["logPanel.ts", /const logStyles = String\.raw`/],
+    ["logPanel.ts", /const logScript = String\.raw`/],
+    ["mergeEditor.ts", /const mergeStyles = String\.raw`/],
+    ["mergeEditor.ts", /const mergeScript = String\.raw`/],
+    ["rebaseEditor.ts", /function styles\(\): string \{[\s\S]*?return String\.raw`/],
+    ["rebaseEditor.ts", /function script\(\): string \{[\s\S]*?return String\.raw`/],
+  ];
+  for (const [file, pattern] of required) {
+    assert.match(source(`src/webviews/${file}`), pattern, `${file} must embed that template raw`);
+  }
+});
+
 test("guards the interactive rebase command and keeps a paused rebase recoverable", () => {
   const extension = source("src/extension.ts");
   const start = extension.indexOf('registerCommand("jbGit.interactiveRebase"');
