@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.20
+
+- feat: let two changes in one file belong to different Changelists
+- chore: add a way to look at a surface, and keep dev scripts out of the VSIX
+- fix: make the interactive rebase editor render at all
+- feat: offer to park local changes before an interactive rebase
+- fix: four things only visible once the extension was actually rendered
+- feat: add IDEA's Compare contents to the merge editor
+- feat: give Blame IDEA's annotation options, commit highlight and Annotate Revision
+- fix: stop the merge editor's draft from duplicating and swallowing text
+- feat: show what each conflict started from, like IDEA's previous-contents frame
+- feat: annotate the editor with Git Blame the way IDEA does
+- fix: pin cherry-pick and revert revisions so a flag cannot slip past the second parser
+
 ## 0.1.19
 
 - feat: drag-and-drop rebase reordering, and the last two webviews learn Chinese
