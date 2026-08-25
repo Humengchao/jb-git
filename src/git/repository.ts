@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
 import { parsePorcelainV2 } from "./status";
 import { parsePorcelainBlame } from "./blame";
-import { parseUnifiedDiff, patchForHunk } from "./patch";
+import { hunkKeys, type HunkSelection } from "../changelists/hunkOwnership";
+import { parseUnifiedDiff, patchForHunk, patchForHunks } from "./patch";
 import { buildRebaseTodo, posixPath, shellQuote, type RebaseStep } from "../interactiveRebase";
 import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
 import {
@@ -317,6 +318,26 @@ export class GitRepository {
     const base = (await this.currentRevision()) ?? await this.emptyTree();
     const result = await this.runner.run(["diff", "--binary", "--no-ext-diff", base, "--", ...literalPathspecs(paths)], { cwd: this.info.rootPath });
     return result.stdout;
+  }
+
+  /**
+   * The whole diff of one path between HEAD and the working tree, text and hunks together.
+   *
+   * This is the unit a commit deals with: `diffHunks` splits at the Index, which
+   * is where a file is staged, not where a change belongs to a Changelist.
+   */
+  public async diffAgainstHead(pathSpec: string): Promise<{ output: string; hunks: GitDiffHunk[] }> {
+    const revision = await this.currentRevision();
+    const output = await this.runner.text([
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--unified=3",
+      ...(revision ? ["HEAD"] : []),
+      "--",
+      literalPathspec(pathSpec),
+    ], { cwd: this.info.rootPath });
+    return { output, hunks: parseUnifiedDiff(output) };
   }
 
   public async diffHunks(pathSpec: string, staged = false): Promise<GitDiffHunk[]> {
@@ -1002,7 +1023,41 @@ export class GitRepository {
    * Commits complete selected paths through an isolated index. The user's real
    * index is untouched if staging or hooks fail, so partial staging is not lost.
    */
-  public async commitPaths(paths: readonly string[], message: string, options: GitCommitOptions = {}): Promise<string> {
+  /**
+   * Selects which hunks of one path a partial commit takes.
+   *
+   * The two Changelist cases are genuinely different and cannot share one set
+   * of names: a list that claimed hunks out of somebody else's file commits
+   * exactly those, while the list the file belongs to commits everything the
+   * others did not claim — including a hunk that appeared since.
+   */
+  private static selectHunks(
+    selection: HunkSelection,
+    hunks: readonly GitDiffHunk[],
+    keys: readonly string[],
+    pathSpec: string,
+  ): GitDiffHunk[] {
+    if (selection.mode === "except") {
+      const excluded = new Set(selection.keys);
+      return hunks.filter((_hunk, index) => !excluded.has(keys[index]));
+    }
+    const wanted = new Set(selection.keys);
+    const chosen = hunks.filter((_hunk, index) => wanted.has(keys[index]));
+    if (chosen.length !== wanted.size) {
+      // Reconciliation drops a claim whose hunk is gone, so a mismatch here
+      // means the file moved on since the last refresh. Committing the rest
+      // would quietly commit something the user never reviewed.
+      throw new Error(`The changes selected in '${pathSpec}' are no longer the ones on disk. Refresh Local Changes and commit again.`);
+    }
+    return chosen;
+  }
+
+  public async commitPaths(
+    paths: readonly string[],
+    message: string,
+    options: GitCommitOptions = {},
+    hunkSelections?: ReadonlyMap<string, HunkSelection>,
+  ): Promise<string> {
     return this.serial(async () => {
       if (paths.length === 0) throw new Error("No paths were selected for the commit.");
       // A partial commit during a merge, cherry-pick, or revert would conclude that operation:
@@ -1035,7 +1090,28 @@ export class GitRepository {
           cwd: this.info.rootPath,
           env: environment,
         });
-        await this.runner.run(["add", "-A", "--", ...literalPathspecs(pathSpecs)], { cwd: this.info.rootPath, env: environment });
+        const whole = pathSpecs.filter((pathSpec) => !hunkSelections?.has(pathSpec));
+        if (whole.length > 0) {
+          await this.runner.run(["add", "-A", "--", ...literalPathspecs(whole)], { cwd: this.info.rootPath, env: environment });
+        }
+        for (const [pathSpec, selection] of hunkSelections ?? []) {
+          if (!pathSpecs.includes(pathSpec)) continue;
+          const { output, hunks } = await this.diffAgainstHead(pathSpec);
+          if (hunks.length === 0) {
+            throw new Error(`'${pathSpec}' no longer differs from HEAD, so there is nothing of it to commit.`);
+          }
+          const chosen = GitRepository.selectHunks(selection, hunks, hunkKeys(hunks), pathSpec);
+          if (chosen.length === 0) continue;
+          // The patch was taken against HEAD and the temporary index was seeded
+          // from HEAD, so it applies to exactly the side it was measured from.
+          // --cached leaves the working tree alone, which is what keeps the
+          // hunks the other Changelists own where they are.
+          await this.runner.run(["apply", "--cached", "--whitespace=nowarn", "-"], {
+            cwd: this.info.rootPath,
+            env: environment,
+            input: patchForHunks(output, chosen),
+          });
+        }
         const args = ["commit", "--file=-"];
         if (options.amend) args.push("--amend");
         if (options.signoff) args.push("--signoff");

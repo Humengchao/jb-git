@@ -1138,9 +1138,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       const snapshot = manager.snapshot(node.repositoryRoot);
       if (!snapshot?.status) return;
-      const selected = new Set(snapshot.status.changes
-        .filter((change) => changelistStore.listForFile(node.repositoryRoot, change.path).id === node.changelist.id)
-        .map((change) => change.path));
+      // A Changelist owns whole files and, where the user split one, individual
+      // hunks of a file that belongs to another list.
+      const plan = changelistStore.commitPlan(
+        node.repositoryRoot,
+        node.changelist.id,
+        snapshot.status.changes.map((change) => change.path),
+      );
+      const selected = new Set(plan.paths);
       if (selected.size === 0) {
         await vscode.window.showInformationMessage("This Changelist has no local changes.");
         return;
@@ -1154,7 +1159,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!message?.trim()) return;
       const revision = await runWithNotification(
         "Creating Changelist commit",
-        () => manager.commitPaths(node.repositoryRoot, [...selected], message.trim()),
+        () => manager.commitPaths(node.repositoryRoot, [...selected], message.trim(), undefined, plan.hunkSelections),
       );
       if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
     }),

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { GitRunner, isGitAbort } from "./git/runner";
 import { RebaseStep } from "./interactiveRebase";
 import { Diff3Labels, MergeBlock } from "./mergeAnalysis";
+import { HunkSelection } from "./changelists/hunkOwnership";
 import { GitBlameEntry, GitBlameOptions, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
@@ -286,8 +287,19 @@ export class RepositoryManager implements vscode.Disposable {
     return this.mutate(rootPath, () => this.requireRepository(rootPath).commit(message, options));
   }
 
-  public async commitPaths(rootPath: string, paths: readonly string[], message: string, options?: GitCommitOptions): Promise<string> {
-    return this.mutate(rootPath, () => this.requireRepository(rootPath).commitPaths(paths, message, options));
+  public async commitPaths(
+    rootPath: string,
+    paths: readonly string[],
+    message: string,
+    options?: GitCommitOptions,
+    hunkSelections?: ReadonlyMap<string, HunkSelection>,
+  ): Promise<string> {
+    return this.mutate(rootPath, () => this.requireRepository(rootPath).commitPaths(paths, message, options, hunkSelections));
+  }
+
+  /** The whole HEAD-to-working-tree diff of one path, which is the unit Changelist ownership is expressed in. */
+  public async diffAgainstHead(rootPath: string, pathSpec: string): Promise<{ output: string; hunks: GitDiffHunk[] }> {
+    return this.requireRepository(rootPath).diffAgainstHead(pathSpec);
   }
 
   public async createBranch(rootPath: string, name: string, startPoint?: string): Promise<void> {

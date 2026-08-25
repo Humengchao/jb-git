@@ -13,6 +13,7 @@ import { validateGitRefName, validatePathInput } from "../inputValidation";
 import { moveUntrackedToTrash } from "../discardSafety";
 import { previewAndPush } from "../pushPreview";
 import { checkoutWithLocalChanges } from "../smartCheckout";
+import { hunkKeys, partitionHunks } from "../changelists/hunkOwnership";
 import { isLogMessage, isToolTab, LogMessage, ToolTab } from "./logPanelProtocol";
 
 interface LogSelection {
@@ -317,9 +318,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         description: list.description,
         active: list.id === this.changelists.activeId(root),
         changes: changes
-          .filter((change) => this.changelists.listForFile(root, change.path).id === list.id)
+          // A file whose hunks were split appears under every list that owns
+          // part of it. Listing it only under its home list left the claiming
+          // list looking empty while its commit would have taken those hunks.
+          .filter((change) => {
+            const home = this.changelists.listForFile(root, change.path).id;
+            return home === list.id || this.changelists.claims(root, change.path).has(list.id);
+          })
           .map((change) => ({
             path: change.path,
+            partial: this.changelists.claims(root, change.path).size > 0,
             directory: path.dirname(change.path) === "." ? "" : path.dirname(change.path),
             fileName: path.basename(change.path),
             originalPath: change.originalPath,
@@ -664,8 +672,32 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "requestHunks") {
         const change = changes.find((item) => item.path === message.path);
         if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
-        const hunks = await this.readHunks(root, change);
-        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...hunks });
+        const [hunks, owned] = await Promise.all([
+          this.readHunks(root, change),
+          // Only offered where there is somewhere to move a change to.
+          this.changelists.lists(root).length > 1 ? this.readOwnedHunks(root, change.path) : Promise.resolve([]),
+        ]);
+        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...hunks, owned });
+        return;
+      }
+      if (message.type === "moveHunk") {
+        const change = changes.find((item) => item.path === message.path);
+        if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
+        const lists = this.changelists.lists(root);
+        if (lists.length < 2) return;
+        const home = this.changelists.homeListId(root, change.path);
+        const picked = await vscode.window.showQuickPick(
+          lists.map((list) => ({
+            label: list.name,
+            description: list.id === home ? "the file's own Changelist" : undefined,
+            id: list.id,
+          })),
+          { title: `Move this change of ${change.path} to`, placeHolder: "Select a Changelist" },
+        );
+        if (!picked) return;
+        await this.changelists.assignHunks(root, change.path, [message.key], picked.id);
+        const owned = await this.readOwnedHunks(root, change.path);
+        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...(await this.readHunks(root, change)), owned });
         return;
       }
       if (message.type === "selectRef") {
@@ -753,6 +785,21 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         } else {
           const paths = changes.filter((change) => selected.has(change.path)).map((change) => change.path);
           if (!paths.length) return void vscode.window.showWarningMessage("Select at least one changed file to commit.");
+          // "Complete contents" means exactly that, so a file whose hunks the
+          // user split between Changelists would have the other list's work
+          // swept into this commit. Say so rather than doing it quietly.
+          const split = this.changelists.splitPaths(root, paths);
+          if (split.length > 0) {
+            const answer = await vscode.window.showWarningMessage(
+              `${split.length === 1 ? `'${split[0]}' has` : `${split.length} files have`} changes assigned to more than one Changelist.`,
+              {
+                modal: true,
+                detail: "Committing complete contents takes all of them, including the ones another Changelist owns. Commit the Changelist itself to take only its own changes.",
+              },
+              "Commit Everything",
+            );
+            if (answer !== "Commit Everything") return;
+          }
           revision = await this.manager.commitPaths(root, paths, commitMessage, options);
         }
         // Never await a notification here: showInformationMessage only settles once the
@@ -952,6 +999,32 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     const value = { staged, unstaged };
     this.hunkCache.set(key, value);
     return value;
+  }
+
+  /**
+   * The file's changes as Changelist ownership sees them: against HEAD, not
+   * against the Index.
+   *
+   * Staging is a different question from ownership — a hunk can be staged and
+   * still belong to another Changelist — so this is its own reading rather than
+   * a re-slice of the staged/unstaged split.
+   */
+  private async readOwnedHunks(root: string, filePath: string): Promise<Array<{ header: string; lines: string[]; key: string; listId: string; listName: string }>> {
+    const { hunks } = await this.manager.diffAgainstHead(root, filePath);
+    if (hunks.length === 0) return [];
+    const keys = hunkKeys(hunks);
+    // Reading is also when a claim on a hunk that no longer exists is dropped,
+    // which keeps the stored assignments from outliving the changes they name.
+    await this.changelists.reconcileHunks(root, filePath, keys);
+    const home = this.changelists.homeListId(root, filePath);
+    const { byList } = partitionHunks(keys, this.changelists.claims(root, filePath), home);
+    const owner = new Map<number, string>();
+    for (const [listId, indices] of byList) for (const index of indices) owner.set(index, listId);
+    const names = new Map(this.changelists.lists(root).map((list) => [list.id, list.name]));
+    return hunks.map((hunk, index) => {
+      const listId = owner.get(index) ?? home;
+      return { header: hunk.header, lines: hunk.lines, key: keys[index], listId, listName: names.get(listId) ?? "" };
+    });
   }
 
   private async withCancellableProgress(title: string, operation: (signal: AbortSignal) => Promise<void>): Promise<void> {
@@ -1210,6 +1283,7 @@ const logStyles = String.raw`
   .render-error-detail { margin: 0; padding: 8px 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-errorForeground); background: var(--vscode-input-background); border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
   .render-error-actions { display: flex; gap: 8px; }
   .directory, .stage-mark { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .partial-mark { color: var(--vscode-charts-purple, var(--vscode-descriptionForeground)); border-color: currentColor; }
   .stage-mark { margin-left: auto; padding: 0 4px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
   .worktree-mark { border-style: dashed; }
   .row-actions { display: none; align-items: center; }
@@ -1223,6 +1297,11 @@ const logStyles = String.raw`
   .hunk-block + .hunk-block { border-top: 1px solid color-mix(in srgb, var(--vscode-panel-border) 65%, transparent); }
   .hunk-header { min-height: 29px; display: flex; align-items: center; gap: 6px; padding: 3px 7px; }
   .hunk-header code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); }
+  /* Which Changelist a change belongs to, read at a glance beside its header. */
+  /* The list name matters more here than the @@ header beside it, so the
+     header is what gives way when the row is narrow. */
+  .hunk-owner { flex: 0 0 auto; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border-radius: 9px; font-size: 11px;
+    color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); }
   .hunk-preview { max-height: 220px; margin: 0; padding: 5px 8px 8px; overflow: auto; font: 11px/1.35 var(--vscode-editor-font-family); }
   .hunk-add { color: var(--vscode-gitDecoration-addedResourceForeground); }
   .hunk-delete { color: var(--vscode-gitDecoration-deletedResourceForeground); }
@@ -1369,6 +1448,7 @@ const logScript = String.raw`
     'Collapse Linear Branches': '折叠线性分支', 'Expand Linear Branches': '展开线性分支',
     'Author': '作者', 'Parents': '父提交',
     'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
+    'Changelist': '变更列表', 'Move…': '移动…', 'some changes': '部分更改', 'Move this change to another Changelist': '把这处更改移到其他变更列表',
     'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
     'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
     'Continue': '继续', 'Skip': '跳过', 'Abort': '中止', 'Reset': '重置',
@@ -1812,6 +1892,9 @@ const logScript = String.raw`
     if (change.directory) file.append(node('span', 'directory', change.directory));
     if (change.staged) file.append(node('span', 'stage-mark', change.unstaged ? 'index + worktree' : 'index'));
     else if (change.unstaged) file.append(node('span', 'stage-mark worktree-mark', 'worktree'));
+    // The same file appears under every Changelist that owns part of it, so it
+    // has to say that rather than look like two copies of the whole thing.
+    if (change.partial) file.append(node('span', 'stage-mark partial-mark', t('some changes')));
 
     const actions = node('div', 'row-actions');
     const defaultDiffMode = change.unstaged ? 'unstaged' : 'staged';
@@ -1899,8 +1982,45 @@ const logScript = String.raw`
     };
     appendGroup('HEAD → Index', 'staged', value.staged || [], 'Unstage');
     appendGroup('Index → Working Tree', 'unstaged', value.unstaged || [], 'Stage');
+    appendOwnership(panel, change, value.owned || []);
     if (!(value.staged || []).length && !(value.unstaged || []).length) panel.append(node('div', 'hunk-empty', 'No text hunks available.'));
     return panel;
+  }
+
+  /**
+   * Which Changelist each change in this file belongs to.
+   *
+   * Its own group, measured against HEAD, because ownership and staging are
+   * different questions: a hunk can be staged and still belong to another
+   * Changelist, so re-slicing the staged/unstaged lists would answer neither.
+   */
+  function appendOwnership(panel, change, owned) {
+    if (!owned.length) return;
+    const group = node('section', 'hunk-group');
+    group.append(node('div', 'hunk-group-title', t('Changelist') + ' · ' + owned.length));
+    owned.forEach(entry => {
+      const block = node('div', 'hunk-block');
+      const header = node('div', 'hunk-header');
+      const move = button(t('Move…'), t('Move this change to another Changelist'), () => {
+        move.disabled = true;
+        post('moveHunk', { path: change.path, key: entry.key });
+      }, 'small-button');
+      header.append(
+        node('code', '', entry.header),
+        node('span', 'hunk-owner', entry.listName),
+        node('span', 'spacer'),
+        move,
+      );
+      const preview = node('pre', 'hunk-preview');
+      const lines = (entry.lines || []).slice(0, 40);
+      for (const line of lines) {
+        preview.append(node('span', line.startsWith('+') ? 'hunk-add' : line.startsWith('-') ? 'hunk-delete' : 'hunk-context', line), document.createTextNode('\n'));
+      }
+      if ((entry.lines || []).length > lines.length) preview.append(node('span', 'hunk-context', '…'));
+      block.append(header, preview);
+      group.append(block);
+    });
+    panel.append(group);
   }
 
   /**
@@ -3006,7 +3126,7 @@ const logScript = String.raw`
     }
     if (event.data.type === 'hunks' && typeof event.data.path === 'string') {
       const key = (state.selectedRoot || '') + '::' + event.data.path;
-      hunkState.set(key, { staged: event.data.staged || [], unstaged: event.data.unstaged || [] });
+      hunkState.set(key, { staged: event.data.staged || [], unstaged: event.data.unstaged || [], owned: event.data.owned || [] });
       if (activeToolTab === 'changes' && expandedChangeHunks.has(key)) render();
     }
     if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-200); if (activeToolTab === 'console') appendConsoleTrace(event.data.trace); }

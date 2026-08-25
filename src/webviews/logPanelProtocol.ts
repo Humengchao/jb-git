@@ -18,6 +18,7 @@ export type LogMessage =
   | { type: "openDiff"; path: string; mode?: "staged" | "unstaged" }
   | { type: "requestHunks"; path: string }
   | { type: "applyHunk"; path: string; source: "staged" | "unstaged"; index: number }
+  | { type: "moveHunk"; path: string; key: string }
   | { type: "commit"; message: string; mode: "staged" | "files"; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean }
   | { type: "editChangelist" | "deleteChangelist" | "setActiveChangelist" | "applyShelf" | "deleteShelf"; id: string }
   | { type: "moveToChangelist" | "stage" | "unstage" | "discard"; path: string }
@@ -47,6 +48,9 @@ export function isLogMessage(value: unknown): value is LogMessage {
   if (SIMPLE_TYPES.has(value.type)) return true;
   if (HASH_TYPES.has(value.type)) return typeof value.hash === "string";
   if (PATH_TYPES.has(value.type)) return typeof value.path === "string";
+  // A hunk is named by content, so the key is the only thing that identifies
+  // which change is being moved; an index would move whatever is there now.
+  if (value.type === "moveHunk") return typeof value.path === "string" && typeof value.key === "string";
   if (ID_TYPES.has(value.type)) return typeof value.id === "string";
   switch (value.type) {
     case "ready": return (value.activeTab === undefined || isToolTab(value.activeTab)) && (value.logOptions === undefined || isRecord(value.logOptions));

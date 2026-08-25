@@ -121,6 +121,52 @@ async function run() {
   );
   await changelists.remove(parent, elsewhere.id);
   assert.equal(changelists.lists(parent).some((list) => list.id === elsewhere.id), false, "a Changelist can be deleted from the UI lifecycle");
+  // Per-hunk ownership: a file belongs to one list, individual changes in it can
+  // be claimed by another, and a Changelist commit has to take exactly its own.
+  const home = await changelists.create(parent, "Home");
+  const bugfix = await changelists.create(parent, "Bugfix");
+  await changelists.assign(parent, "split.txt", home.id);
+  assert.equal(changelists.homeListId(parent, "split.txt"), home.id);
+  assert.deepEqual(changelists.commitPlan(parent, home.id, ["split.txt"]), { paths: ["split.txt"], hunkSelections: new Map() },
+    "a file nobody split is still committed whole");
+
+  await changelists.assignHunks(parent, "split.txt", ["bbb:0"], bugfix.id);
+  assert.deepEqual([...changelists.claims(parent, "split.txt")], [[bugfix.id, ["bbb:0"]]]);
+  assert.deepEqual(changelists.splitPaths(parent, ["split.txt", "whole.txt"]), ["split.txt"]);
+  const homePlan = changelists.commitPlan(parent, home.id, ["split.txt"]);
+  assert.deepEqual(homePlan.paths, ["split.txt"]);
+  assert.deepEqual(homePlan.hunkSelections.get("split.txt"), { mode: "except", keys: ["bbb:0"] });
+  const bugfixPlan = changelists.commitPlan(parent, bugfix.id, ["split.txt"]);
+  assert.deepEqual(bugfixPlan.hunkSelections.get("split.txt"), { mode: "only", keys: ["bbb:0"] });
+
+  // Claiming a hunk back for the list that owns the file removes the claim
+  // rather than recording a redundant one.
+  await changelists.assignHunks(parent, "split.txt", ["bbb:0"], home.id);
+  assert.equal(changelists.claims(parent, "split.txt").size, 0);
+  assert.deepEqual(changelists.commitPlan(parent, home.id, ["split.txt"]).hunkSelections, new Map());
+
+  // A claim outlives an edit and dies with the change it names.
+  await changelists.assignHunks(parent, "split.txt", ["bbb:0", "ccc:0"], bugfix.id);
+  await changelists.reconcileHunks(parent, "split.txt", ["aaa:0", "bbb:0"]);
+  assert.deepEqual(changelists.claims(parent, "split.txt").get(bugfix.id), ["bbb:0"], "only the vanished change loses its claim");
+  assert.deepEqual(changelists.claimedPaths(parent), ["split.txt"]);
+
+  // Renaming the file takes its claims with it, or they would name nothing.
+  await changelists.reconcile(parent, [{
+    path: "renamed.txt", originalPath: "split.txt", indexStatus: "R", workTreeStatus: " ",
+    kind: "renamed", staged: true, unstaged: false, conflicted: false,
+  }]);
+  assert.deepEqual(changelists.claims(parent, "renamed.txt").get(bugfix.id), ["bbb:0"]);
+  assert.equal(changelists.claims(parent, "split.txt").size, 0);
+
+  // Deleting the claiming list must not leave those hunks belonging to nothing.
+  await changelists.remove(parent, bugfix.id);
+  assert.equal(changelists.claims(parent, "renamed.txt").size > 0, true, "the fallback list inherits the claims");
+
+  // Moving the whole file is a decision about all of it.
+  await changelists.assign(parent, "renamed.txt", home.id);
+  assert.equal(changelists.claims(parent, "renamed.txt").size, 0);
+
   changelists.dispose();
 
   // Generated diffs must not open as untitled documents: those start dirty, so closing a
