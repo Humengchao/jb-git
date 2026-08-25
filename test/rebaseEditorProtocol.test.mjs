@@ -79,15 +79,33 @@ test("re-checks the sandbox plan on the extension side before running it", () =>
 
 test("guards the interactive rebase command and keeps a paused rebase recoverable", () => {
   const extension = source("src/extension.ts");
-  const command = extension.slice(extension.indexOf('registerCommand("jbGit.interactiveRebase"'));
-  assert.ok(command.length > 0, "the command has to be registered");
+  const start = extension.indexOf('registerCommand("jbGit.interactiveRebase"');
+  assert.ok(start >= 0, "the command has to be registered");
+  // Bounded by the next command rather than by a character count, so adding to
+  // this one cannot push an assertion out of the window it is checked in.
+  const next = extension.indexOf("vscode.commands.registerCommand(", start + 1);
+  const command = extension.slice(start, next > start ? next : undefined);
   assert.match(command.slice(0, 400), /requireTrustedWorkspace\(\)/);
   // A rebase that stopped mid-plan must be explained as recoverable rather than
   // reported as a plain command failure.
-  assert.match(command.slice(0, 2_200), /operation\.kind === "rebase"/);
-  assert.match(command.slice(0, 2_200), /Continue, or Abort/);
+  assert.match(command, /operation\.kind === "rebase"/);
+  assert.match(command, /Continue, or Abort/);
   // Root commits have no parent, so "from here" cannot offer them.
-  assert.match(command.slice(0, 2_200), /commit\.parents\.length > 0/);
+  assert.match(command, /commit\.parents\.length > 0/);
+  // IDEA offers to park local changes; Git's own autostash is deliberately not
+  // used, because it would restore into a rebase that stopped on a conflict.
+  assert.match(command, /"Stash and Rebase"/);
+  assert.match(command, /modal: true/);
+  assert.match(command, /stashLocalChanges\(manager, root, .*\{ includeUntracked: false \}\)/);
+  // Nothing may be stashed until the user actually starts the rebase.
+  assert.ok(
+    command.indexOf("openRebaseEditor(") < command.indexOf("stashLocalChanges("),
+    "the stash has to happen inside the run callback, not before the sequence editor opens",
+  );
+  // A rebase that stopped mid-plan owns the working tree, so the parked changes
+  // stay in the stash rather than being restored on top of a live conflict.
+  assert.match(command, /Apply it from Manage Stashes once the rebase is finished or aborted\./);
+  assert.match(command, /restoreTemporaryStash\(manager, root, parked\)/);
 
   const manifest = JSON.parse(source("package.json"));
   const declared = manifest.contributes.commands.filter((entry) => entry.command === "jbGit.interactiveRebase");

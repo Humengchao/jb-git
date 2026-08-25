@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -304,6 +304,22 @@ test("refuses to rebase over local changes instead of autostashing them", async 
     /local change\(s\) would block the rebase/,
   );
   assert.deepEqual(subjects(root), ["one", "base"]);
+});
+
+test("rebases over an untracked file, which Git itself does not mind", async () => {
+  // Counting untracked files as blocking refused a rebase Git would have run,
+  // and a scratch file or a build artefact is enough to hit that.
+  const root = repositoryWithCommits(["one"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~1");
+  writeFileSync(join(root, "scratch-note.txt"), "not committed, not staged\n");
+
+  await repository.interactiveRebase("HEAD~1", [
+    { oid: candidates[0].hash, subject: "one", action: "reword", message: "reworded over an untracked file" },
+  ]);
+  assert.deepEqual(subjects(root), ["reworded over an untracked file", "base"]);
+  // The file is still there, untouched: nothing stashed it away.
+  assert.equal(readFileSync(join(root, "scratch-note.txt"), "utf8"), "not committed, not staged\n");
 });
 
 test("refuses a starting commit that is not an ancestor of the branch", async () => {

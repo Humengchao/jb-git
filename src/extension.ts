@@ -18,6 +18,7 @@ import { canonicalPath, deepestContaining } from "./pathRouting";
 import { moveUntrackedToTrash } from "./discardSafety";
 import { previewAndPush } from "./pushPreview";
 import { checkoutWithLocalChanges } from "./smartCheckout";
+import { restoreTemporaryStash, stashLocalChanges } from "./temporaryStash";
 
 function workspacePaths(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
@@ -895,15 +896,58 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         from = picked.hash;
       }
 
+      // Asked before the plan is composed, the way IDEA tells you up front,
+      // rather than letting the user build a rebase that cannot run. Untracked
+      // files are not counted because they do not block a rebase.
+      const blocking = (manager.snapshot(root)?.status?.changes ?? [])
+        .filter((change) => change.kind !== "untracked" && change.kind !== "ignored");
+      let stashFirst = false;
+      if (blocking.length > 0) {
+        const answer = await vscode.window.showWarningMessage(
+          `${blocking.length} local change(s) would block the interactive rebase.`,
+          {
+            modal: true,
+            detail: "JB Git can stash them, run the rebase, and restore the working tree and Index afterwards. If the rebase stops on a conflict the stash is kept instead, so nothing is lost.",
+          },
+          "Stash and Rebase",
+        );
+        if (answer !== "Stash and Rebase") return;
+        stashFirst = true;
+      }
+
       try {
         // The plan starts one commit earlier, so the chosen commit is itself editable.
         const started = await openRebaseEditor(manager, root, `${from}^`, async (steps) => {
-          // withProgress directly, not runWithNotification: a rebase that stops
-          // on a conflict needs the conflict-aware message below, not a raw dialog.
-          await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: `Rebasing ${steps.length} commit(s)` },
-            () => manager.interactiveRebase(root, `${from}^`, steps),
-          );
+          // Nothing is stashed until the user actually starts the rebase, so
+          // closing the sequence editor leaves the working tree alone.
+          const parked = stashFirst
+            ? await stashLocalChanges(manager, root, `JB Git interactive rebase from ${from!.slice(0, 8)}`, { includeUntracked: false })
+            : undefined;
+          try {
+            // withProgress directly, not runWithNotification: a rebase that stops
+            // on a conflict needs the conflict-aware message below, not a raw dialog.
+            await vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title: `Rebasing ${steps.length} commit(s)` },
+              () => manager.interactiveRebase(root, `${from}^`, steps),
+            );
+          } catch (error) {
+            // A rebase that stopped mid-plan owns the working tree. Restoring
+            // on top of it would mix the parked changes into a conflict the
+            // user has not resolved yet, so the stash keeps them instead.
+            if (parked) {
+              void vscode.window.showWarningMessage(
+                `Your local changes are kept in ${parked.ref}. Apply it from Manage Stashes once the rebase is finished or aborted.`,
+              );
+            }
+            throw error;
+          }
+          if (!parked) return;
+          const restore = await restoreTemporaryStash(manager, root, parked);
+          if (restore.outcome === "conflicted") {
+            void vscode.window.showWarningMessage(`Restoring your local changes caused conflicts. ${parked.ref} was kept; resolve the files in Local Changes.`);
+          } else if (restore.outcome === "kept") {
+            void vscode.window.showWarningMessage(`Restoring your local changes failed and ${parked.ref} was kept: ${formatGitError(restore.error)}`);
+          }
         });
         if (started) await vscode.window.showInformationMessage("The interactive rebase finished.");
       } catch (error) {

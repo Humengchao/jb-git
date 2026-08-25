@@ -862,10 +862,15 @@ export class GitRepository {
         throw new Error(`A ${operation.kind} is already in progress. Finish or abort it before rebasing.`);
       }
       const status = await this.status();
-      if (status.changes.length > 0) {
-        // Autostash would mix an unrelated stash into a history rewrite, and a
-        // failed restore afterwards is far harder to reason about than refusing.
-        throw new Error(`${status.changes.length} local change(s) would block the rebase. Commit, shelve, or stash them first.`);
+      // Only a tracked change blocks a rebase. Git itself replays happily over
+      // untracked files and only complains about one it would actually
+      // overwrite, so counting them here refused a rebase Git would have run.
+      const blocking = status.changes.filter((change) => change.kind !== "untracked" && change.kind !== "ignored");
+      if (blocking.length > 0) {
+        // `rebase.autoStash` would mix an unrelated stash into a history
+        // rewrite and restore it without asking; the caller offers an explicit
+        // stash instead, and a failed restore there leaves a recoverable entry.
+        throw new Error(`${blocking.length} local change(s) would block the rebase. Commit, shelve, or stash them first.`);
       }
       const revision = await this.resolveCommit(base);
       const scratch = path.join(this.info.gitDir, "jb-git-rebase");
