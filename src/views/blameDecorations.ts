@@ -48,6 +48,10 @@ export class BlameAnnotationController implements vscode.Disposable {
     before: {
       margin: "0 1.5em 0 0",
       color: new vscode.ThemeColor("editorCodeLens.foreground"),
+      // The attachment sits inside the line, so without this it inherits the
+      // style of whatever token starts that line and the column comes out
+      // italic on exactly the lines that begin with a keyword.
+      fontStyle: "normal",
     },
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
   });
@@ -59,7 +63,15 @@ export class BlameAnnotationController implements vscode.Disposable {
    */
   private readonly commitHighlight = vscode.window.createTextEditorDecorationType({
     isWholeLine: true,
-    backgroundColor: new vscode.ThemeColor("editor.selectionHighlightBackground"),
+    // A bar down the left of every line the commit touched, which reads at a
+    // glance and stays readable whatever the commit's size. Painting the lines
+    // instead was either invisible (`rangeHighlight` is a few percent of white
+    // in most themes) or overwhelming (`selectionHighlight` is loud, and a
+    // commit that touched most of a file would then cover most of the screen).
+    borderWidth: "0 0 0 2px",
+    borderStyle: "solid",
+    borderColor: new vscode.ThemeColor("focusBorder"),
+    backgroundColor: new vscode.ThemeColor("editor.rangeHighlightBackground"),
   });
 
   public constructor(

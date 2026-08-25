@@ -486,6 +486,10 @@ const mergeStyles = String.raw`
      previous contents over the editor. The same idea per conflict block: the
      base text of the change you are on, floated above it when there is room
      and below it when there is not. */
+  /* An author rule that sets display beats the user agent's own
+     "[hidden] { display: none }", so without this the frame is on screen
+     permanently, empty, from the moment the editor opens. */
+  .base-frame[hidden] { display: none; }
   .base-frame { position: absolute; left: 0; right: 0; z-index: 3; max-height: 45%; display: flex; flex-direction: column; overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--merge-edited) 55%, transparent); border-radius: 3px;
     background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
@@ -766,7 +770,8 @@ const mergeScript = String.raw`
         action.style.top = String(Math.round(y)) + 'px';
       }
     }
-    renderBaseFrame(lineHeights[1], yOf(1, geometry[currentConflict] ? geometry[currentConflict].res[0] : 0));
+    const currentRange = geometry[currentConflict] ? geometry[currentConflict].res : [0, 0];
+    renderBaseFrame(lineHeights[1], yOf(1, currentRange[0]), yOf(1, currentRange[1]));
   }
 
   /**
@@ -800,12 +805,12 @@ const mergeScript = String.raw`
    * outright when the change scrolls away, rather than parked at an edge where
    * it would look like it belonged to whatever is there instead.
    */
-  function renderBaseFrame(lineHeight, changeTop) {
+  function renderBaseFrame(lineHeight, changeTop, changeBottom) {
     const base = currentBase();
     if (!showBase || base === undefined) { baseFrame.hidden = true; return; }
     const stack = result.parentElement;
     const available = stack.clientHeight;
-    if (changeTop < -lineHeight || changeTop > available) { baseFrame.hidden = true; return; }
+    if (changeBottom < -lineHeight || changeTop > available) { baseFrame.hidden = true; return; }
     const empty = base === '';
     baseFrameText.className = 'base-frame-text' + (empty ? ' empty' : '');
     baseFrameText.textContent = empty ? mt('(this block is not in the base)') : base.replace(/\r?\n$/, '');
@@ -814,7 +819,9 @@ const mergeScript = String.raw`
     // what decides whether it fits above the change.
     const height = baseFrame.offsetHeight;
     const above = changeTop - height - 3;
-    const below = Math.min(changeTop + lineHeight + 3, Math.max(0, available - height));
+    // Below the whole change, not below its first line: a change spanning
+    // several lines would otherwise be covered by its own base.
+    const below = Math.min(changeBottom + 3, Math.max(0, available - height));
     baseFrame.style.top = String(Math.round(above >= 0 ? above : below)) + 'px';
   }
 

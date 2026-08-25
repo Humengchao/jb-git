@@ -176,9 +176,14 @@ function renderConflict(block: { ours: string; theirs: string }, labels: Diff3La
   ].join("\n");
 }
 
-/** Reverses `join`: a stored section keeps a trailing newline, which is not a final empty line. */
+/**
+ * Reverses `join`: a stored section keeps a trailing newline, which is not a
+ * final empty line. A text block between conflicts carries no trailing newline
+ * of its own, so the newline is stripped only where there is one rather than by
+ * dropping the last character.
+ */
 function sectionLines(value: string): string[] {
-  return value === "" ? [] : value.slice(0, -1).split("\n");
+  return value === "" ? [] : value.replace(/\n$/, "").split("\n");
 }
 
 export interface Diff3Labels {
@@ -222,28 +227,68 @@ export interface ConflictSides {
   readonly theirs: string;
 }
 
+function sameLines(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((line, index) => line === right[index]);
+}
+
 /**
  * Lines each replayed conflict's base up with the conflicts in the file the
  * user is actually editing.
  *
- * The working tree was produced by Git's own merge, while the base comes from a
- * separate `merge-file --diff3` replay, and the two do not have to frame their
- * conflicts identically: Git's merge strategy can match lines that the plain
- * three-way replay does not. Showing a block the base of a *different* block
- * would be worse than showing none, so the pairing is taken only when the
- * replay produced the same conflicts, in the same order, with the same two
- * sides. Anything else returns undefined and the caller shows no base.
+ * The two do not frame their conflicts the same way, and cannot. Git's merge
+ * groups two nearby conflicts into one and repeats the common lines between
+ * them inside both sides; the `diff3` replay has to keep those lines out of the
+ * conflict, because that is the only way the base of each half stays
+ * meaningful. So a single working-tree conflict routinely corresponds to a
+ * *run* of replayed blocks, and the replay is folded onto the working tree
+ * rather than compared to it.
+ *
+ * A run is accepted only when the two sides it reconstructs are exactly that
+ * conflict's own two sides, line for line. That equality is the proof: it
+ * cannot hold for a run describing different text, so a block is labelled
+ * either with the base it actually started from or with nothing at all.
  */
 export function basesForConflicts(
   regions: readonly ConflictSides[],
   blocks: readonly MergeBlock[],
 ): string[] | undefined {
-  const conflicts = blocks.filter((block): block is Extract<MergeBlock, { kind: "conflict" }> => block.kind === "conflict");
-  if (conflicts.length !== regions.length) return undefined;
-  for (const [index, region] of regions.entries()) {
-    if (conflicts[index].ours !== region.ours || conflicts[index].theirs !== region.theirs) return undefined;
+  const bases: string[] = [];
+  let index = 0;
+  for (const region of regions) {
+    // Text reached before the next conflict lies between the working tree's
+    // conflicts, not inside this one.
+    while (index < blocks.length && blocks[index].kind === "text") index += 1;
+    const wantedOurs = sectionLines(region.ours);
+    const wantedTheirs = sectionLines(region.theirs);
+    const ours: string[] = [];
+    const base: string[] = [];
+    const theirs: string[] = [];
+    let matched = false;
+    while (index < blocks.length && !matched) {
+      const block = blocks[index];
+      index += 1;
+      if (block.kind === "text") {
+        // A line both sides kept appears in all three reconstructions.
+        const shared = sectionLines(block.text);
+        ours.push(...shared);
+        base.push(...shared);
+        theirs.push(...shared);
+      } else {
+        ours.push(...sectionLines(block.ours));
+        base.push(...sectionLines(block.base));
+        theirs.push(...sectionLines(block.theirs));
+      }
+      // Past the length of either side, no further block can bring it back.
+      if (ours.length > wantedOurs.length || theirs.length > wantedTheirs.length) return undefined;
+      matched = sameLines(ours, wantedOurs) && sameLines(theirs, wantedTheirs);
+    }
+    if (!matched) return undefined;
+    bases.push(base.length === 0 ? "" : `${base.join("\n")}\n`);
   }
-  return conflicts.map((block) => block.base);
+  // A conflict the working tree does not have means the two disagree about
+  // more than grouping.
+  if (blocks.slice(index).some((block) => block.kind === "conflict")) return undefined;
+  return bases;
 }
 
 /** Counts each conflict by what it turned out to be, for a summary the user can act on. */

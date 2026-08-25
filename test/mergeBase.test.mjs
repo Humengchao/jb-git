@@ -64,6 +64,38 @@ test("pairs each replayed base with the conflict it belongs to", () => {
   assert.deepEqual(basesForConflicts(regions, blocks), ["was\n", "z\n"]);
 });
 
+test("folds a run of replayed blocks onto one conflict Git grouped together", () => {
+  // Git's merge joins two nearby conflicts into one and repeats the common
+  // lines between them inside both sides. The diff3 replay cannot do that and
+  // stay useful — keeping those lines out of the conflict is the only way each
+  // half's base means anything — so one working-tree conflict corresponds to a
+  // run of replayed blocks. This is the ordinary case, not a corner one.
+  const regions = buildModel(
+    "service: payments\n"
+    + twoWay(
+      "replicas: 4\ntimeout: 30\nretries: 3\nlogging: warn\n",
+      "replicas: 8\ntimeout: 30\nretries: 3\nlogging: debug\n",
+    ),
+  ).regions;
+  assert.equal(regions.length, 1);
+  const blocks = parseDiff3(
+    "service: payments\n"
+    + diff3("replicas: 4\n", "replicas: 2\n", "replicas: 8\n")
+    + "timeout: 30\nretries: 3\n"
+    + diff3("logging: warn\n", "logging: info\n", "logging: debug\n"),
+  ).blocks;
+  // The base of the whole grouped block: the two bases with the untouched lines
+  // between them, exactly as they stand in the common ancestor.
+  assert.deepEqual(basesForConflicts(regions, blocks), ["replicas: 2\ntimeout: 30\nretries: 3\nlogging: info\n"]);
+});
+
+test("refuses a run whose reconstruction is not that conflict's own text", () => {
+  const regions = buildModel(twoWay("a\nb\n", "x\ny\n")).regions;
+  // The same number of lines on each side, but not the same lines.
+  const blocks = parseDiff3(diff3("a\nDIFFERENT\n", "base\n", "x\ny\n")).blocks;
+  assert.equal(basesForConflicts(regions, blocks), undefined);
+});
+
 test("refuses the pairing when the replay framed the conflicts differently", () => {
   // Git's merge strategy can match lines the plain three-way replay does not,
   // so the two can disagree about where a conflict starts. Labelling a block
@@ -89,12 +121,14 @@ test("shows the base only for the change you are on, and only when there is one"
   const script = source.slice(source.indexOf("const mergeScript = String.raw"));
   // The toolbar toggle is offered only where a base actually exists.
   assert.match(script, /showBaseButton\.disabled = currentBase\(\) === undefined \|\| applying;/);
-  assert.match(script, /function renderBaseFrame\(lineHeight, changeTop\)/);
+  assert.match(script, /function renderBaseFrame\(lineHeight, changeTop, changeBottom\)/);
   // A frame parked at the edge after its change scrolled away would look like
   // it belonged to whatever line is there instead.
-  assert.match(script, /if \(changeTop < -lineHeight \|\| changeTop > available\) \{ baseFrame\.hidden = true; return; \}/);
-  // Above the change when it fits, below it when it does not.
+  assert.match(script, /if \(changeBottom < -lineHeight \|\| changeTop > available\) \{ baseFrame\.hidden = true; return; \}/);
+  // Above the change when it fits, below the whole change when it does not —
+  // below its first line would let a multi-line change be covered by its own base.
   assert.match(script, /const above = changeTop - height - 3;/);
+  assert.match(script, /const below = Math\.min\(changeBottom \+ 3,/);
   assert.match(script, /baseFrame\.style\.top = String\(Math\.round\(above >= 0 \? above : below\)\)/);
   // Every user-visible string goes through the translator.
   assert.match(script, /mt\('\(this block is not in the base\)'\)/);
@@ -174,4 +208,50 @@ test("reads the base of a real Git conflict through the editor's own path", asyn
   assert.equal(regions.length, 1);
   const bases = basesForConflicts(regions, await repository.conflictAnalysis("f.txt"));
   assert.deepEqual(bases, ["BASE LINE\n"], "the block's base is what both sides started from");
+});
+
+test("reads the base of a conflict Git grouped, which is what a real merge produces", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-merge-grouped-"));
+  const git = (...args) => execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd: root, encoding: "utf8" });
+  git("init", "-q");
+  git("config", "core.autocrlf", "false");
+  git("config", "commit.gpgsign", "false");
+  git("config", "user.name", "JB Git Test");
+  git("config", "user.email", "jb-git-test@example.invalid");
+  const write = (replicas, logging) => writeFileSync(
+    join(root, "config.yml"),
+    `service: payments\nreplicas: ${replicas}\ntimeout: 30\nretries: 3\nlogging: ${logging}\n`,
+  );
+  write(2, "info");
+  git("add", ".");
+  git("commit", "-qm", "base");
+  const main = git("branch", "--show-current").trim();
+  git("checkout", "-qb", "side");
+  write(8, "debug");
+  git("add", ".");
+  git("commit", "-qm", "theirs");
+  git("checkout", "-q", main);
+  write(4, "warn");
+  git("add", ".");
+  git("commit", "-qm", "ours");
+  try {
+    git("merge", "side");
+  } catch {
+    // The conflict is the fixture.
+  }
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const versions = await repository.conflictVersions("config.yml");
+  const { regions } = buildModel(versions.result);
+  const blocks = await repository.conflictAnalysis("config.yml");
+  // Git grouped two changed lines and the untouched lines between them into one
+  // conflict; the replay had to keep them apart to keep each base meaningful.
+  assert.equal(regions.length, 1, "Git's merge produced a single grouped conflict");
+  assert.equal(blocks.filter((block) => block.kind === "conflict").length, 2, "the replay split it in two");
+  assert.deepEqual(
+    basesForConflicts(regions, blocks),
+    ["replicas: 2\ntimeout: 30\nretries: 3\nlogging: info\n"],
+    "the grouped block's base is the matching run of the common ancestor",
+  );
 });
