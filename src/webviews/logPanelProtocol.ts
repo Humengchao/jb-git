@@ -13,6 +13,7 @@ export type LogMessage =
   | { type: "checkout"; name: string; kind: GitBranch["kind"] }
   | { type: "openCommitFile"; hash: string; path: string }
   | { type: "refresh" | "clearConsole" | "loadMore" | "createChangelist" | "createShelf" }
+  | { type: "requestHeadMessage" | "messageHistory" }
   | { type: "togglePath"; path: string; checked: boolean }
   | { type: "toggleAll"; checked: boolean; listId?: string }
   | { type: "openDiff"; path: string; mode?: "staged" | "unstaged" }
@@ -28,7 +29,7 @@ export type LogMessage =
   | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
   | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string };
 
-const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf"]);
+const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory"]);
 const HASH_TYPES = new Set(["selectCommit", "newBranch", "cherryPick", "revert", "reset", "showPatch"]);
 const PATH_TYPES = new Set(["requestHunks", "moveToChangelist", "stage", "unstage", "discard"]);
 const ID_TYPES = new Set(["editChangelist", "deleteChangelist", "setActiveChangelist", "applyShelf", "deleteShelf"]);

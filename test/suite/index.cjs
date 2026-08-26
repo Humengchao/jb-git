@@ -226,6 +226,40 @@ async function run() {
     patchFile: invalidPatch, paths: [],
   }), "shelf deletion errors must be reported");
   shelfStore.dispose();
+
+  // Commit Message History: IDEA offers back the messages that made it into a
+  // commit. Newest first, re-use moves to the front, and the list stays bounded.
+  const { IntelliJGitToolWindowProvider } = require(path.join(extension.extensionPath, "dist", "webviews", "logPanel.js"));
+  const historyMemory = new Map();
+  const historyMemento = {
+    get: (key) => historyMemory.get(key),
+    update: async (key, value) => { historyMemory.set(key, value); },
+    keys: () => [...historyMemory.keys()],
+  };
+  const stubEvent = () => ({ dispose() {} });
+  const toolWindow = new IntelliJGitToolWindowProvider(
+    { onDidChange: stubEvent, all: [] },
+    { onDidChange: stubEvent },
+    { onDidChange: stubEvent },
+    { registerFile: () => undefined },
+    historyMemento,
+  );
+  assert.deepEqual(toolWindow.commitMessageHistory(parent), []);
+  await toolWindow.recordCommitMessage(parent, "first message");
+  await toolWindow.recordCommitMessage(parent, "second message\n\nwith a body");
+  assert.deepEqual(toolWindow.commitMessageHistory(parent), ["second message\n\nwith a body", "first message"]);
+  await toolWindow.recordCommitMessage(parent, "first message");
+  assert.deepEqual(
+    toolWindow.commitMessageHistory(parent),
+    ["first message", "second message\n\nwith a body"],
+    "re-using a message moves it to the front instead of duplicating it",
+  );
+  await toolWindow.recordCommitMessage(parent, "   ");
+  assert.equal(toolWindow.commitMessageHistory(parent).length, 2, "a blank message is not history");
+  for (let index = 0; index < 30; index += 1) await toolWindow.recordCommitMessage(parent, "bulk " + index);
+  assert.equal(toolWindow.commitMessageHistory(parent).length, 25, "the list stays bounded");
+  assert.equal(toolWindow.commitMessageHistory("/some/other/root").length, 0, "history is per repository");
+  toolWindow.dispose();
 }
 
 module.exports = { run };

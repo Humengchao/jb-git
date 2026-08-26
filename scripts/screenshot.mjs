@@ -179,6 +179,9 @@ await runTests({
   extensionDevelopmentPath: ${JSON.stringify(projectRoot)},
   extensionTestsPath: ${JSON.stringify(join(harness, "suite.cjs"))},
   launchArgs: [${JSON.stringify(workspace)}, "--disable-extensions", "--disable-gpu"],
+  // Pinned: the default is cwd-relative, and run from inside a demo repository
+  // it writes thousands of user-data files into the workspace being shown.
+  cachePath: ${JSON.stringify(join(projectRoot, ".vscode-test"))},
 });
 `);
 

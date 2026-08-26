@@ -14,7 +14,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 | --- | --- | --- |
 | Git 工具窗口与 Log | 部分实现 | 一个底部 `Git` Panel 提供 Log、Console、Local Changes 和 Shelf。提交图、筛选、分支比较、每次增量加载 300 条和大列表虚拟化已实现；持久化历史索引及超大仓库的完整搜索仍有差距。 |
 | HEAD / Index / Working Tree 审阅 | 已实现 | Local Changes 明确展示两层差异：`HEAD → Index`（已暂存）和 `Index → Working Tree`（未暂存），均支持文件 Diff；文本文件还支持 Hunk 级暂存/取消暂存，并在写入 Index 前验证 Hunk 没有过期。 |
-| 两种 Commit 来源 | 已实现 | **Staging area (Index)** 只提交 Index 中的精确快照；**Selected files (complete contents)** 通过隔离的临时 Index 提交勾选文件的完整内容。后者也用于指定 Changelist 提交，失败时不会破坏用户真实 Index 的部分暂存状态。 |
+| 两种 Commit 来源 | 已实现 | **Staging area (Index)** 只提交 Index 中的精确快照；**Selected files (complete contents)** 通过隔离的临时 Index 提交勾选文件的完整内容。后者也用于指定 Changelist 提交，失败时不会破坏用户真实 Index 的部分暂存状态。提交表单具备 IDEA 的消息便利：勾选 **Amend** 会自动填入被修正提交的消息、取消勾选恢复原来输入的内容；历史按钮提供最近 25 条真正提交过的消息（按仓库记忆、最新在前、重复使用会移到最前），即 IDEA 的 Commit Message History。未版本化文件会列出但默认不勾选——曾经的默认勾选让一次 Commit 差点带进 2475 个编辑器缓存文件。 |
 | Changelist | 部分实现 | 支持创建、重命名/描述、设为 Active、删除、整文件移动、重命名路径迁移和指定 Changelist 提交。**同一文件内的不同改动**现在可以像 IDEA 那样归属到不同 Changelist：展开文件会按 HEAD 列出它的各处改动及所属列表，`Move...` 可以改归属；提交某个 Changelist 时只取属于它的部分——文件所属列表提交别人没认领的全部（含之后新增的改动），认领方只提交自己认领的那些，其余留在工作区。改动是按其内容而不是行号记住的，所以周围行移动时归属不丢、跟随文件改名迁移、只有改动本身被撤销时归属才失效。以完整内容提交时，如果会把别的 Changelist 的工作一并带走，会先明确提示。单个 hunk 内部的重叠行级归属、任务上下文和 Changelist 冲突策略仍是差距。 |
 | Rollback、Shelf 与未跟踪文件删除 | 已实现 | 回滚已跟踪文件前会先在 Shelf 保留 recovery entry；未跟踪文件通过系统 Trash 移除，不做不可恢复删除；冲突文件不允许单独回滚，以免静默丢掉一侧内容。 |
 | 带本地修改的分支切换 | 已实现 | Smart Checkout 把已跟踪、已暂存和未跟踪修改保存到临时 Stash，以不可变 OID 定位，切换后恢复 Working Tree 与 Index。切换或恢复失败时 Stash 会保留供恢复。 |

@@ -15,6 +15,7 @@ import { previewAndPush } from "../pushPreview";
 import { checkoutWithLocalChanges } from "../smartCheckout";
 import { hunkKeys, partitionHunks } from "../changelists/hunkOwnership";
 import { isLogMessage, isToolTab, LogMessage, ToolTab } from "./logPanelProtocol";
+import { originalMessage } from "./rebaseEditorProtocol";
 
 interface LogSelection {
   commit: GitCommit;
@@ -205,10 +206,15 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     const live = new Set(changes.map((change) => change.path));
     const known = this.knownPaths.get(root);
     const selected = this.selectedPaths.get(root) ?? new Set<string>();
+    // IDEA does not pre-check unversioned files: a tracked change is work the
+    // user did, but an untracked path is often a build artefact or an editor's
+    // cache, and auto-checking thousands of those makes Commit add them all.
+    // They stay listed and checkable; they just start unchecked.
+    const autoCheck = new Set(changes.filter((change) => change.kind !== "untracked" && change.kind !== "ignored").map((change) => change.path));
     if (!known) {
-      for (const filePath of live) selected.add(filePath);
+      for (const filePath of autoCheck) selected.add(filePath);
     } else {
-      for (const filePath of live) if (!known.has(filePath)) selected.add(filePath);
+      for (const filePath of autoCheck) if (!known.has(filePath)) selected.add(filePath);
     }
     for (const filePath of [...selected]) if (!live.has(filePath)) selected.delete(filePath);
     const changed = !known || !sameSet(known, live) || !sameSet(this.selectedPaths.get(root) ?? new Set(), selected);
@@ -234,6 +240,30 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       for (let index = 0; index < text.length; index += 1) hash = (hash * 31 + text.charCodeAt(index)) | 0;
     }
     return `${snapshot.repository.info.rootPath}\0${snapshot.branches.length}\0${hash}`;
+  }
+
+  private static readonly MESSAGE_HISTORY_KEY = "jbGit.commitMessageHistory";
+  private static readonly MESSAGE_HISTORY_LIMIT = 25;
+
+  /** The most recent commit messages written through this extension, newest first. */
+  public commitMessageHistory(root: string): string[] {
+    const stored = this.workspaceState.get<Record<string, string[]>>(IntelliJGitToolWindowProvider.MESSAGE_HISTORY_KEY);
+    const entries = stored?.[root];
+    return Array.isArray(entries) ? entries.filter((entry) => typeof entry === "string" && entry.trim()) : [];
+  }
+
+  /**
+   * Remembers a message that made it into a commit, which is what IDEA's
+   * Commit Message History offers back. Re-using an old message moves it to
+   * the front rather than duplicating it.
+   */
+  public async recordCommitMessage(root: string, message: string): Promise<void> {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    const stored = { ...(this.workspaceState.get<Record<string, string[]>>(IntelliJGitToolWindowProvider.MESSAGE_HISTORY_KEY) ?? {}) };
+    const entries = [trimmed, ...this.commitMessageHistory(root).filter((entry) => entry !== trimmed)];
+    stored[root] = entries.slice(0, IntelliJGitToolWindowProvider.MESSAGE_HISTORY_LIMIT);
+    await this.workspaceState.update(IntelliJGitToolWindowProvider.MESSAGE_HISTORY_KEY, stored);
   }
 
   private tracesFingerprint(): string {
@@ -669,6 +699,35 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         await vscode.commands.executeCommand("jbGit.openDiff", new ChangeNode(root, change, mode));
         return;
       }
+      if (message.type === "requestHeadMessage") {
+        // IDEA fills the message box with the commit being amended. An unborn
+        // branch has nothing to amend, and an empty reply leaves the box alone.
+        let full = "";
+        try {
+          const [head] = await snapshot.repository.logRef("HEAD", 1);
+          if (head) full = originalMessage(head);
+        } catch {
+          // No HEAD yet.
+        }
+        await this.view?.webview.postMessage({ type: "headMessage", message: full });
+        return;
+      }
+      if (message.type === "messageHistory") {
+        const history = this.commitMessageHistory(root);
+        if (!history.length) {
+          return void vscode.window.showInformationMessage(vscode.l10n.t("No commit messages have been recorded yet."));
+        }
+        const picked = await vscode.window.showQuickPick(
+          history.map((entry) => ({
+            label: entry.split("\n", 1)[0],
+            detail: entry.includes("\n") ? entry.slice(entry.indexOf("\n") + 1).trim() || undefined : undefined,
+            message: entry,
+          })),
+          { title: vscode.l10n.t("Commit Message History"), placeHolder: vscode.l10n.t("Select a previous commit message") },
+        );
+        if (picked) await this.view?.webview.postMessage({ type: "applyCommitMessage", message: picked.message });
+        return;
+      }
       if (message.type === "requestHunks") {
         const change = changes.find((item) => item.path === message.path);
         if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
@@ -804,6 +863,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           revision = await this.manager.commitPaths(root, paths, commitMessage, options);
         }
+        await this.recordCommitMessage(root, commitMessage);
         // Never await a notification here: showInformationMessage only settles once the
         // toast is dismissed, which used to stall the push for as long as it stayed up.
         if (message.push) {
@@ -1370,6 +1430,19 @@ const logScript = String.raw`
   let state = { repositories: [], branches: [], commits: [] };
   let uiState = vscode.getState() || {};
   const hunkState = new Map();
+  // What the message box held before Amend replaced it, per repository.
+  const preAmendDrafts = {};
+
+  /**
+   * Puts text into the commit message box as if it had been typed, so the
+   * draft is saved and the buttons re-enable through the box's own listener.
+   */
+  function fillCommitMessage(text) {
+    const box = document.getElementById('commit-message');
+    if (!box || box.disabled || typeof text !== 'string' || !text) return;
+    box.value = text;
+    box.dispatchEvent(new Event('input'));
+  }
   let expandedChangeHunks; let search; let branchFilter; let activeToolTab; let selectedBranchKeys;
   let authorFilter; let knownAuthors; let dateFilter; let sortMode; let firstParent; let noMerges;
   let collapsedGraphSeries; let selectedGraphSeries; let consoleFilter; let consolePaused;
@@ -1450,7 +1523,8 @@ const logScript = String.raw`
     'Collapse Linear Branches': '折叠线性分支', 'Expand Linear Branches': '展开线性分支',
     'Author': '作者', 'Parents': '父提交',
     'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
-    'Changelist': '变更列表', 'Move…': '移动…', 'some changes': '部分更改', 'Move this change to another Changelist': '把这处更改移到其他变更列表',
+    'Changelist': '变更列表', 'Move…': '移动…', 'some changes': '部分更改',
+    'Commit Message History': '提交消息历史', 'Move this change to another Changelist': '把这处更改移到其他变更列表',
     'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
     'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
     'Continue': '继续', 'Skip': '跳过', 'Abort': '中止', 'Reset': '重置',
@@ -2050,7 +2124,13 @@ const logScript = String.raw`
 
   function commitForm() {
     const form = node('div', 'commit-form');
-    form.append(node('div', 'commit-form-title', 'Commit Changes'));
+    const title = node('div', 'commit-form-title');
+    title.append(
+      node('span', '', 'Commit Changes'),
+      node('span', 'spacer'),
+      button('↺', 'Commit Message History', () => post('messageHistory'), 'row-action'),
+    );
+    form.append(title);
     const drafts = { ...(uiState.commitMessages || {}) }; const root = state.selectedRoot || '';
     const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = t(state.totalChanges ? 'Commit Message' : 'No changes to commit'); message.value = drafts[root] || ''; message.disabled = !state.totalChanges;
     const modeRow = node('div', 'commit-mode-row');
@@ -2068,6 +2148,20 @@ const logScript = String.raw`
     updateModeHelp(); modeRow.append(selectShell(mode), modeHelp);
     const options = node('div', 'commit-options');
     const amend = checkboxOption('Amend', 'amend', root);
+    amend.input.id = 'amend-toggle';
+    // IDEA fills the box with the message of the commit being amended, and
+    // unchecking gives back what was typed before. The pre-amend draft lives in
+    // module state because a background render rebuilds this whole form.
+    amend.input.addEventListener('change', () => {
+      if (amend.input.checked) {
+        preAmendDrafts[root] = message.value;
+        post('requestHeadMessage');
+      } else if (root in preAmendDrafts) {
+        message.value = preAmendDrafts[root];
+        delete preAmendDrafts[root];
+        message.dispatchEvent(new Event('input'));
+      }
+    });
     const signoff = checkboxOption('Sign-off', 'signoff', root);
     const noVerify = checkboxOption('Skip hooks', 'noVerify', root);
     const count = node('span', '', ''); count.id = 'selected-count';
@@ -3133,6 +3227,13 @@ const logScript = String.raw`
       hunkState.set(key, { staged: event.data.staged || [], unstaged: event.data.unstaged || [], owned: event.data.owned || [] });
       if (activeToolTab === 'changes' && expandedChangeHunks.has(key)) render();
     }
+    if (event.data.type === 'headMessage') {
+      // Filled only while Amend is still checked: the reply may arrive after
+      // the user already changed their mind.
+      const amendBox = document.getElementById('amend-toggle');
+      if (amendBox && amendBox.checked) fillCommitMessage(event.data.message);
+    }
+    if (event.data.type === 'applyCommitMessage') fillCommitMessage(event.data.message);
     if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-200); if (activeToolTab === 'console') appendConsoleTrace(event.data.trace); }
     if (event.data.type === 'consoleCleared') { state.traces = []; if (activeToolTab === 'console') render(); }
     if (event.data.type === 'activateTab' && event.data.tab !== activeToolTab) { selectToolTab(event.data.tab); }

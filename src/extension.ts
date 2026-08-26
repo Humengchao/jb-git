@@ -784,7 +784,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!mode) return;
       const { amend, signoff, noVerify } = mode;
       const revision = await runWithNotification(vscode.l10n.t("Creating Git commit"), () => manager.commit(first.repository.info.rootPath, message, { amend, signoff, noVerify }));
-      if (revision) await vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}", revision.slice(0, 12)));
+      if (revision) {
+        await gitToolWindow.recordCommitMessage(first.repository.info.rootPath, message);
+        await vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}", revision.slice(0, 12)));
+      }
     }),
     vscode.commands.registerCommand("jbGit.pull", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1161,7 +1164,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         "Creating Changelist commit",
         () => manager.commitPaths(node.repositoryRoot, [...selected], message.trim(), undefined, plan.hunkSelections),
       );
-      if (revision) await vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}", revision.slice(0, 12)));
+      if (revision) {
+        await gitToolWindow.recordCommitMessage(node.repositoryRoot, message.trim());
+        await vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}", revision.slice(0, 12)));
+      }
     }),
     vscode.commands.registerCommand("jbGit.createShelf", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;

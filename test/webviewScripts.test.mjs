@@ -26,6 +26,7 @@ const SANDBOX = new Set([
   "WeakMap", "WeakSet", "RegExp", "Promise", "Error", "Symbol", "Intl", "BigInt",
   "ResizeObserver", "MutationObserver", "IntersectionObserver", "structuredClone",
   "console", "document", "window", "navigator", "alert", "confirm", "prompt", "fetch",
+  "Event", "CustomEvent", "KeyboardEvent", "MouseEvent", "PointerEvent", "AbortController", "URL", "URLSearchParams", "Blob", "TextEncoder", "TextDecoder",
 ]);
 
 /** Keywords that are followed by a parenthesis and are not calls. */
