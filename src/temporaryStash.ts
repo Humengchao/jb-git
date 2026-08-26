@@ -1,3 +1,4 @@
+import * as vscode from "vscode";
 import { RepositoryManager } from "./repositoryManager";
 
 /** A stash this extension created to get the working tree out of an operation's way. */
@@ -34,7 +35,7 @@ export async function stashLocalChanges(
   const before = new Set((await manager.stashes(rootPath)).map((entry) => entry.oid));
   await manager.stash(rootPath, message, options.includeUntracked, false);
   const created = (await manager.stashes(rootPath)).find((entry) => !before.has(entry.oid));
-  if (!created) throw new Error("Git created no recoverable stash entry, so the operation was stopped.");
+  if (!created) throw new Error(vscode.l10n.t("Git created no recoverable stash entry, so the operation was stopped."));
   return { ref: created.ref, oid: created.oid };
 }
 

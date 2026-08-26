@@ -586,7 +586,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           if (message.action === "openRepositoryFile") {
             const content = await snapshot.repository.fileContent(file.path, commit.hash);
-            if (isBinaryContent(content)) return void vscode.window.showInformationMessage(`${file.path} is binary and cannot be opened as text.`);
+            if (isBinaryContent(content)) return void vscode.window.showInformationMessage(vscode.l10n.t("{0} is binary and cannot be opened as text.", file.path));
             const uri = this.diffProvider.registerFile(root, `${file.path}@${commit.hash.slice(0, 8)}`, file.path, content.toString("utf8"));
             const document = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(document, { preview: true, viewColumn: vscode.ViewColumn.Beside });
@@ -776,15 +776,15 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "commit") {
         const commitMessage = message.message.trim();
-        if (!commitMessage) return void vscode.window.showWarningMessage("Enter a commit message first.");
+        if (!commitMessage) return void vscode.window.showWarningMessage(vscode.l10n.t("Enter a commit message first."));
         const options = { amend: message.amend, signoff: message.signoff, noVerify: message.noVerify };
         let revision: string;
         if (message.mode === "staged") {
-          if (!changes.some((change) => change.staged)) return void vscode.window.showWarningMessage("Stage at least one change before committing the staging area.");
+          if (!changes.some((change) => change.staged)) return void vscode.window.showWarningMessage(vscode.l10n.t("Stage at least one change before committing the staging area."));
           revision = await this.manager.commit(root, commitMessage, options);
         } else {
           const paths = changes.filter((change) => selected.has(change.path)).map((change) => change.path);
-          if (!paths.length) return void vscode.window.showWarningMessage("Select at least one changed file to commit.");
+          if (!paths.length) return void vscode.window.showWarningMessage(vscode.l10n.t("Select at least one changed file to commit."));
           // "Complete contents" means exactly that, so a file whose hunks the
           // user split between Changelists would have the other list's work
           // swept into this commit. Say so rather than doing it quietly.
@@ -806,9 +806,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         // toast is dismissed, which used to stall the push for as long as it stayed up.
         if (message.push) {
           const pushed = await previewAndPush(this.manager, root);
-          if (!pushed) void vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}; push was not performed.`);
+          if (!pushed) void vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}; push was not performed.", revision.slice(0, 12)));
         } else {
-          void vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
+          void vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}", revision.slice(0, 12)));
         }
         await this.view?.webview.postMessage({ type: "committed" });
         return;
@@ -1743,7 +1743,9 @@ const logScript = String.raw`
   function repositorySelect() {
     const repositories = node('select'); repositories.title = t('Git root');
     for (const repo of state.repositories || []) {
-      const option = node('option', '', repo.name + (repo.branch ? ' · ' + repo.branch : ''));
+      // The branch button beside this select already shows the current branch;
+      // repeating it in the collapsed control read as two widgets for one fact.
+      const option = node('option', '', repo.name);
       option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option);
     }
     repositories.addEventListener('change', () => { post('selectRepository', { root: repositories.value }); repositories.blur(); });

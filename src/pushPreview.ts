@@ -22,18 +22,18 @@ export interface PushRequest {
 export async function previewAndPush(manager: RepositoryManager, rootPath: string, request: PushRequest = {}): Promise<boolean> {
   let snapshot = manager.snapshot(rootPath);
   if (!snapshot?.status) {
-    await vscode.window.showWarningMessage("This repository has no working branch to push.");
+    await vscode.window.showWarningMessage(vscode.l10n.t("This repository has no working branch to push."));
     return false;
   }
   const checkedOutBranch = snapshot.status.branch.head;
   const branch = request.sourceBranch ?? checkedOutBranch;
   if (!branch) {
-    await vscode.window.showWarningMessage("Create or checkout a branch before pushing a detached HEAD.");
+    await vscode.window.showWarningMessage(vscode.l10n.t("Create or checkout a branch before pushing a detached HEAD."));
     return false;
   }
   const localBranch = snapshot.branches.find((candidate) => candidate.kind === "local" && candidate.name === branch);
   if (request.sourceBranch && !localBranch) {
-    await vscode.window.showWarningMessage(`Local branch '${branch}' no longer exists.`);
+    await vscode.window.showWarningMessage(vscode.l10n.t("Local branch '{0}' no longer exists.", branch));
     return false;
   }
   const sourceRef = localBranch?.fullName ?? `refs/heads/${branch}`;
@@ -48,7 +48,7 @@ export async function previewAndPush(manager: RepositoryManager, rootPath: strin
 
   try {
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Refreshing ${target.remote} before push preview`, cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Refreshing {0} before push preview", target.remote), cancellable: true },
       async (_progress, token) => {
         const controller = new AbortController();
         const registration = token.onCancellationRequested(() => controller.abort());
@@ -57,11 +57,12 @@ export async function previewAndPush(manager: RepositoryManager, rootPath: strin
     );
   } catch (error) {
     if (isGitAbort(error)) return false;
+    const cachedLabel = vscode.l10n.t("Continue with Cached Refs");
     const continueCached = await vscode.window.showWarningMessage(
-      `Could not refresh ${target.remote}: ${error instanceof Error ? error.message : String(error)}`,
-      "Continue with Cached Refs",
+      vscode.l10n.t("Could not refresh {0}: {1}", target.remote, error instanceof Error ? error.message : String(error)),
+      cachedLabel,
     );
-    if (continueCached !== "Continue with Cached Refs") return false;
+    if (continueCached !== cachedLabel) return false;
   }
   snapshot = manager.snapshot(rootPath) ?? snapshot;
   const remoteBranch = snapshot.branches.find((candidate) => candidate.kind === "remote" && candidate.name === `${target.remote}/${target.branch}`);
@@ -76,15 +77,15 @@ export async function previewAndPush(manager: RepositoryManager, rootPath: strin
       ? await snapshot.repository.logRange(remoteBranch.fullName, sourceRef, limit)
       : await snapshot.repository.logRef(sourceRef, limit);
   } catch (error) {
-    await vscode.window.showErrorMessage(`Could not build the push preview: ${error instanceof Error ? error.message : String(error)}`);
+    await vscode.window.showErrorMessage(vscode.l10n.t("Could not build the push preview: {0}", error instanceof Error ? error.message : String(error)));
     return false;
   }
   const ahead = comparison?.right;
   const behind = comparison?.left ?? 0;
   if (ahead === 0 && !target.configureUpstream) {
     await vscode.window.showInformationMessage(behind
-      ? `${branch} has no outgoing commits and is ${behind} commit(s) behind ${target.remote}/${target.branch}. Update it before pushing.`
-      : `${branch} is already up to date with ${target.remote}/${target.branch}.`);
+      ? vscode.l10n.t("{0} has no outgoing commits and is {1} commit(s) behind {2}. Update it before pushing.", branch, behind, `${target.remote}/${target.branch}`)
+      : vscode.l10n.t("{0} is already up to date with {1}.", branch, `${target.remote}/${target.branch}`));
     return false;
   }
   const protectedBranch = isProtectedBranch(target.branch, vscode.workspace.getConfiguration("jbGit").get<readonly string[]>("protectedBranches", []));
@@ -93,20 +94,20 @@ export async function previewAndPush(manager: RepositoryManager, rootPath: strin
     `${branch}  →  ${target.remote}/${target.branch}`,
     target.configureUpstream
       ? ahead === 0
-        ? "No outgoing commits; this push only configures the selected destination as upstream."
-        : "Initial push; the selected destination will be configured as upstream."
+        ? vscode.l10n.t("No outgoing commits; this push only configures the selected destination as upstream.")
+        : vscode.l10n.t("Initial push; the selected destination will be configured as upstream.")
       : target.usesExistingUpstream
-      ? `${outgoingCount} outgoing commit${outgoingCount === 1 ? "" : "s"}${behind ? ` · ${behind} behind` : ""}`
-      : `${outgoingCount} outgoing commit${outgoingCount === 1 ? "" : "s"}; the branch's existing upstream will not be changed.`,
-    protectedBranch ? "Protected branch: force push is disabled." : "",
+      ? vscode.l10n.t("{0} outgoing commit(s)", outgoingCount) + (behind ? ` · ${vscode.l10n.t("{0} behind", behind)}` : "")
+      : vscode.l10n.t("{0} outgoing commit(s); the branch's existing upstream will not be changed.", outgoingCount),
+    protectedBranch ? vscode.l10n.t("Protected branch: force push is disabled.") : "",
     "",
     ...outgoing.map((commit) => `${commit.hash.slice(0, 10)}  ${commit.subject}  — ${commit.author}`),
-    ...(ahead !== undefined && ahead > outgoing.length ? [`…and ${ahead - outgoing.length} more commit(s)`] : []),
+    ...(ahead !== undefined && ahead > outgoing.length ? [vscode.l10n.t("…and {0} more commit(s)", ahead - outgoing.length)] : []),
   ].filter((line, index, lines) => line || (index > 0 && lines[index - 1] !== "")).join("\n");
-  const forceLabel = "Force with Lease";
-  const pushLabel = ahead === 0 ? "Set Upstream" : "Push";
+  const forceLabel = vscode.l10n.t("Force with Lease");
+  const pushLabel = ahead === 0 ? vscode.l10n.t("Set Upstream") : vscode.l10n.t("Push");
   const choice = await vscode.window.showWarningMessage(
-    `Review push to ${target.remote}/${target.branch}`,
+    vscode.l10n.t("Review push to {0}", `${target.remote}/${target.branch}`),
     { modal: true, detail },
     pushLabel,
     ...(protectedBranch || ahead === 0 ? [] : [forceLabel]),
@@ -116,7 +117,7 @@ export async function previewAndPush(manager: RepositoryManager, rootPath: strin
 
   try {
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Pushing ${branch} to ${target.remote}/${target.branch}`, cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Pushing {0} to {1}", branch, `${target.remote}/${target.branch}`), cancellable: true },
       async (_progress, token) => {
         const controller = new AbortController();
         const registration = token.onCancellationRequested(() => controller.abort());
@@ -131,21 +132,22 @@ export async function previewAndPush(manager: RepositoryManager, rootPath: strin
         }
       },
     );
-    await vscode.window.showInformationMessage(`Pushed ${branch} to ${target.remote}/${target.branch}.`);
+    await vscode.window.showInformationMessage(vscode.l10n.t("Pushed {0} to {1}.", branch, `${target.remote}/${target.branch}`));
     return true;
   } catch (error) {
     if (isGitAbort(error)) return false;
     if (isRejectedPush(error)) {
       const canPull = branch === checkedOutBranch && target.usesExistingUpstream;
       if (canPull) {
+        const rebaseLabel = vscode.l10n.t("Pull with Rebase");
         const recovery = await vscode.window.showWarningMessage(
-          `Push was rejected because ${target.remote}/${target.branch} has newer commits. Update the branch and retry?`,
-          "Pull with Rebase",
-          "Pull with Merge",
+          vscode.l10n.t("Push was rejected because {0} has newer commits. Update the branch and retry?", `${target.remote}/${target.branch}`),
+          rebaseLabel,
+          vscode.l10n.t("Pull with Merge"),
         );
         if (recovery) {
           try {
-            await manager.pull(rootPath, recovery === "Pull with Rebase" ? "rebase" : "merge");
+            await manager.pull(rootPath, recovery === rebaseLabel ? "rebase" : "merge");
           } catch (pullError) {
             await vscode.window.showErrorMessage(pullError instanceof Error ? pullError.message : String(pullError));
             return false;
@@ -153,11 +155,12 @@ export async function previewAndPush(manager: RepositoryManager, rootPath: strin
           return previewAndPush(manager, rootPath, request);
         }
       } else {
+        const refreshLabel = vscode.l10n.t("Refresh Preview");
         const refresh = await vscode.window.showWarningMessage(
-          `Push was rejected because ${target.remote}/${target.branch} changed after the preview.`,
-          "Refresh Preview",
+          vscode.l10n.t("Push was rejected because {0} changed after the preview.", `${target.remote}/${target.branch}`),
+          refreshLabel,
         );
-        if (refresh === "Refresh Preview") return previewAndPush(manager, rootPath, request);
+        if (refresh === refreshLabel) return previewAndPush(manager, rootPath, request);
       }
     }
     await vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
@@ -174,7 +177,7 @@ async function resolvePushTarget(
 ): Promise<PushTarget | undefined> {
   const remotes = await manager.remotes(snapshot.repository.info.rootPath);
   if (!remotes.length) {
-    await vscode.window.showWarningMessage("This repository has no remote. Add one before pushing.");
+    await vscode.window.showWarningMessage(vscode.l10n.t("This repository has no remote. Add one before pushing."));
     return undefined;
   }
   const upstream = localBranch?.upstream
@@ -183,7 +186,7 @@ async function resolvePushTarget(
   if (request.remote) {
     const remote = remotes.find((candidate) => candidate.name === request.remote);
     if (!remote) {
-      await vscode.window.showWarningMessage(`Remote '${request.remote}' no longer exists.`);
+      await vscode.window.showWarningMessage(vscode.l10n.t("Remote '{0}' no longer exists.", request.remote));
       return undefined;
     }
     const targetBranch = request.targetBranch ?? branch;
@@ -198,7 +201,7 @@ async function resolvePushTarget(
   if (upstreamTarget) return { ...upstreamTarget, configureUpstream: false, usesExistingUpstream: true };
   const picked = remotes.length === 1 ? remotes[0] : (await vscode.window.showQuickPick(
     remotes.map((remote) => ({ label: remote.name, remote })),
-    { title: `Initial push of ${branch}`, placeHolder: "Select a remote" },
+    { title: vscode.l10n.t("Initial push of {0}", branch), placeHolder: vscode.l10n.t("Select a remote") },
   ))?.remote;
   return picked ? { remote: picked.name, branch, configureUpstream: true, usesExistingUpstream: false } : undefined;
 }

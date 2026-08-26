@@ -106,7 +106,7 @@ test("never blocks a progress notification on a toast being dismissed", () => {
   for (const [, args] of checkout.matchAll(/await vscode\.window\.show\w+Message\(([\s\S]{0,300}?)\);/g)) {
     assert.match(args, /modal: true/, `only a modal question may be awaited here: ${args.slice(0, 60)}`);
   }
-  assert.match(checkout, /void vscode\.window\.showInformationMessage\(`Checked out \$\{branch\.name} and restored/);
+  assert.match(checkout, /void vscode\.window\.showInformationMessage\(vscode\.l10n\.t\("Checked out \{0} and restored/);
   // The diff path stopped reporting binary content in a notification altogether.
   const diff = readSource("../src/views/diffProvider.ts", import.meta.url);
   assert.doesNotMatch(diff, /vscode\.window\.show\w+Message/);

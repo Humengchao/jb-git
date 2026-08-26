@@ -115,6 +115,9 @@ test("keeps the change an action moved to on screen, and closes on Escape", () =
   assert.match(scriptMatch[1], /updateControls\('reveal'\)/);
   assert.match(scriptMatch[1], /updateControls\('jump'\)/);
   assert.match(scriptMatch[1], /event\.key === 'Escape'/);
+  // 1/2/3 resolve the current change, but never while typing in the result.
+  assert.match(scriptMatch[1], /\['1', '2', '3'\]\.includes\(event\.key\)/);
+  assert.match(scriptMatch[1], /document\.activeElement !== result && model\.regions\.length/);
   // Every user-visible string goes through the translator.
   assert.match(scriptMatch[1], /mt\(' · draft restored'\)/);
   assert.match(scriptMatch[1], /mt\('Could not apply the merge result'\)/);

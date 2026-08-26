@@ -12,11 +12,13 @@ import { DiffContentProvider, diffSide } from "../views/diffProvider";
 
 // The webview sandbox has no allow-modals, so window.confirm() silently
 // returns false there; confirmations must round-trip through the host.
-const CONFIRM_PROMPTS = new Map<string, { message: string; button: string }>([
-  ["acceptLeft", { message: "Replace the complete result with the left version?", button: "Replace" }],
-  ["acceptRight", { message: "Replace the complete result with the right version?", button: "Replace" }],
-  ["cancel", { message: "Discard the unapplied merge result?", button: "Discard" }],
-]);
+function confirmPrompts(): Map<string, { message: string; button: string }> {
+  return new Map([
+    ["acceptLeft", { message: vscode.l10n.t("Replace the complete result with the left version?"), button: vscode.l10n.t("Replace") }],
+    ["acceptRight", { message: vscode.l10n.t("Replace the complete result with the right version?"), button: vscode.l10n.t("Replace") }],
+    ["cancel", { message: vscode.l10n.t("Discard the unapplied merge result?"), button: vscode.l10n.t("Discard") }],
+  ]);
+}
 
 interface MergeEditorLabels {
   ours: string;
@@ -128,7 +130,7 @@ export class MergeConflictEditor implements vscode.Disposable {
     // knows; the other three are the merge's own stages.
     const sides = new Map<string, { label: string; content: string }>([
       ["left", { label: labels.ours, content: versions.ours }],
-      ["base", { label: "Base", content: versions.base }],
+      ["base", { label: vscode.l10n.t("Base"), content: versions.base }],
       ["result", { label: labels.result, content: result }],
       ["right", { label: labels.theirs, content: versions.theirs }],
     ]);
@@ -145,7 +147,7 @@ export class MergeConflictEditor implements vscode.Disposable {
           label: `${sides.get(left)!.label}  ↔  ${sides.get(right)!.label}`,
           pair: [left, right] as const,
         })),
-      { title: `Compare contents of ${path.basename(pathSpec)}`, placeHolder: "Select two versions to compare" },
+      { title: vscode.l10n.t("Compare contents of {0}", path.basename(pathSpec)), placeHolder: vscode.l10n.t("Select two versions to compare") },
     );
     if (!choice) return;
     const [leftKey, rightKey] = choice.pair;
@@ -180,7 +182,7 @@ export class MergeConflictEditor implements vscode.Disposable {
     const sideLabels = await conflictSideLabels(snapshot);
     const labels: MergeEditorLabels = {
       ours: sideLabels.ours,
-      result: "Result",
+      result: vscode.l10n.t("Result"),
       theirs: sideLabels.theirs,
     };
     const title = `Merge Revisions for ${path.basename(pathSpec)}`;
@@ -202,10 +204,11 @@ export class MergeConflictEditor implements vscode.Disposable {
       // Only promise a draft that actually exists: an oversize result or cap eviction may
       // have removed it, and a close during Apply is resolved by the Apply's own outcome.
       if (dirty && !allowDispose && !applying && !this.disposed && this.drafts[key]) {
+        const reopenLabel = vscode.l10n.t("Reopen");
         void vscode.window.showInformationMessage(
-          `The unapplied merge result for ${pathSpec} was saved as a draft.`,
-          "Reopen",
-        ).then((choice) => { if (choice === "Reopen") void this.open(rootPath, pathSpec); });
+          vscode.l10n.t("The unapplied merge result for {0} was saved as a draft.", pathSpec),
+          reopenLabel,
+        ).then((choice) => { if (choice === reopenLabel) void this.open(rootPath, pathSpec); });
       }
     });
     messageRegistration = panel.webview.onDidReceiveMessage(async (message: unknown) => {
@@ -229,7 +232,7 @@ export class MergeConflictEditor implements vscode.Disposable {
         if (Buffer.byteLength(message.result, "utf8") > MAX_MERGE_DRAFT_BYTES) {
           delete this.drafts[key];
           this.scheduleSaveDrafts();
-          await panel.webview.postMessage({ type: "draftWarning", message: "This result is too large for draft recovery. Apply it before closing the editor." });
+          await panel.webview.postMessage({ type: "draftWarning", message: vscode.l10n.t("This result is too large for draft recovery. Apply it before closing the editor.") });
           return;
         }
         this.drafts[key] = { fingerprint, result: message.result, deleted: message.deleted === true, updatedAt: Date.now() };
@@ -249,7 +252,7 @@ export class MergeConflictEditor implements vscode.Disposable {
         return;
       }
       if (message.type === "confirm") {
-        const prompt = CONFIRM_PROMPTS.get(message.action);
+        const prompt = confirmPrompts().get(message.action);
         if (!prompt) return;
         const answer = await vscode.window.showWarningMessage(prompt.message, { modal: true }, prompt.button);
         if (answer === prompt.button) await panel.webview.postMessage({ type: "confirmed", action: message.action });
@@ -258,20 +261,20 @@ export class MergeConflictEditor implements vscode.Disposable {
       if (message.type !== "apply" || typeof message.result !== "string") return;
       applying = true;
       try {
-        if (!vscode.workspace.isTrusted) throw new Error("Merge results cannot be applied until this workspace is trusted.");
+        if (!vscode.workspace.isTrusted) throw new Error(vscode.l10n.t("Merge results cannot be applied until this workspace is trusted."));
         const latest = await this.manager.conflictVersions(rootPath, pathSpec);
         if (conflictFingerprint(latest) !== fingerprint) {
-          throw new Error("The conflicted file changed outside this editor. Reopen it before applying to avoid overwriting newer work.");
+          throw new Error(vscode.l10n.t("The conflicted file changed outside this editor. Reopen it before applying to avoid overwriting newer work."));
         }
         await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `Applying merge result for ${pathSpec}`, cancellable: false },
+          { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Applying merge result for {0}", pathSpec), cancellable: false },
           () => this.manager.applyConflictResult(rootPath, pathSpec, message.result, message.deleted === true),
         );
         allowDispose = true;
         dirty = false;
         delete this.drafts[key];
         await this.saveDrafts();
-        await vscode.window.showInformationMessage(`${pathSpec} was resolved and staged.`);
+        await vscode.window.showInformationMessage(vscode.l10n.t("{0} was resolved and staged.", pathSpec));
         panel.dispose();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -320,7 +323,7 @@ export function conflictFingerprint(versions: GitConflictVersions): string {
  * unconditionally; that makes the safest-looking button keep the wrong side.
  */
 export async function conflictSideLabels(snapshot?: RepositorySnapshot): Promise<ConflictSideLabels> {
-  const currentBranch = snapshot?.status?.branch.head ?? "Current Branch";
+  const currentBranch = snapshot?.status?.branch.head ?? vscode.l10n.t("Current Branch");
   const operation = snapshot?.operation.kind ?? "none";
   const detail = snapshot?.operation.detail;
   if (operation === "rebase") {
@@ -331,10 +334,10 @@ export async function conflictSideLabels(snapshot?: RepositorySnapshot): Promise
     ]);
     const originalBranch = headName?.replace(/^refs\/heads\//, "");
     return {
-      ours: onto ? `Rebase Target · ${onto.slice(0, 10)}` : "Rebase Target · already applied commits",
-      theirs: stopped
-        ? `Replayed Commit${originalBranch ? ` from ${originalBranch}` : ""} · ${stopped.slice(0, 10)}`
-        : `Replayed Commit${originalBranch ? ` from ${originalBranch}` : ""}`,
+      ours: onto ? `${vscode.l10n.t("Rebase Target")} · ${onto.slice(0, 10)}` : vscode.l10n.t("Rebase Target · already applied commits"),
+      theirs: (originalBranch
+        ? vscode.l10n.t("Replayed Commit from {0}", originalBranch)
+        : vscode.l10n.t("Replayed Commit")) + (stopped ? ` · ${stopped.slice(0, 10)}` : ""),
     };
   }
 
@@ -347,15 +350,15 @@ export async function conflictSideLabels(snapshot?: RepositorySnapshot): Promise
     }
   }
   const branch = revision ? snapshot?.branches.find((candidate) => candidate.oid === revision) : undefined;
-  const suffix = branch ? ` from ${branch.name}` : revision ? ` · ${revision.slice(0, 10)}` : "";
+  const suffix = branch ? " " + vscode.l10n.t("from {0}", branch.name) : revision ? ` · ${revision.slice(0, 10)}` : "";
   const theirs = operation === "merge"
-    ? `Merged Changes${suffix}`
+    ? vscode.l10n.t("Merged Changes") + suffix
     : operation === "cherry-pick"
-      ? `Cherry-picked Commit${suffix}`
+      ? vscode.l10n.t("Cherry-picked Commit") + suffix
       : operation === "revert"
-        ? `Revert Result${suffix}`
-        : "Incoming Changes";
-  return { ours: `Changes from ${currentBranch}`, theirs };
+        ? vscode.l10n.t("Revert Result") + suffix
+        : vscode.l10n.t("Incoming Changes");
+  return { ours: vscode.l10n.t("Changes from {0}", currentBranch), theirs };
 }
 
 async function readOperationMetadata(directory: string | undefined, ...names: string[]): Promise<string | undefined> {
@@ -524,6 +527,9 @@ const mergeScript = String.raw`
     'Keep both: append this side too': '两者都保留：再追加此侧',
     'Ignore this change and keep the result text': '忽略此更改，保留当前结果文本',
     'Revert this change to unresolved': '撤销此更改，恢复为未解决',
+    'Use the current conflict from the left pane (1)': '当前冲突使用左侧版本（按 1）',
+    'Keep both sides of the current conflict (2)': '当前冲突两侧都保留（按 2）',
+    'Use the current conflict from the right pane (3)': '当前冲突使用右侧版本（按 3）',
     ' · draft restored': ' · 已恢复草稿', 'Draft restored · ready to apply': '已恢复草稿 · 可以应用',
     'Could not apply the merge result': '无法应用合并结果',
     'Abort': '中止', 'Apply': '应用', 'All changes processed': '所有更改已处理',
@@ -538,9 +544,9 @@ const mergeScript = String.raw`
         '<span class="toolbar-separator"></span>',
         '<span class="non-conflicting">✓ Non-conflicting changes are already applied</span>',
         '<span class="toolbar-separator"></span>',
-        '<button id="take-left" class="secondary" title="Use the current conflict from the left pane">← Left</button>',
-        '<button id="take-both" class="secondary" title="Keep both sides of the current conflict">Both</button>',
-        '<button id="take-right" class="secondary" title="Use the current conflict from the right pane">Right →</button>',
+        '<button id="take-left" class="secondary" title="Use the current conflict from the left pane (1)">← Left</button>',
+        '<button id="take-both" class="secondary" title="Keep both sides of the current conflict (2)">Both</button>',
+        '<button id="take-right" class="secondary" title="Use the current conflict from the right pane (3)">Right →</button>',
         '<button id="reset" class="secondary" title="Restore the original conflicted result" disabled>Reset</button>',
         '<span class="toolbar-separator"></span>',
         '<button id="show-base" class="secondary" title="Show what this change started from" aria-pressed="false" disabled>Base</button>',
@@ -1320,6 +1326,14 @@ const mergeScript = String.raw`
     if (event.key === 'F7' && model.regions.length) {
       event.preventDefault();
       document.getElementById(event.shiftKey ? 'previous' : 'next').click();
+      return;
+    }
+    // 1/2/3 resolve the current change without reaching for the mouse. They
+    // stay plain keys, so they must never fire while the user is typing text.
+    if (['1', '2', '3'].includes(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey
+        && document.activeElement !== result && model.regions.length) {
+      event.preventDefault();
+      document.getElementById(event.key === '1' ? 'take-left' : event.key === '2' ? 'take-both' : 'take-right').click();
       return;
     }
     // Escape closes the dialog in IDEA; the Abort handler still asks before

@@ -19,7 +19,7 @@ export async function checkoutWithLocalChanges(
     // Never await a toast in here: this runs inside a non-cancellable
     // "Checking out …" progress, and a notification only settles once it is
     // dismissed, which leaves a spinner on screen with no way to close it.
-    void vscode.window.showWarningMessage(`Finish or abort the active ${snapshot.operation.kind} before checking out another branch.`);
+    void vscode.window.showWarningMessage(vscode.l10n.t("Finish or abort the active {0} before checking out another branch.", snapshot.operation.kind));
     return false;
   }
   if (!snapshot.status.changes.length) {
@@ -27,12 +27,13 @@ export async function checkoutWithLocalChanges(
     return true;
   }
 
+  const smartLabel = vscode.l10n.t("Smart Checkout");
   const choice = await vscode.window.showWarningMessage(
-    `${snapshot.status.changes.length} local change(s) could block checkout of ${branch.name}.`,
-    { modal: true, detail: "Smart Checkout temporarily stashes tracked, staged, and untracked changes, checks out the target, then restores both the working tree and Index." },
-    "Smart Checkout",
+    vscode.l10n.t("{0} local change(s) could block checkout of {1}.", snapshot.status.changes.length, branch.name),
+    { modal: true, detail: vscode.l10n.t("Smart Checkout temporarily stashes tracked, staged, and untracked changes, checks out the target, then restores both the working tree and Index.") },
+    smartLabel,
   );
-  if (choice !== "Smart Checkout") return false;
+  if (choice !== smartLabel) return false;
 
   // Checkout can be blocked by an untracked file it would overwrite, so those
   // are parked too.
@@ -46,20 +47,20 @@ export async function checkoutWithLocalChanges(
     // remains available in the Stash command.
     const recovery = await restoreTemporaryStash(manager, rootPath, temporary);
     if (recovery.outcome !== "restored") {
-      void vscode.window.showWarningMessage(`Checkout failed. Local changes remain safely stored in ${temporary.ref}.`);
+      void vscode.window.showWarningMessage(vscode.l10n.t("Checkout failed. Local changes remain safely stored in {0}.", temporary.ref));
     }
     throw error;
   }
 
   const restore = await restoreTemporaryStash(manager, rootPath, temporary);
   if (restore.outcome === "restored") {
-    void vscode.window.showInformationMessage(`Checked out ${branch.name} and restored local changes.`);
+    void vscode.window.showInformationMessage(vscode.l10n.t("Checked out {0} and restored local changes.", branch.name));
     return true;
   }
   if (restore.outcome === "conflicted") {
-    void vscode.window.showWarningMessage(`Checked out ${branch.name}, but restoring local changes caused conflicts. The stash was kept; resolve the files in Local Changes.`);
+    void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}, but restoring local changes caused conflicts. The stash was kept; resolve the files in Local Changes.", branch.name));
     return true;
   }
-  void vscode.window.showWarningMessage(`Checked out ${branch.name}. Automatic restore failed and ${temporary.ref} was kept: ${restore.error instanceof Error ? restore.error.message : String(restore.error)}`);
+  void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}. Automatic restore failed and {1} was kept: {2}", branch.name, temporary.ref, restore.error instanceof Error ? restore.error.message : String(restore.error)));
   return true;
 }

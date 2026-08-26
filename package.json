@@ -38,6 +38,7 @@
     "workspaceContains:**/.git"
   ],
   "main": "./dist/extension.js",
+  "l10n": "./l10n",
   "scripts": {
     "compile": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",

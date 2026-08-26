@@ -500,7 +500,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // Cancellable: reading a large blob out of Git is the one step here that
       // can take long enough for a notification with no way out to feel stuck.
       await runWithNotification(
-        `Loading diff for ${node.change.path}`,
+        vscode.l10n.t("Loading diff for {0}", node.change.path),
         (signal) => openChangeDiff(manager, diffProvider, node, signal),
         true,
       );
@@ -509,47 +509,47 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.openGitToolWindow", (rootPath?: string) => gitToolWindow.open(rootPath)),
     vscode.commands.registerCommand("jbGit.branchesPopup", async (rootPath?: string) => {
       const snapshot = await pickRepository(rootPath);
-      if (!snapshot) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
+      if (!snapshot) return void vscode.window.showInformationMessage(vscode.l10n.t("No Git repository was found in this workspace."));
       type BranchAction = vscode.QuickPickItem & { action?: "new" | "fetch" | "pull" | "push" | "log"; branch?: typeof snapshot.branches[number] };
       const current = snapshot.status?.branch.head;
       const items: BranchAction[] = [
-        { label: "$(add) New Branch", description: `from ${current ?? "HEAD"}`, action: "new" },
-        { label: "$(git-pull-request-go-to-changes) Fetch", action: "fetch" },
-        { label: "$(cloud-download) Pull…", action: "pull" },
-        { label: "$(cloud-upload) Push…", action: "push" },
-        { label: "$(git-commit) Show Git Log", action: "log" },
-        { label: "Local Branches", kind: vscode.QuickPickItemKind.Separator },
+        { label: `$(add) ${vscode.l10n.t("New Branch")}`, description: vscode.l10n.t("from {0}", current ?? "HEAD"), action: "new" },
+        { label: `$(git-pull-request-go-to-changes) ${vscode.l10n.t("Fetch")}`, action: "fetch" },
+        { label: `$(cloud-download) ${vscode.l10n.t("Pull…")}`, action: "pull" },
+        { label: `$(cloud-upload) ${vscode.l10n.t("Push…")}`, action: "push" },
+        { label: `$(git-commit) ${vscode.l10n.t("Show Git Log")}`, action: "log" },
+        { label: vscode.l10n.t("Local Branches"), kind: vscode.QuickPickItemKind.Separator },
         ...snapshot.branches.filter((branch) => branch.kind === "local").map((branch) => ({
           label: `${branch.name === current ? "$(check)" : "$(git-branch)"} ${branch.name}`,
           description: branch.upstream ? `${branch.upstream}${branch.tracking ? ` · ${branch.tracking}` : ""}` : undefined,
           branch,
         })),
-        { label: "Remote Branches", kind: vscode.QuickPickItemKind.Separator },
+        { label: vscode.l10n.t("Remote Branches"), kind: vscode.QuickPickItemKind.Separator },
         ...snapshot.branches.filter((branch) => branch.kind === "remote").map((branch) => ({ label: `$(cloud) ${branch.name}`, branch })),
-        { label: "Tags", kind: vscode.QuickPickItemKind.Separator },
+        { label: vscode.l10n.t("Tags"), kind: vscode.QuickPickItemKind.Separator },
         ...snapshot.branches.filter((branch) => branch.kind === "tag").map((branch) => ({ label: `$(tag) ${branch.name}`, branch })),
       ];
       const selected = await vscode.window.showQuickPick(items, {
         title: `${path.basename(snapshot.repository.info.rootPath)} · ${current ?? "detached HEAD"}`,
-        placeHolder: "Git branches and common operations",
+        placeHolder: vscode.l10n.t("Git branches and common operations"),
         matchOnDescription: true,
       });
       if (!selected) return;
       const root = snapshot.repository.info.rootPath;
       if (selected.branch) {
         if (selected.branch.kind === "local" && selected.branch.name === current) return;
-        await runWithNotification(`Checking out ${selected.branch.name}`, () => checkoutWithLocalChanges(manager, root, selected.branch!));
+        await runWithNotification(vscode.l10n.t("Checking out {0}", selected.branch.name), () => checkoutWithLocalChanges(manager, root, selected.branch!));
       } else if (selected.action === "new") {
-        const name = await vscode.window.showInputBox({ title: "New Branch", prompt: `Create from ${current ?? "HEAD"}`, validateInput: (value) => validateGitRefName(value) });
-        if (name?.trim()) await runWithNotification(`Creating branch ${name.trim()}`, () => manager.createBranch(root, name.trim()));
-      } else if (selected.action === "fetch") await runWithNotification("Fetching remotes", () => manager.fetch(root));
+        const name = await vscode.window.showInputBox({ title: vscode.l10n.t("New Branch"), prompt: vscode.l10n.t("Create from {0}", current ?? "HEAD"), validateInput: (value) => validateGitRefName(value) });
+        if (name?.trim()) await runWithNotification(vscode.l10n.t("Creating branch {0}", name.trim()), () => manager.createBranch(root, name.trim()));
+      } else if (selected.action === "fetch") await runWithNotification(vscode.l10n.t("Fetching remotes"), () => manager.fetch(root));
       else if (selected.action === "pull") await vscode.commands.executeCommand("jbGit.pull", root);
       else if (selected.action === "push") await vscode.commands.executeCommand("jbGit.push", root);
       else if (selected.action === "log") await gitToolWindow.open(root);
     }),
     vscode.commands.registerCommand("jbGit.operationsPopup", async (rootPath?: string) => {
       const snapshot = await pickRepository(rootPath);
-      if (!snapshot) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
+      if (!snapshot) return void vscode.window.showInformationMessage(vscode.l10n.t("No Git repository was found in this workspace."));
       const root = snapshot.repository.info.rootPath;
       type OperationItem = vscode.QuickPickItem & { command?: string };
       const items: OperationItem[] = [
@@ -766,7 +766,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.commit", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
       const first = await pickRepository(rootPath);
-      if (!first) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
+      if (!first) return void vscode.window.showInformationMessage(vscode.l10n.t("No Git repository was found in this workspace."));
       const message = await vscode.window.showInputBox({ prompt: "Commit message", placeHolder: "Describe the staged changes" });
       if (!message?.trim()) return;
       const mode = await vscode.window.showQuickPick(
@@ -784,7 +784,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const signoff = mode.label.includes("sign-off");
       const noVerify = mode.label.includes("without hooks");
       const revision = await runWithNotification("Creating Git commit", () => manager.commit(first.repository.info.rootPath, message, { amend, signoff, noVerify }));
-      if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
+      if (revision) await vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}", revision.slice(0, 12)));
     }),
     vscode.commands.registerCommand("jbGit.pull", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1161,7 +1161,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         "Creating Changelist commit",
         () => manager.commitPaths(node.repositoryRoot, [...selected], message.trim(), undefined, plan.hunkSelections),
       );
-      if (revision) await vscode.window.showInformationMessage(`Created commit ${revision.slice(0, 12)}`);
+      if (revision) await vscode.window.showInformationMessage(vscode.l10n.t("Created commit {0}", revision.slice(0, 12)));
     }),
     vscode.commands.registerCommand("jbGit.createShelf", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1463,13 +1463,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.checkoutBranch", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
       const snapshot = await pickRepository(rootPath);
-      if (!snapshot) return void vscode.window.showInformationMessage("No Git repository was found in this workspace.");
+      if (!snapshot) return void vscode.window.showInformationMessage(vscode.l10n.t("No Git repository was found in this workspace."));
       const selected = (await vscode.window.showQuickPick(
         snapshot.branches.filter((item) => item.kind !== "remote" || item.name !== "origin/HEAD").map((item) => ({ label: item.name, description: item.kind, item })),
-        { placeHolder: "Select a branch to checkout" },
+        { placeHolder: vscode.l10n.t("Select a branch to checkout") },
       ))?.item;
       if (!selected) return;
-      await runWithNotification(`Checking out ${selected.name}`, () => checkoutWithLocalChanges(manager, snapshot.repository.info.rootPath, selected));
+      await runWithNotification(vscode.l10n.t("Checking out {0}", selected.name), () => checkoutWithLocalChanges(manager, snapshot.repository.info.rootPath, selected));
     }),
     vscode.commands.registerCommand("jbGit.stageChange", async (node?: ChangeNode) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1569,7 +1569,7 @@ async function openMergeConflictEditor(
   node: ChangeNode,
 ): Promise<void> {
   const opened = await runWithNotification(
-    `Loading merge conflict for ${node.change.path}`,
+    vscode.l10n.t("Loading merge conflict for {0}", node.change.path),
     () => mergeEditor.open(node.repositoryRoot, node.change.path),
   );
   if (opened !== false) return;
@@ -1577,18 +1577,19 @@ async function openMergeConflictEditor(
   const labels = await conflictSideLabels(manager.snapshot(node.repositoryRoot));
   const side = await vscode.window.showQuickPick(
     [
-      { label: "Accept left", value: "ours" as const, description: labels.ours },
-      { label: "Accept right", value: "theirs" as const, description: labels.theirs },
+      { label: vscode.l10n.t("Accept left"), value: "ours" as const, description: labels.ours },
+      { label: vscode.l10n.t("Accept right"), value: "theirs" as const, description: labels.theirs },
     ],
-    { title: "Binary merge conflict", placeHolder: `${node.change.path} cannot be merged as text` },
+    { title: vscode.l10n.t("Binary merge conflict"), placeHolder: vscode.l10n.t("{0} cannot be merged as text", node.change.path) },
   );
   if (!side) return;
+  const resolveLabel = vscode.l10n.t("Resolve");
   const answer = await vscode.window.showWarningMessage(
-    `Replace ${node.change.path} with '${side.description}' and mark it resolved?`,
+    vscode.l10n.t("Replace {0} with '{1}' and mark it resolved?", node.change.path, side.description ?? ""),
     { modal: true },
-    "Resolve",
+    resolveLabel,
   );
-  if (answer !== "Resolve") return;
+  if (answer !== resolveLabel) return;
   await runWithNotification(`Resolving ${node.change.path}`, async () => {
     await manager.resolveConflict(node.repositoryRoot, node.change.path, side.value);
     await manager.markResolved(node.repositoryRoot, [node.change.path]);
