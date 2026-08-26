@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.22
+
+- feat: localize every remaining host-side dialog, notification and picker
+
 ## 0.1.21
 
 - feat: speak the user's language in the commit, push, checkout and conflict flows
