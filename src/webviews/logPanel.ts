@@ -446,11 +446,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             const deletable = selectedBranches.filter((branch) => branch.kind === "local" && branch.name !== current);
             if (!deletable.length) return;
             const confirmed = await vscode.window.showWarningMessage(
-              `Delete ${deletable.length} selected branch${deletable.length === 1 ? "" : "es"}?`,
+              vscode.l10n.t("Delete {0} selected branch(es)?", deletable.length),
               { modal: true, detail: deletable.map((branch) => branch.name).join("\n") },
-              "Delete",
+              vscode.l10n.t("Delete"),
             );
-            if (confirmed === "Delete") {
+            if (confirmed === vscode.l10n.t("Delete")) {
               for (const branch of deletable) await this.manager.deleteBranch(root, branch.name);
             }
             return;
@@ -472,7 +472,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           if (!(await requireTrusted())) return;
           if (message.action === "mergeRef" || message.action === "rebaseOntoRef" || message.action === "pullRefMerge" || message.action === "pullRefRebase") {
             const head = snapshot.status?.branch.head;
-            if (!head) return void vscode.window.showWarningMessage("Check out a branch before merging or rebasing.");
+            if (!head) return void vscode.window.showWarningMessage(vscode.l10n.t("Check out a branch before merging or rebasing."));
             if (branch.kind === "tag") return;
             if (branch.name === head && branch.kind === "local") return;
             const pull = message.action === "pullRefMerge" || message.action === "pullRefRebase";
@@ -483,16 +483,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
               // history-rewriting action in this panel.
               const confirmed = await vscode.window.showWarningMessage(
                 `Rebase '${head}' onto ${branch.name}?`,
-                { modal: true, detail: "Commits on the current branch are rewritten." },
-                "Rebase",
+                { modal: true, detail: vscode.l10n.t("Commits on the current branch are rewritten.") },
+                vscode.l10n.t("Rebase"),
               );
-              if (confirmed !== "Rebase") return;
+              if (confirmed !== vscode.l10n.t("Rebase")) return;
             }
             // IDEA's "Pull into <current>" is a fetch followed by an integration of the
             // remote-tracking ref, so run it as those two verified steps.
             if (pull) {
               const remote = await this.remoteForBranch(root, branch);
-              if (!remote) return void vscode.window.showWarningMessage(`'${branch.name}' does not belong to a configured remote.`);
+              if (!remote) return void vscode.window.showWarningMessage(vscode.l10n.t("'{0}' does not belong to a configured remote.", branch.name));
               await this.withCancellableProgress(`Fetching ${remote}`, (signal) => this.manager.fetchRemote(root, remote, signal));
             }
             await vscode.window.withProgress(
@@ -504,7 +504,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           if (message.action === "fetchRef") {
             if (branch.kind !== "remote") return;
             const remote = await this.remoteForBranch(root, branch);
-            if (!remote) return void vscode.window.showWarningMessage(`'${branch.name}' does not belong to a configured remote.`);
+            if (!remote) return void vscode.window.showWarningMessage(vscode.l10n.t("'{0}' does not belong to a configured remote.", branch.name));
             await this.withCancellableProgress(`Fetching ${remote}`, (signal) => this.manager.fetchRemote(root, remote, signal));
             return;
           }
@@ -518,42 +518,42 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             return;
           }
           if (message.action === "tagFromRef") {
-            const name = await vscode.window.showInputBox({ title: `New Tag at '${branch.name}'`, prompt: "Tag name", validateInput: (value) => validateGitRefName(value) });
+            const name = await vscode.window.showInputBox({ title: vscode.l10n.t("New Tag at '{0}'", branch.name), prompt: vscode.l10n.t("Tag name"), validateInput: (value) => validateGitRefName(value) });
             if (!name?.trim()) return;
             await vscode.window.withProgress(
-              { location: vscode.ProgressLocation.Notification, title: `Creating tag ${name.trim()}` },
+              { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Creating tag {0}", name.trim()) },
               () => this.manager.createTag(root, name.trim(), branch.fullName),
             );
             return;
           }
           if (message.action === "deleteTag") {
             if (branch.kind !== "tag") return;
-            const confirmed = await vscode.window.showWarningMessage(`Delete tag '${branch.name}'?`, { modal: true }, "Delete");
-            if (confirmed === "Delete") await this.manager.deleteTag(root, branch.name);
+            const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t("Delete tag '{0}'?", branch.name), { modal: true }, vscode.l10n.t("Delete"));
+            if (confirmed === vscode.l10n.t("Delete")) await this.manager.deleteTag(root, branch.name);
             return;
           }
           if (message.action === "newBranchFromRef") {
-            const name = await vscode.window.showInputBox({ title: `New Branch from '${branch.name}'`, prompt: "Branch name", validateInput: (value) => validateGitRefName(value) });
+            const name = await vscode.window.showInputBox({ title: vscode.l10n.t("New Branch from '{0}'", branch.name), prompt: vscode.l10n.t("Branch name"), validateInput: (value) => validateGitRefName(value) });
             if (name?.trim()) await this.manager.createBranch(root, name.trim(), branch.fullName);
             return;
           }
           if (message.action === "createWorktreeFromRef") {
-            const worktreePath = await vscode.window.showInputBox({ title: `New Worktree from '${branch.name}'`, prompt: "Worktree path", placeHolder: "../feature-worktree", validateInput: (value) => validatePathInput(value) });
+            const worktreePath = await vscode.window.showInputBox({ title: vscode.l10n.t("New Worktree from '{0}'", branch.name), prompt: vscode.l10n.t("Worktree path"), placeHolder: vscode.l10n.t("../feature-worktree"), validateInput: (value) => validatePathInput(value) });
             if (!worktreePath?.trim()) return;
-            const newBranch = await vscode.window.showInputBox({ title: "Optional New Branch", prompt: "Leave empty to use the selected ref", validateInput: (value) => validateGitRefName(value, true) });
+            const newBranch = await vscode.window.showInputBox({ title: vscode.l10n.t("Optional New Branch"), prompt: vscode.l10n.t("Leave empty to use the selected ref"), validateInput: (value) => validateGitRefName(value, true) });
             await this.manager.addWorktree(root, worktreePath.trim(), branch.name, newBranch?.trim() || undefined);
             return;
           }
           if (message.action === "renameBranch") {
             if (branch.kind !== "local") return;
-            const name = await vscode.window.showInputBox({ title: `Rename '${branch.name}'`, value: branch.name, validateInput: (value) => validateGitRefName(value) });
+            const name = await vscode.window.showInputBox({ title: vscode.l10n.t("Rename '{0}'", branch.name), value: branch.name, validateInput: (value) => validateGitRefName(value) });
             if (name?.trim() && name.trim() !== branch.name) await this.manager.renameBranch(root, branch.name, name.trim());
             return;
           }
           if (message.action === "deleteBranch") {
             if (branch.kind !== "local" || branch.name === snapshot.status?.branch.head) return;
-            const confirmed = await vscode.window.showWarningMessage(`Delete branch '${branch.name}'?`, { modal: true }, "Delete");
-            if (confirmed === "Delete") await this.manager.deleteBranch(root, branch.name);
+            const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t("Delete branch '{0}'?", branch.name), { modal: true }, vscode.l10n.t("Delete"));
+            if (confirmed === vscode.l10n.t("Delete")) await this.manager.deleteBranch(root, branch.name);
             return;
           }
           return;
@@ -607,9 +607,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             if (!(await requireTrusted())) return;
             const confirmed = await vscode.window.showWarningMessage(
               `Replace the working-tree version of '${file.path}' with ${commit.hash.slice(0, 8)}?`,
-              { modal: true }, "Restore",
+              { modal: true }, vscode.l10n.t("Restore"),
             );
-            if (confirmed === "Restore") await this.manager.restoreFileFromRevision(root, commit.hash, file.path);
+            if (confirmed === vscode.l10n.t("Restore")) await this.manager.restoreFileFromRevision(root, commit.hash, file.path);
             return;
           }
           return;
@@ -629,12 +629,12 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         }
         if (!(await requireTrusted())) return;
         if (message.action === "checkoutRevision") {
-          const confirmed = await vscode.window.showWarningMessage(`Checkout ${commit.hash.slice(0, 8)} in detached HEAD mode?`, { modal: true }, "Checkout");
-          if (confirmed === "Checkout") await this.manager.checkoutRevision(root, commit.hash);
+          const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t("Checkout {0} in detached HEAD mode?", commit.hash.slice(0, 8)), { modal: true }, vscode.l10n.t("Checkout"));
+          if (confirmed === vscode.l10n.t("Checkout")) await this.manager.checkoutRevision(root, commit.hash);
           return;
         }
         if (message.action === "createTag") {
-          const name = await vscode.window.showInputBox({ title: `New Tag at ${commit.hash.slice(0, 8)}`, prompt: "Tag name", validateInput: (value) => validateGitRefName(value) });
+          const name = await vscode.window.showInputBox({ title: vscode.l10n.t("New Tag at {0}", commit.hash.slice(0, 8)), prompt: vscode.l10n.t("Tag name"), validateInput: (value) => validateGitRefName(value) });
           if (name?.trim()) await this.manager.createTag(root, name.trim(), commit.hash);
           return;
         }
@@ -692,7 +692,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             description: list.id === home ? "the file's own Changelist" : undefined,
             id: list.id,
           })),
-          { title: `Move this change of ${change.path} to`, placeHolder: "Select a Changelist" },
+          { title: vscode.l10n.t("Move this change of {0} to", change.path), placeHolder: vscode.l10n.t("Select a Changelist") },
         );
         if (!picked) return;
         await this.changelists.assignHunks(root, change.path, [message.key], picked.id);
@@ -791,14 +791,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           const split = this.changelists.splitPaths(root, paths);
           if (split.length > 0) {
             const answer = await vscode.window.showWarningMessage(
-              `${split.length === 1 ? `'${split[0]}' has` : `${split.length} files have`} changes assigned to more than one Changelist.`,
+              split.length === 1
+                ? vscode.l10n.t("'{0}' has changes assigned to more than one Changelist.", split[0])
+                : vscode.l10n.t("{0} files have changes assigned to more than one Changelist.", split.length),
               {
                 modal: true,
-                detail: "Committing complete contents takes all of them, including the ones another Changelist owns. Commit the Changelist itself to take only its own changes.",
+                detail: vscode.l10n.t("Committing complete contents takes all of them, including the ones another Changelist owns. Commit the Changelist itself to take only its own changes."),
               },
-              "Commit Everything",
+              vscode.l10n.t("Commit Everything"),
             );
-            if (answer !== "Commit Everything") return;
+            if (answer !== vscode.l10n.t("Commit Everything")) return;
           }
           revision = await this.manager.commitPaths(root, paths, commitMessage, options);
         }
@@ -814,9 +816,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (message.type === "createChangelist") {
-        const name = await vscode.window.showInputBox({ title: "New Changelist", prompt: "Name", placeHolder: "Feature work" });
+        const name = await vscode.window.showInputBox({ title: vscode.l10n.t("New Changelist"), prompt: vscode.l10n.t("Name"), placeHolder: vscode.l10n.t("Feature work") });
         if (!name?.trim()) return;
-        const description = await vscode.window.showInputBox({ title: `New Changelist · ${name.trim()}`, prompt: "Optional description", placeHolder: "Why these changes belong together" });
+        const description = await vscode.window.showInputBox({ title: vscode.l10n.t("New Changelist · {0}", name.trim()), prompt: vscode.l10n.t("Optional description"), placeHolder: vscode.l10n.t("Why these changes belong together") });
         if (description === undefined) return;
         await this.changelists.create(root, name.trim(), description);
         return;
@@ -824,9 +826,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "editChangelist") {
         const list = this.changelists.lists(root).find((candidate) => candidate.id === message.id);
         if (!list) return;
-        const name = await vscode.window.showInputBox({ title: "Edit Changelist", prompt: "Name", value: list.name });
+        const name = await vscode.window.showInputBox({ title: vscode.l10n.t("Edit Changelist"), prompt: vscode.l10n.t("Name"), value: list.name });
         if (!name?.trim()) return;
-        const description = await vscode.window.showInputBox({ title: `Edit Changelist · ${name.trim()}`, prompt: "Optional description", value: list.description ?? "" });
+        const description = await vscode.window.showInputBox({ title: vscode.l10n.t("Edit Changelist · {0}", name.trim()), prompt: vscode.l10n.t("Optional description"), value: list.description ?? "" });
         if (description === undefined) return;
         await this.changelists.update(root, list.id, name, description);
         return;
@@ -836,9 +838,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (!list || this.changelists.lists(root).length === 1) return;
         const answer = await vscode.window.showWarningMessage(
           `Delete Changelist '${list.name}'? Its files will move to the first remaining Changelist.`,
-          { modal: true }, "Delete",
+          { modal: true }, vscode.l10n.t("Delete"),
         );
-        if (answer === "Delete") await this.changelists.remove(root, list.id);
+        if (answer === vscode.l10n.t("Delete")) await this.changelists.remove(root, list.id);
         return;
       }
       if (message.type === "setActiveChangelist") {
@@ -851,7 +853,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const current = this.changelists.listForFile(root, change.path);
         const target = await vscode.window.showQuickPick(
           this.changelists.lists(root).filter((list) => list.id !== current.id).map((list) => ({ label: list.name, id: list.id })),
-          { title: `Move ${change.path}`, placeHolder: "Select target Changelist" },
+          { title: vscode.l10n.t("Move {0}", change.path), placeHolder: vscode.l10n.t("Select target Changelist") },
         );
         if (target) await this.changelists.assign(root, change.path, target.id);
         return;
@@ -881,12 +883,12 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           await moveUntrackedToTrash(root, change.path);
           await this.manager.refresh(root);
         } else if (change.conflicted) {
-          return void vscode.window.showWarningMessage("Conflicted files are not rolled back individually. Resolve the conflict or abort the Git operation so both sides remain recoverable.");
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Conflicted files are not rolled back individually. Resolve the conflict or abort the Git operation so both sides remain recoverable."));
         } else {
           const recoveryPaths = [change.path, ...(change.originalPath ? [change.originalPath] : [])];
           const recovery = await this.shelves.create(snapshot.repository, `Rollback backup · ${change.path}`, recoveryPaths);
           await this.manager.refresh(root);
-          void vscode.window.showInformationMessage(`Rolled back ${change.path}. Recovery shelf '${recovery.name}' was kept.`);
+          void vscode.window.showInformationMessage(vscode.l10n.t("Rolled back {0}. Recovery shelf '{1}' was kept.", change.path, recovery.name));
         }
         return;
       }
@@ -899,10 +901,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           .filter((change) => !change.conflicted)
           .flatMap((change) => [change.path, ...(change.originalPath ? [change.originalPath] : [])]);
         if (conflicted.length) {
-          void vscode.window.showWarningMessage(`Skipped ${conflicted.length} conflicted file(s): resolve merge conflicts before shelving them.`);
+          void vscode.window.showWarningMessage(vscode.l10n.t("Skipped {0} conflicted file(s): resolve merge conflicts before shelving them.", conflicted.length));
         }
-        if (!paths.length) return void vscode.window.showInformationMessage("Select at least one tracked change to shelf.");
-        const name = await vscode.window.showInputBox({ title: "Shelve Changes", prompt: "Shelf name", value: "Shelf" });
+        if (!paths.length) return void vscode.window.showInformationMessage(vscode.l10n.t("Select at least one tracked change to shelf."));
+        const name = await vscode.window.showInputBox({ title: vscode.l10n.t("Shelve Changes"), prompt: vscode.l10n.t("Shelf name"), value: "Shelf" });
         if (name?.trim()) {
           await this.shelves.create(snapshot.repository, name.trim(), [...new Set(paths)]);
           await this.manager.refresh(root);
@@ -916,8 +918,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           await this.shelves.apply(snapshot.repository, entry);
           await this.manager.refresh(root);
         } else {
-          const confirmed = await vscode.window.showWarningMessage(`Delete shelf '${entry.name}'?`, { modal: true }, "Delete");
-          if (confirmed === "Delete") await this.shelves.remove(root, entry);
+          const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t("Delete shelf '{0}'?", entry.name), { modal: true }, vscode.l10n.t("Delete"));
+          if (confirmed === vscode.l10n.t("Delete")) await this.shelves.remove(root, entry);
         }
         return;
       }
@@ -928,35 +930,35 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (!("hash" in message) || !isFullObjectId(message.hash)) return;
       if (message.type === "newBranch") {
-        const name = await vscode.window.showInputBox({ title: "New Branch", prompt: `Create from ${message.hash.slice(0, 12)}`, validateInput: (value) => validateGitRefName(value) });
+        const name = await vscode.window.showInputBox({ title: vscode.l10n.t("New Branch"), prompt: vscode.l10n.t("Create from {0}", message.hash.slice(0, 12)), validateInput: (value) => validateGitRefName(value) });
         if (name?.trim()) await this.manager.createBranch(root, name.trim(), message.hash);
         return;
       }
       if (message.type === "cherryPick") {
-        const confirmed = await vscode.window.showWarningMessage(`Cherry-pick ${message.hash.slice(0, 12)}?`, { modal: true }, "Cherry-pick");
-        if (confirmed === "Cherry-pick") await this.manager.cherryPick(root, message.hash);
+        const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t("Cherry-pick {0}?", message.hash.slice(0, 12)), { modal: true }, vscode.l10n.t("Cherry-pick"));
+        if (confirmed === vscode.l10n.t("Cherry-pick")) await this.manager.cherryPick(root, message.hash);
         return;
       }
       if (message.type === "revert") {
-        const confirmed = await vscode.window.showWarningMessage(`Revert ${message.hash.slice(0, 12)} with a new commit?`, { modal: true }, "Revert");
-        if (confirmed === "Revert") await this.manager.revert(root, message.hash);
+        const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t("Revert {0} with a new commit?", message.hash.slice(0, 12)), { modal: true }, vscode.l10n.t("Revert"));
+        if (confirmed === vscode.l10n.t("Revert")) await this.manager.revert(root, message.hash);
         return;
       }
       if (message.type === "reset") {
         const choice = await vscode.window.showQuickPick(
           [
-            { label: "Soft", description: "Keep index and working tree", mode: "soft" as const },
-            { label: "Mixed", description: "Reset index; keep working tree", mode: "mixed" as const },
-            { label: "Hard", description: "Discard index and working tree changes", mode: "hard" as const },
+            { label: vscode.l10n.t("Soft"), description: vscode.l10n.t("Keep index and working tree"), mode: "soft" as const },
+            { label: vscode.l10n.t("Mixed"), description: vscode.l10n.t("Reset index; keep working tree"), mode: "mixed" as const },
+            { label: vscode.l10n.t("Hard"), description: vscode.l10n.t("Discard index and working tree changes"), mode: "hard" as const },
           ],
-          { title: `Reset current branch to ${message.hash.slice(0, 12)}` },
+          { title: vscode.l10n.t("Reset current branch to {0}", message.hash.slice(0, 12)) },
         );
         if (!choice) return;
         const confirmed = await vscode.window.showWarningMessage(
           `Reset ${choice.label.toLowerCase()} to ${message.hash.slice(0, 12)}?${choice.mode === "hard" ? " Local changes will be lost." : ""}`,
-          { modal: true }, "Reset",
+          { modal: true }, vscode.l10n.t("Reset"),
         );
-        if (confirmed === "Reset") await this.manager.reset(root, message.hash, choice.mode);
+        if (confirmed === vscode.l10n.t("Reset")) await this.manager.reset(root, message.hash, choice.mode);
         return;
       }
     } catch (error) {
@@ -1079,7 +1081,7 @@ function statusLabel(change: GitChange): string {
 
 async function requireTrusted(): Promise<boolean> {
   if (vscode.workspace.isTrusted) return true;
-  await vscode.window.showWarningMessage("JB Git mutations are disabled until this workspace is trusted.");
+  await vscode.window.showWarningMessage(vscode.l10n.t("JB Git mutations are disabled until this workspace is trusted."));
   return false;
 }
 

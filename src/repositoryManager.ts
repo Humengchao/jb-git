@@ -202,7 +202,7 @@ export class RepositoryManager implements vscode.Disposable {
         }
       }
       if (failures.length) {
-        throw new Error(`Fetch failed for ${failures.length} of ${targets.length} repositories. ${failures.join("; ")}`);
+        throw new Error(vscode.l10n.t("Fetch failed for {0} of {1} repositories. {2}", failures.length, targets.length, failures.join("; ")));
       }
     });
   }
@@ -460,7 +460,7 @@ export class RepositoryManager implements vscode.Disposable {
 
   private requireRepository(rootPath: string): GitRepository {
     const repository = this.repository(rootPath);
-    if (!repository) throw new Error(`Repository not found: ${rootPath}`);
+    if (!repository) throw new Error(vscode.l10n.t("Repository not found: {0}", rootPath));
     return repository;
   }
 

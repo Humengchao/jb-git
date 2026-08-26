@@ -51,3 +51,13 @@ test("the extension manifest points VS Code at the bundles", () => {
   const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(manifest.l10n, "./l10n");
 });
+
+test("no decision is made by sniffing words out of a translated label", () => {
+  // mode.label.includes("Amend") worked only in English: the moment the label
+  // was translated every such check went false and the choice silently lost
+  // its meaning. Choices must carry their semantics as data.
+  for (const name of ["extension", "webviews/logPanel", "pushPreview", "smartCheckout"]) {
+    const source = readSource(`../src/${name}.ts`, import.meta.url);
+    assert.doesNotMatch(source, /\.label\.includes\(/, `${name} decides by label text`);
+  }
+});

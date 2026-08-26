@@ -4,12 +4,12 @@ import * as vscode from "vscode";
 /** Resolves a Git-reported relative path without allowing it to escape its repository. */
 export function safeWorktreeUri(rootPath: string, pathSpec: string): vscode.Uri {
   if (!pathSpec || path.isAbsolute(pathSpec) || /[\r\n\0]/.test(pathSpec)) {
-    throw new Error("The change path is not a safe repository-relative path.");
+    throw new Error(vscode.l10n.t("The change path is not a safe repository-relative path."));
   }
   const target = path.resolve(rootPath, pathSpec);
   const relative = path.relative(rootPath, target);
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error("The change path is outside the repository.");
+    throw new Error(vscode.l10n.t("The change path is outside the repository."));
   }
   return vscode.Uri.file(target);
 }

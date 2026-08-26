@@ -51,7 +51,7 @@ test("continues fetching the remaining repositories when one remote fails", () =
   const manager = readSource("../src/repositoryManager.ts", import.meta.url);
   const fetch = manager.slice(manager.indexOf("public async fetch("));
   assert.match(fetch.slice(0, 1200), /isGitAbort\(error\)/);
-  assert.match(fetch.slice(0, 1200), /Fetch failed for \$\{failures\.length\} of \$\{targets\.length\}/);
+  assert.match(fetch.slice(0, 1200), /Fetch failed for \{0} of \{1} repositories/);
   // A disposed manager must not keep scanning or setting context keys.
   assert.match(manager, /const guarded = async \(\): Promise<void> => \{\s*if \(this\.disposed\) return;/);
 });
