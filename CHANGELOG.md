@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.21
+
+- feat: speak the user's language in the commit, push, checkout and conflict flows
+
 ## 0.1.20
 
 - feat: let two changes in one file belong to different Changelists
