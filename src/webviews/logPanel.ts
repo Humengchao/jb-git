@@ -15,7 +15,7 @@ import { previewAndPush } from "../pushPreview";
 import { checkoutWithLocalChanges } from "../smartCheckout";
 import { hunkKeys, partitionHunks } from "../changelists/hunkOwnership";
 import { readFileSync } from "node:fs";
-import { isLogMessage, isToolTab, LogMessage, ToolTab } from "./logPanelProtocol";
+import { isLogMessage, isToolTab, LogMessage, oldestFirst, ToolTab } from "./logPanelProtocol";
 import { originalMessage } from "./rebaseEditorProtocol";
 
 interface LogSelection {
@@ -1027,6 +1027,51 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (branch) await checkoutWithLocalChanges(this.manager, root, branch);
         return;
       }
+      if (message.type === "commitsAction") {
+        // The set was gathered by clicks in whatever order the user made them;
+        // the log's own display order decides how the selection is applied,
+        // and a hash outside the loaded window is dropped, not guessed about.
+        const hashes = oldestFirst(message.hashes.filter((hash) => isFullObjectId(hash)), this.currentCommits.map((commit) => commit.hash));
+        const commits = hashes.map((hash) => this.currentCommits.find((commit) => commit.hash === hash)!);
+        if (!hashes.length) return;
+        if (message.action === "compareCommits") {
+          if (hashes.length !== 2) return;
+          // Oldest on the left, so the diff reads the way history moved.
+          const diff = await snapshot.repository.diffRefs(hashes[0], hashes[1]);
+          await this.showReadOnlyDiff(root, `${hashes[0].slice(0, 8)} → ${hashes[1].slice(0, 8)}`, diff);
+          return;
+        }
+        const confirmed = await vscode.window.showWarningMessage(
+          vscode.l10n.t("Cherry-pick {0} commit(s) onto the current branch, oldest first?", hashes.length),
+          { modal: true, detail: commits.map((commit) => `${commit.hash.slice(0, 8)} ${commit.subject}`).join("\n") },
+          vscode.l10n.t("Cherry-pick"),
+        );
+        if (confirmed !== vscode.l10n.t("Cherry-pick")) return;
+        let applied = 0;
+        try {
+          await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Cherry-picking {0} commit(s)", hashes.length) },
+            async (progress) => {
+              for (const [index, hash] of hashes.entries()) {
+                progress.report({ message: `${hash.slice(0, 8)} (${index + 1}/${hashes.length})` });
+                await this.manager.cherryPick(root, hash);
+                applied += 1;
+              }
+            },
+          );
+        } catch (error) {
+          // The failed pick owns the working tree now. Naming how far the batch
+          // got matters more than the raw error alone: the commits after the
+          // stop were never picked and stay the user's to redo.
+          await vscode.window.showWarningMessage(vscode.l10n.t(
+            "Cherry-pick stopped at {0} after {1} of {2} commit(s): {3} Resolve the conflicts and Continue, or Abort; the remaining commits were not picked.",
+            hashes[applied].slice(0, 8), applied, hashes.length, formatError(error),
+          ));
+          return;
+        }
+        void vscode.window.showInformationMessage(vscode.l10n.t("Cherry-picked {0} commit(s).", hashes.length));
+        return;
+      }
       if (!("hash" in message) || !isFullObjectId(message.hash)) return;
       if (message.type === "newBranch") {
         const name = await vscode.window.showInputBox({ title: vscode.l10n.t("New Branch"), prompt: vscode.l10n.t("Create from {0}", message.hash.slice(0, 12)), validateInput: (value) => validateGitRefName(value) });
@@ -1309,6 +1354,9 @@ const logStyles = String.raw`
   .details { --message-height: 160px; display: grid; grid-template-rows: minmax(70px, 1fr) 9px var(--message-height); overflow: hidden; }
   .commit-details { min-height: 0; padding: 10px; overflow: auto; overscroll-behavior: contain; }
   .detail-subject { font-size: 14px; font-weight: 600; margin-bottom: 7px; white-space: pre-wrap; }
+  .detail-multi { margin: 4px 0 8px; overflow-y: auto; }
+  .multi-commit { padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+  .multi-hint { font-size: 11px; }
   .detail-meta { display: grid; grid-template-columns: 54px 1fr; gap: 4px 6px; color: var(--vscode-descriptionForeground); }
   .detail-meta strong { color: var(--vscode-foreground); font-weight: 400; overflow-wrap: anywhere; }
   .detail-body { margin-top: 9px; white-space: pre-wrap; line-height: 1.45; }
@@ -1535,6 +1583,11 @@ const logScript = String.raw`
   let hoveredGraphSeries = '';
   let currentGraphFragments = new Map();
   let pendingCommitHash;
+  // Ctrl/Cmd- and Shift-click selection, IDEA's multi-commit workflows. Size 0
+  // means the ordinary single selection (pendingCommitHash / state.selection)
+  // is authoritative; the anchor is where a Shift range grows from.
+  let multiSelectedHashes = new Set();
+  let commitSelectionAnchor;
   let selectedFilePath;
   let openMenu;
   let menuInvoker;
@@ -1594,6 +1647,8 @@ const logScript = String.raw`
     'The upstream branch no longer exists': '上游分支已不存在',
     'Commit Message History': '提交消息历史', 'Move this change to another Changelist': '把这处更改移到其他变更列表',
     'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
+    'Cherry-Pick Selected': '拣选所选提交', 'Compare Versions': '比较版本',
+    'Right-click the selection to cherry-pick the commits in history order, or compare two.': '右键所选内容可按历史顺序拣选这些提交，选中两个时可比较版本。',
     'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
     'Continue': '继续', 'Skip': '跳过', 'Abort': '中止', 'Reset': '重置',
     'Copy Branch Name': '复制分支名', 'Compare Branches': '比较分支', 'Show Files Diff': '显示文件差异',
@@ -2766,6 +2821,12 @@ const logScript = String.raw`
     const list = existing || document.getElementById('commit-list'); if (!list) return;
     const model = graphModel(filteredCommits()); const commits = model.commits; const graph = graphLayout(commits, model);
     virtualCommits = commits; virtualGraph = graph;
+    if (multiSelectedHashes.size) {
+      // A filter or reload can drop selected commits out of the list; the
+      // selection follows what is actually shown rather than acting on ghosts.
+      const live = new Set(commits.map(commit => commit.hash));
+      multiSelectedHashes = new Set([...multiSelectedHashes].filter(hash => live.has(hash)));
+    }
     currentGraphFragments = model.fragments;
     for (const id of [...collapsedGraphSeries]) if (!currentGraphFragments.has(id)) collapsedGraphSeries.delete(id);
     if (selectedGraphSeries) {
@@ -2806,7 +2867,9 @@ const logScript = String.raw`
     }
     for (let index = first; index < last; index += 1) {
       const commit = virtualCommits[index];
-      const selected = (pendingCommitHash || state.selection?.commit.hash) === commit.hash;
+      const selected = multiSelectedHashes.size
+        ? multiSelectedHashes.has(commit.hash)
+        : (pendingCommitHash || state.selection?.commit.hash) === commit.hash;
       const row = node('div', 'commit-row' + (selected ? ' selected' : '')); row.dataset.hash = commit.hash;
       row.dataset.index = String(index); row.setAttribute('aria-posinset', String(index + 1)); row.setAttribute('aria-setsize', String(virtualCommits.length));
       row.tabIndex = selected || (!currentHash && index === 0) ? 0 : -1; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
@@ -2819,16 +2882,30 @@ const logScript = String.raw`
       row.append(subject, node('div', '', commit.author), node('div', 'muted', formatDate(commit.authoredAt)), node('div', 'muted', commit.hash.slice(0, 8)));
       const select = () => {
         pendingCommitHash = commit.hash;
+        multiSelectedHashes = new Set(); commitSelectionAnchor = commit.hash;
         document.querySelectorAll('.commit-row').forEach(item => {
           const active = item.dataset.hash === pendingCommitHash;
           item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
         });
         post('selectCommit', { hash: commit.hash });
       };
-      row.addEventListener('click', select); keyboardActivate(row, select);
+      row.addEventListener('click', event => {
+        if (event.ctrlKey || event.metaKey) return toggleCommitInSelection(commit.hash);
+        if (event.shiftKey) return extendCommitSelection(commit.hash);
+        select();
+      });
+      keyboardActivate(row, select);
       row.addEventListener('keydown', event => navigateCommitRows(event, row));
       row.addEventListener('dblclick', () => post('showPatch', { hash: commit.hash }));
       attachContextMenu(row, () => {
+        if (multiSelectedHashes.size > 1 && multiSelectedHashes.has(commit.hash)) {
+          // The host re-orders by its own log, so the set can be sent as-is.
+          const hashes = [...multiSelectedHashes];
+          return [
+            { icon: '⌘', label: 'Cherry-Pick Selected', run: () => post('commitsAction', { action: 'cherryPickCommits', hashes }) },
+            { icon: '↔', label: 'Compare Versions', disabled: hashes.length !== 2, run: () => post('commitsAction', { action: 'compareCommits', hashes }) },
+          ];
+        }
         const parent = commit.parents?.[0];
         const child = (state.commits || []).find(item => (item.parents || []).includes(commit.hash));
         select();
@@ -2871,12 +2948,62 @@ const logScript = String.raw`
     else if (event.key === 'PageDown') next = Math.min(virtualCommits.length - 1, current + 10);
     else if (event.key === 'PageUp') next = Math.max(0, current - 10);
     else return;
-    event.preventDefault(); selectVirtualCommit(next, true);
+    event.preventDefault();
+    if (event.shiftKey && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      const target = virtualCommits[next]; if (!target) return;
+      extendCommitSelection(target.hash);
+      const focusRow = document.querySelector('.commit-row[data-hash="' + target.hash + '"]');
+      if (focusRow) { focusRow.scrollIntoView({ block: 'nearest' }); focusRow.focus({ preventScroll: true }); }
+      return;
+    }
+    selectVirtualCommit(next, true);
+  }
+
+  function primarySelectedCommitHash() {
+    return pendingCommitHash || state.selection?.commit?.hash;
+  }
+
+  /** Ctrl/Cmd+click: the single selection seeds the set, then the click toggles. */
+  function toggleCommitInSelection(hash) {
+    if (!multiSelectedHashes.size) {
+      const primary = primarySelectedCommitHash();
+      if (primary && virtualCommits.some(commit => commit.hash === primary)) multiSelectedHashes.add(primary);
+    }
+    if (multiSelectedHashes.has(hash) && multiSelectedHashes.size > 1) multiSelectedHashes.delete(hash);
+    else multiSelectedHashes.add(hash);
+    commitSelectionAnchor = hash;
+    refreshCommitSelection();
+  }
+
+  /** Shift+click or Shift+arrow: everything between the anchor and here, in list order. */
+  function extendCommitSelection(hash) {
+    const order = virtualCommits.map(commit => commit.hash);
+    const anchor = commitSelectionAnchor && order.includes(commitSelectionAnchor)
+      ? commitSelectionAnchor
+      : (primarySelectedCommitHash() ?? hash);
+    const from = order.indexOf(anchor); const to = order.indexOf(hash);
+    if (from < 0 || to < 0) return;
+    commitSelectionAnchor = anchor;
+    multiSelectedHashes = new Set(order.slice(Math.min(from, to), Math.max(from, to) + 1));
+    refreshCommitSelection();
+  }
+
+  function refreshCommitSelection() {
+    document.querySelectorAll('.commit-row').forEach(item => {
+      const active = multiSelectedHashes.size ? multiSelectedHashes.has(item.dataset.hash) : item.dataset.hash === primarySelectedCommitHash();
+      item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
+    });
+    // The details pane switches between one commit's details and the
+    // selection summary without a host round trip: the subjects are already
+    // in the loaded window.
+    const pane = document.getElementById('details-pane');
+    if (pane) replaceDetailsPane(pane);
   }
 
   function selectVirtualCommit(index, focus = false) {
     const commit = virtualCommits[index]; if (!commit) return;
     pendingCommitHash = commit.hash; post('selectCommit', { hash: commit.hash });
+    multiSelectedHashes = new Set(); commitSelectionAnchor = commit.hash;
     if (virtualCommits.length <= virtualThreshold) {
       // Every row already exists; rebuilding them all made holding an arrow key janky.
       let target;
@@ -2972,6 +3099,22 @@ const logScript = String.raw`
 
   function detailsPane() {
     const pane = node('aside', 'pane details'); pane.id = 'details-pane'; const selection = state.selection;
+    if (multiSelectedHashes.size > 1) {
+      // IDEA shows the messages of every selected commit; the subjects are in
+      // the loaded window, so no host round trip is needed.
+      const chosen = virtualCommits.filter(commit => multiSelectedHashes.has(commit.hash));
+      const summary = node('div', 'commit-details');
+      summary.append(node('div', 'detail-subject', isZh ? '已选择 ' + chosen.length + ' 个提交' : String(chosen.length) + ' commits selected'));
+      const listed = node('div', 'detail-multi');
+      for (const commit of chosen) {
+        const line = node('div', 'multi-commit');
+        line.append(node('span', 'muted', commit.hash.slice(0, 8) + '  '), node('span', '', commit.subject || t('(no subject)')));
+        listed.append(line);
+      }
+      summary.append(listed, node('div', 'muted multi-hint', t('Right-click the selection to cherry-pick the commits in history order, or compare two.')));
+      pane.append(summary);
+      return pane;
+    }
     const visible = new Set(filteredCommits().map(commit => commit.hash));
     if (pendingCommitHash && selection?.commit?.hash !== pendingCommitHash) { pane.append(node('div', 'empty', 'Loading commit details…')); return pane; }
     if (!selection || !visible.has(selection.commit.hash)) { pane.append(node('div', 'empty', visible.size ? 'Select a commit to view details' : 'No commit matches the current filters')); return pane; }

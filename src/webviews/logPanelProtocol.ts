@@ -28,7 +28,8 @@ export type LogMessage =
   | { type: "contextAction"; action: "copyRevision" | "createPatch" | "checkoutRevision" | "compareWithLocal" | "createTag"; hash: string }
   | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag"; ref: string; kind: GitBranch["kind"] }
   | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
-  | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string };
+  | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string }
+  | { type: "commitsAction"; action: "cherryPickCommits" | "compareCommits"; hashes: string[] };
 
 const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory"]);
 const HASH_TYPES = new Set(["selectCommit", "newBranch", "cherryPick", "revert", "reset", "showPatch"]);
@@ -39,6 +40,7 @@ const HASH_CONTEXT_ACTIONS = new Set(["copyRevision", "createPatch", "checkoutRe
 const REF_CONTEXT_ACTIONS = new Set(["copyBranch", "newBranchFromRef", "showRefDiff", "createWorktreeFromRef", "renameBranch", "deleteBranch", "mergeRef", "rebaseOntoRef", "pushRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]);
 const BRANCH_CONTEXT_ACTIONS = new Set(["compareBranches", "showBranchesDiff", "deleteBranches"]);
 const FILE_CONTEXT_ACTIONS = new Set(["copyPath", "showFileDiff", "compareFileWithLocal", "openRepositoryFile", "createFilePatch", "restoreFile", "fileHistory"]);
+const COMMITS_ACTIONS = new Set(["cherryPickCommits", "compareCommits"]);
 
 export function isToolTab(value: unknown): value is ToolTab {
   return value === "log" || value === "console" || value === "changes" || value === "shelf";
@@ -81,8 +83,30 @@ export function isLogMessage(value: unknown): value is LogMessage {
       && optionalBoolean(value.push);
     case "runCommand": return typeof value.command === "string";
     case "contextAction": return validContextAction(value);
+    // A multi-selection action. The bound matches the branch actions; each
+    // entry is at most a SHA-256 object id long.
+    case "commitsAction": return COMMITS_ACTIONS.has(String(value.action))
+      && Array.isArray(value.hashes)
+      && value.hashes.length >= 1 && value.hashes.length <= 1_000
+      && value.hashes.every((hash) => typeof hash === "string" && hash.length <= 64);
     default: return false;
   }
+}
+
+/**
+ * Orders a selection the way an operation has to apply it: the commit that is
+ * furthest down the log (oldest) first.
+ *
+ * The Webview's selection is a set gathered by clicks in any order, and the
+ * host must not trust an order chosen on the other side of the protocol
+ * anyway, so the log's own display order (newest first) is the authority.
+ * A hash the log does not contain is dropped rather than guessed about.
+ */
+export function oldestFirst(hashes: readonly string[], displayOrder: readonly string[]): string[] {
+  const positions = new Map(displayOrder.map((hash, index) => [hash, index]));
+  return [...new Set(hashes)]
+    .filter((hash) => positions.has(hash))
+    .sort((a, b) => (positions.get(b) ?? 0) - (positions.get(a) ?? 0));
 }
 
 function validContextAction(value: Record<string, unknown>): boolean {
