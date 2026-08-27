@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23
+
+- feat: IDEA's incoming/outgoing markers on every local branch
+- feat: the edit rebase action, IDEA's stop-to-amend
+- feat: IDEA's commit-message conveniences, and stop pre-checking junk
+
 ## 0.1.22
 
 - feat: localize every remaining host-side dialog, notification and picker
