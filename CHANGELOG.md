@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.25
+
+- feat: Drop Commit and Squash Selected, IDEA's history editing in the log
+- feat: log multi-select with batch cherry-pick and Compare Versions
+
 ## 0.1.24
 
 - feat: Issue Navigation, IDEA's issue-id-to-tracker links
