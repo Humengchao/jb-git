@@ -1,0 +1,82 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { compileIssueRules, linkifyIssues } from "../dist/issueNavigation.js";
+import { readSource } from "./sourceText.mjs";
+
+const JIRA = { pattern: "[A-Z][A-Z0-9]+-\\d+", url: "https://tracker.example.com/browse/$0" };
+
+test("links the configured issue ids and leaves the rest of the text alone", () => {
+  const rules = compileIssueRules([JIRA]);
+  assert.deepEqual(linkifyIssues("Fix ABC-123 and DEF-9 in the parser", rules), [
+    { text: "Fix " },
+    { text: "ABC-123", url: "https://tracker.example.com/browse/ABC-123" },
+    { text: " and " },
+    { text: "DEF-9", url: "https://tracker.example.com/browse/DEF-9" },
+    { text: " in the parser" },
+  ]);
+  assert.deepEqual(linkifyIssues("no ids here", rules), [{ text: "no ids here" }]);
+  assert.deepEqual(linkifyIssues("", rules), []);
+});
+
+test("substitutes capture groups into the target", () => {
+  const rules = compileIssueRules([{ pattern: "#(\\d+)", url: "https://github.com/o/r/issues/$1" }]);
+  assert.deepEqual(linkifyIssues("see #42", rules), [
+    { text: "see " },
+    { text: "#42", url: "https://github.com/o/r/issues/42" },
+  ]);
+});
+
+test("a broken rule costs that rule, not the feature", () => {
+  const rules = compileIssueRules([
+    { pattern: "[unclosed", url: "https://x/$0" },
+    JIRA,
+    { pattern: "", url: "https://x/$0" },
+    { pattern: "a*", url: "https://x/$0" },
+    "not an object",
+    { pattern: 42, url: "https://x/$0" },
+  ]);
+  // The malformed pattern, the empty one, the one matching the empty string
+  // (which would loop forever) and the non-objects are all dropped.
+  assert.equal(rules.length, 1);
+  assert.equal(linkifyIssues("ABC-1", rules)[0].url, "https://tracker.example.com/browse/ABC-1");
+});
+
+test("an earlier rule wins overlapping text, so ordering is predictable", () => {
+  const rules = compileIssueRules([
+    { pattern: "SPECIAL-\\d+", url: "https://special/$0" },
+    { pattern: "[A-Z]+-\\d+", url: "https://generic/$0" },
+  ]);
+  assert.deepEqual(linkifyIssues("SPECIAL-7 OTHER-8", rules), [
+    { text: "SPECIAL-7", url: "https://special/SPECIAL-7" },
+    { text: " " },
+    { text: "OTHER-8", url: "https://generic/OTHER-8" },
+  ]);
+});
+
+test("the Webview runs the same compiled module, not a copy", () => {
+  const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  assert.match(panel, /require\.resolve\("\.\.\/issueNavigation"\)/);
+  assert.match(panel, /const IssueNavigation = \(\(\) => \{ const exports = \{\};/);
+  // The injected wrapper has to evaluate to a working global.
+  const compiled = readFileSync(new URL("../dist/issueNavigation.js", import.meta.url), "utf8");
+  const wrapped = `const IssueNavigation = (() => { const exports = {}; ${compiled}\n;return exports; })();\n`;
+  const globalModule = new Function(`${wrapped}return IssueNavigation;`)();
+  const segments = globalModule.linkifyIssues("ABC-1", globalModule.compileIssueRules([JIRA]));
+  assert.equal(segments[0].url, "https://tracker.example.com/browse/ABC-1");
+  // Rendering builds anchors from segments; rules recompile only when the
+  // configuration value changes.
+  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  assert.match(script, /function appendIssueLinked\(parent, text\)/);
+  assert.match(script, /IssueNavigation\.compileIssueRules\(raw\)/);
+  assert.match(script, /issueRuleCache\.key !== key/);
+  assert.match(script, /anchor\.href = segment\.url;/);
+});
+
+test("the Blame hover links the summary through the same rules", () => {
+  const controller = readSource("../src/views/blameDecorations.ts", import.meta.url);
+  assert.match(controller, /issueLinkedMarkdown\(entry\.summary \|\| "\(no commit message\)"\)/);
+  assert.match(controller, /compileIssueRules\(vscode\.workspace\.getConfiguration\("jbGit"\)\.get<unknown\[\]>\("issueNavigation", \[\]\)\)/);
+  // Unmatched text still goes through the Markdown escaper; a link label does too.
+  assert.match(controller, /segment\.url \? `\[\$\{markdownEscape\(segment\.text\)\}\]\(\$\{segment\.url\}\)` : markdownEscape\(segment\.text\)/);
+});

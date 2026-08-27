@@ -11,6 +11,7 @@ import {
   layoutBlameAnnotations,
 } from "../blameAnnotations";
 import { canonicalPath, deepestContaining } from "../pathRouting";
+import { compileIssueRules, linkifyIssues } from "../issueNavigation";
 
 /** What a document's annotations are reading: a path in a repository, optionally at a revision. */
 export interface BlameTarget {
@@ -383,7 +384,7 @@ function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number): vscode.Mark
     return message;
   }
   const argument = encodeURIComponent(JSON.stringify([{ uri: uri.toString(), line }]));
-  message.appendMarkdown(`**${markdownEscape(entry.summary || "(no commit message)")}**\n\n`);
+  message.appendMarkdown(`**${issueLinkedMarkdown(entry.summary || "(no commit message)")}**\n\n`);
   message.appendMarkdown(`${markdownEscape(entry.author)}${entry.authorMail ? ` <${markdownEscape(entry.authorMail)}>` : ""}\n\n`);
   message.appendMarkdown(`${formatShortDate(entry)} · ${formatRelativeDate(entry, Date.now())}\n\n`);
   message.appendMarkdown(`\`${abbreviateHash(entry.hash)}\`  ·  ${markdownEscape(entry.filename)}\n\n`);
@@ -391,6 +392,14 @@ function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number): vscode.Mark
   message.appendMarkdown(` · [Copy Revision](command:jbGit.copyRevisionNumber?${argument})`);
   message.appendMarkdown(` · [Annotate Previous Revision](command:jbGit.annotatePreviousRevision?${argument})`);
   return message;
+}
+
+/** The commit subject with configured issue ids linked, IDEA's Issue Navigation in the hover. */
+function issueLinkedMarkdown(summary: string): string {
+  const rules = compileIssueRules(vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []));
+  return linkifyIssues(summary, rules)
+    .map((segment) => (segment.url ? `[${markdownEscape(segment.text)}](${segment.url})` : markdownEscape(segment.text)))
+    .join("");
 }
 
 function describe(error: unknown): string {

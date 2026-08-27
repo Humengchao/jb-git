@@ -556,6 +556,25 @@
           "type": "boolean",
           "default": false,
           "description": "%configuration.blame.detectMovementsAcrossFiles%"
+        },
+        "jbGit.issueNavigation": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["pattern", "url"],
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "%configuration.issueNavigation.pattern%"
+              },
+              "url": {
+                "type": "string",
+                "description": "%configuration.issueNavigation.url%"
+              }
+            }
+          },
+          "default": [],
+          "description": "%configuration.issueNavigation%"
         }
       }
     }

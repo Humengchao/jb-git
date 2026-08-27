@@ -16,5 +16,8 @@
   "configuration.blame.highlightCommit": "文件处于注解状态时，高亮光标所在提交改动过的所有行。",
   "configuration.blame.ignoreWhitespace": "跳过仅空白字符的改动，使重新缩进不算作某行的最后一次修改（git blame -w）。",
   "configuration.blame.detectMovementsWithinFile": "把文件内移动过的代码块归属到它原本的来源（git blame -M）。",
-  "configuration.blame.detectMovementsAcrossFiles": "同时追踪同一提交里从其他文件复制过来的代码块。历史较大时会变慢（git blame -C）。"
+  "configuration.blame.detectMovementsAcrossFiles": "同时追踪同一提交里从其他文件复制过来的代码块。历史较大时会变慢（git blame -C）。",
+  "configuration.issueNavigation": "与 IDEA 的 Issue Navigation 相同：把提交消息中的缺陷编号变成跟踪系统链接的规则。例如 pattern \"[A-Z]+-\\\\d+\"，url \"https://youtrack.example.com/issue/$0\"。",
+  "configuration.issueNavigation.pattern": "匹配缺陷编号的正则表达式，例如 [A-Z]+-\\\\d+。",
+  "configuration.issueNavigation.url": "链接目标；$0 为整个匹配，$1-$9 为捕获组。"
 }

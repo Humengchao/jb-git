@@ -14,6 +14,7 @@ import { moveUntrackedToTrash } from "../discardSafety";
 import { previewAndPush } from "../pushPreview";
 import { checkoutWithLocalChanges } from "../smartCheckout";
 import { hunkKeys, partitionHunks } from "../changelists/hunkOwnership";
+import { readFileSync } from "node:fs";
 import { isLogMessage, isToolTab, LogMessage, ToolTab } from "./logPanelProtocol";
 import { originalMessage } from "./rebaseEditorProtocol";
 
@@ -106,7 +107,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   public resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
-    view.webview.html = webviewDocument("Git", logStyles, logScript);
+    view.webview.html = webviewDocument("Git", logStyles, `${issueNavigationScript()}${logScript}`);
     const registrations: vscode.Disposable[] = [
       view.webview.onDidReceiveMessage((message: unknown) => {
         if (isLogMessage(message)) void this.handleMessage(message);
@@ -390,6 +391,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           selectedRef: this.selectedRef ?? null,
           filePath: this.filePath ?? null,
           logOptions: this.logOptions,
+          issueRules: vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []),
           ...(this.lastSentBranchesKey === refsKey ? {} : { branches: snapshot.branches }),
           ...logState,
           operation: snapshot.operation,
@@ -1228,6 +1230,8 @@ const logStyles = String.raw`
   .toolbar select, .toolbar input { height: 26px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
   .toolbar select { max-width: 220px; padding: 2px 5px; }
   .search { width: min(330px, 32vw); padding: 3px 7px; }
+  .issue-link { color: var(--vscode-textLink-foreground); text-decoration: none; }
+  .issue-link:hover { text-decoration: underline; }
   /* A whole-history search is a different state from filtering the window, and
      has to look like one. */
   .commit-search.deep-active { border-color: var(--vscode-focusBorder); background: color-mix(in srgb, var(--vscode-focusBorder) 12%, var(--vscode-input-background)); }
@@ -1470,6 +1474,18 @@ const logStyles = String.raw`
     .changes-splitter:hover::before, .changes-splitter:focus-visible::before, .changes-splitter.dragging::before { top: 3px; left: 0; width: auto; height: 2px; }
   }
 `;
+
+let issueNavigationScriptCache: string | undefined;
+
+/**
+ * The compiled issueNavigation module, wrapped as a global for the Webview
+ * sandbox. Injecting the build the tests exercise keeps rule compilation and
+ * overlap handling in one place instead of a copy that could drift.
+ */
+function issueNavigationScript(): string {
+  issueNavigationScriptCache ??= `const IssueNavigation = (() => { const exports = {}; ${readFileSync(require.resolve("../issueNavigation"), "utf8")}\n;return exports; })();\n`;
+  return issueNavigationScriptCache;
+}
 
 const logScript = String.raw`
   const vscode = acquireVsCodeApi();
@@ -2930,6 +2946,30 @@ const logScript = String.raw`
     return commits;
   }
 
+  let issueRuleCache = { key: '', rules: [] };
+
+  /**
+   * Appends text with the configured issue ids turned into tracker links,
+   * IDEA's Issue Navigation. Rules compile once per configuration value.
+   */
+  function appendIssueLinked(parent, text) {
+    const raw = state.issueRules || [];
+    const key = JSON.stringify(raw);
+    if (issueRuleCache.key !== key) issueRuleCache = { key, rules: IssueNavigation.compileIssueRules(raw) };
+    for (const segment of IssueNavigation.linkifyIssues(String(text), issueRuleCache.rules)) {
+      if (segment.url) {
+        const anchor = document.createElement('a');
+        anchor.className = 'issue-link';
+        anchor.href = segment.url;
+        anchor.textContent = segment.text;
+        anchor.title = segment.url;
+        parent.append(anchor);
+      } else {
+        parent.append(document.createTextNode(segment.text));
+      }
+    }
+  }
+
   function detailsPane() {
     const pane = node('aside', 'pane details'); pane.id = 'details-pane'; const selection = state.selection;
     const visible = new Set(filteredCommits().map(commit => commit.hash));
@@ -2937,7 +2977,9 @@ const logScript = String.raw`
     if (!selection || !visible.has(selection.commit.hash)) { pane.append(node('div', 'empty', visible.size ? 'Select a commit to view details' : 'No commit matches the current filters')); return pane; }
     const commit = selection.commit; const details = node('div', 'commit-details');
     details.id = 'commit-details';
-    details.append(node('div', 'detail-subject', commit.subject || '(no subject)'));
+    const subjectLine = node('div', 'detail-subject');
+    appendIssueLinked(subjectLine, commit.subject || t('(no subject)'));
+    details.append(subjectLine);
     if ((commit.refs || []).length) {
       const refs = node('div', 'detail-refs');
       for (const ref of orderedRefs(commit.refs)) refs.append(refChip(ref));
@@ -2945,7 +2987,12 @@ const logScript = String.raw`
     }
     const meta = node('div', 'detail-meta');
     for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', new Date(commit.authoredAt).toLocaleString()], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
-    details.append(meta); if (commit.body && commit.body !== commit.subject) details.append(node('div', 'detail-body', commit.body));
+    details.append(meta);
+    if (commit.body && commit.body !== commit.subject) {
+      const body = node('div', 'detail-body');
+      appendIssueLinked(body, commit.body);
+      details.append(body);
+    }
     const files = node('div', 'files'); files.id = 'changed-files'; files.setAttribute('role', 'tree');
     files.append(node('div', 'pane-title', t('Changed Files') + ' (' + selection.files.length + ')'));
     const tree = node('div', 'file-tree-root'); tree.append(fileTree(selection.files, commit)); files.append(tree);

@@ -16,5 +16,8 @@
   "configuration.blame.highlightCommit": "Highlight every line the caret's commit touched while a file is annotated.",
   "configuration.blame.ignoreWhitespace": "Look through whitespace-only changes, so a reindent is not the last change to a line (git blame -w).",
   "configuration.blame.detectMovementsWithinFile": "Credit a block moved inside the file to where it came from (git blame -M).",
-  "configuration.blame.detectMovementsAcrossFiles": "Also follow a block copied in from another file the same commit touched. Slower on a large history (git blame -C)."
+  "configuration.blame.detectMovementsAcrossFiles": "Also follow a block copied in from another file the same commit touched. Slower on a large history (git blame -C).",
+  "configuration.issueNavigation": "Issue Navigation, as in IDEA: patterns that turn issue ids in commit messages into tracker links. Example: pattern \"[A-Z]+-\\\\d+\", url \"https://youtrack.example.com/issue/$0\".",
+  "configuration.issueNavigation.pattern": "Regular expression that matches an issue id, e.g. [A-Z]+-\\\\d+.",
+  "configuration.issueNavigation.url": "Link target; $0 is the whole match, $1-$9 are capture groups."
 }
