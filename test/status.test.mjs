@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePorcelainV2 } from "../dist/git/status.js";
+import { parsePorcelainV2, parseUpstreamTrack } from "../dist/git/status.js";
 
 test("parses branch metadata and common change records", () => {
   const output = [
@@ -56,4 +56,14 @@ test("treats every porcelain v2 unmerged record as conflicted", () => {
     assert.equal(snapshot.changes[0].kind, "conflicted", xy);
     assert.equal(snapshot.changes[0].conflicted, true, xy);
   }
+});
+
+test("reads ahead, behind and gone out of an upstream track decoration", () => {
+  assert.deepEqual(parseUpstreamTrack("[ahead 2, behind 1]"), { ahead: 2, behind: 1, gone: false });
+  assert.deepEqual(parseUpstreamTrack("[ahead 3]"), { ahead: 3, behind: 0, gone: false });
+  assert.deepEqual(parseUpstreamTrack("[behind 7]"), { ahead: 0, behind: 7, gone: false });
+  // The upstream ref was deleted; zero would be a lie.
+  assert.deepEqual(parseUpstreamTrack("[gone]"), { ahead: 0, behind: 0, gone: true });
+  assert.deepEqual(parseUpstreamTrack(""), { ahead: 0, behind: 0, gone: false });
+  assert.deepEqual(parseUpstreamTrack(undefined), { ahead: 0, behind: 0, gone: false });
 });

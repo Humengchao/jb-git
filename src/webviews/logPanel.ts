@@ -1216,6 +1216,13 @@ const logStyles = String.raw`
   .branch-row:hover { background: var(--vscode-list-hoverBackground); }
   .branch-row.active, .branch-row.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
   .branch-row.current::before { content: '✓'; width: 11px; margin-left: -11px; color: var(--vscode-charts-green); }
+  /* IDEA's incoming/outgoing markers, right-aligned so branch names stay scannable. */
+  .branch-track { margin-left: auto; display: inline-flex; gap: 5px; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .track-in { color: var(--vscode-charts-blue, #3794ff); }
+  .track-out { color: var(--vscode-charts-green, #73c991); }
+  .track-gone { color: var(--vscode-descriptionForeground); font-style: italic; }
+  .branch-row.active .track-in, .branch-row.selected .track-in,
+  .branch-row.active .track-out, .branch-row.selected .track-out { color: inherit; }
   .branch-name { overflow: hidden; text-overflow: ellipsis; }
   .commit-pane { overflow: hidden; display: grid; grid-template-rows: 35px minmax(0, 1fr); }
   .commit-filters { min-width: 0; display: flex; align-items: center; gap: 2px; padding: 4px 5px; overflow: visible; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
@@ -1524,6 +1531,9 @@ const logScript = String.raw`
     'Author': '作者', 'Parents': '父提交',
     'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
     'Changelist': '变更列表', 'Move…': '移动…', 'some changes': '部分更改',
+    'Incoming commits: fetched but not merged': '传入提交：已抓取但未合并',
+    'Outgoing commits: not pushed yet': '传出提交：尚未推送',
+    'The upstream branch no longer exists': '上游分支已不存在',
     'Commit Message History': '提交消息历史', 'Move this change to another Changelist': '把这处更改移到其他变更列表',
     'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
     'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
@@ -2473,6 +2483,28 @@ const logScript = String.raw`
           setBranchSelection([branch]); post('selectRef', { ref: branch.name });
         }, 'branch-row' + (selected ? ' selected' : '') + (kind === 'local' && branch.name === state.branch ? ' current' : ''));
         row.dataset.branchKey = key; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
+        // IDEA's incoming/outgoing markers: what a fetch brought in (↓) and
+        // what a push would send (↑), right-aligned on the row.
+        if (kind === 'local' && (branch.ahead || branch.behind || branch.upstreamGone)) {
+          const track = node('span', 'branch-track');
+          if (branch.upstreamGone) {
+            const gone = node('span', 'track-gone', 'gone');
+            gone.title = t('The upstream branch no longer exists');
+            track.append(gone);
+          } else {
+            if (branch.behind) {
+              const incoming = node('span', 'track-in', '↓' + branch.behind);
+              incoming.title = t('Incoming commits: fetched but not merged');
+              track.append(incoming);
+            }
+            if (branch.ahead) {
+              const outgoing = node('span', 'track-out', '↑' + branch.ahead);
+              outgoing.title = t('Outgoing commits: not pushed yet');
+              track.append(outgoing);
+            }
+          }
+          row.append(track);
+        }
         row.addEventListener('dblclick', () => post('checkout', { name: branch.name, kind: branch.kind }));
         attachContextMenu(row, () => branchContextItems(branch));
         section.append(row);

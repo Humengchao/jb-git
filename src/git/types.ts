@@ -64,6 +64,12 @@ export interface GitBranch {
   oid: string;
   upstream?: string;
   tracking?: string;
+  /** Commits this branch has that its upstream does not (outgoing). */
+  ahead?: number;
+  /** Commits the upstream has that this branch does not (incoming). */
+  behind?: number;
+  /** The configured upstream ref no longer exists. */
+  upstreamGone?: boolean;
 }
 
 export interface GitCommitOptions {

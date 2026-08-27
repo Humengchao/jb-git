@@ -222,6 +222,20 @@ test("offers IntelliJ branch operations from the branch context menu", () => {
   }
 });
 
+test("marks each local branch with IDEA's incoming and outgoing arrows", () => {
+  // ↓ what a fetch brought in, ↑ what a push would send, right-aligned; a
+  // deleted upstream says 'gone' instead of showing meaningless zeros.
+  assert.match(scriptMatch[1], /if \(kind === 'local' && \(branch\.ahead \|\| branch\.behind \|\| branch\.upstreamGone\)\)/);
+  assert.match(scriptMatch[1], /'↓' \+ branch\.behind/);
+  assert.match(scriptMatch[1], /'↑' \+ branch\.ahead/);
+  assert.match(scriptMatch[1], /node\('span', 'track-gone', 'gone'\)/);
+  const source = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  assert.match(source, /\.branch-track \{ margin-left: auto;/);
+  // The fingerprint already covers %(upstream:track), so a fetch that changes
+  // the counts repaints the column.
+  assert.match(source, /\$\{branch\.tracking \?\? ""\}/);
+});
+
 test("gives the branch column its own toolbar and name filter", () => {
   assert.ok(scriptMatch);
   const pane = scriptMatch[1].match(/function branchPane\(\) \{([\s\S]*?)\r?\n  }/);

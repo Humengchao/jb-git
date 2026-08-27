@@ -697,6 +697,55 @@ test("reports a cancelled Git command as an abort rather than a failure", async 
   );
 });
 
+test("reports incoming, outgoing and a deleted upstream on each local branch", async () => {
+  // IDEA's branch markers: what a fetch brought in and what a push would send.
+  const remote = mkdtempSync(join(tmpdir(), "jb-git-track-remote-"));
+  git(remote, "init", "-q", "--bare");
+  const publisher = mkdtempSync(join(tmpdir(), "jb-git-track-pub-"));
+  git(publisher, "init", "-q");
+  git(publisher, "config", "user.name", "JB Git Test");
+  git(publisher, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(publisher, "f.txt"), "one\n");
+  git(publisher, "add", ".");
+  git(publisher, "commit", "-qm", "one");
+  git(publisher, "remote", "add", "origin", remote);
+  git(publisher, "push", "-qu", "origin", "HEAD");
+  const branchName = git(publisher, "branch", "--show-current");
+
+  const local = mkdtempSync(join(tmpdir(), "jb-git-track-local-"));
+  git(local, "clone", "-q", remote, "checkout");
+  const root = join(local, "checkout");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+
+  // One outgoing commit here, one incoming commit on the remote.
+  writeFileSync(join(root, "local.txt"), "outgoing\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "outgoing work");
+  writeFileSync(join(publisher, "f.txt"), "two\n");
+  git(publisher, "add", ".");
+  git(publisher, "commit", "-qm", "incoming work");
+  git(publisher, "push", "-q", "origin", "HEAD");
+  git(root, "fetch", "-q", "origin");
+
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const tracked = (await repository.branches()).find((branch) => branch.kind === "local" && branch.name === branchName);
+  assert.ok(tracked);
+  assert.equal(tracked.ahead, 1, "the unpushed commit is outgoing");
+  assert.equal(tracked.behind, 1, "the fetched commit is incoming");
+  assert.equal(tracked.upstreamGone, undefined);
+
+  // A branch whose upstream was deleted must say so, not show zeros.
+  git(root, "checkout", "-qb", "feature");
+  git(root, "push", "-qu", "origin", "feature");
+  git(publisher, "push", "-q", "origin", "--delete", "feature");
+  git(root, "fetch", "-q", "--prune", "origin");
+  const gone = (await repository.branches()).find((branch) => branch.kind === "local" && branch.name === "feature");
+  assert.ok(gone);
+  assert.equal(gone.upstreamGone, true);
+});
+
 test("sets upstream when pushing a branch that has none", async () => {
   const base = mkdtempSync(join(tmpdir(), "jb-git-push-remote-"));
   const remote = join(base, "remote.git");

@@ -3,7 +3,7 @@ import { constants, type Stats } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, open, opendir, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { GitCommandError, GitRunner } from "./runner";
-import { parsePorcelainV2 } from "./status";
+import { parsePorcelainV2, parseUpstreamTrack } from "./status";
 import { parsePorcelainBlame } from "./blame";
 import { hunkKeys, type HunkSelection } from "../changelists/hunkOwnership";
 import { parseUnifiedDiff, patchForHunk, patchForHunks } from "./patch";
@@ -437,6 +437,7 @@ export class GitRepository {
         : refName.startsWith("refs/remotes/")
           ? "remote"
           : "local";
+      const track = parseUpstreamTrack(tracking);
       branches.push({
         name,
         fullName: refName,
@@ -444,6 +445,9 @@ export class GitRepository {
         kind,
         upstream: upstream || undefined,
         tracking: tracking || undefined,
+        ...(track.ahead ? { ahead: track.ahead } : {}),
+        ...(track.behind ? { behind: track.behind } : {}),
+        ...(track.gone ? { upstreamGone: true } : {}),
       });
     }
     return branches;

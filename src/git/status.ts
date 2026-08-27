@@ -48,6 +48,21 @@ function makeChange(
   };
 }
 
+/**
+ * Parses `%(upstream:track)` from for-each-ref: `[ahead 2, behind 1]`,
+ * `[ahead 2]`, `[behind 1]`, `[gone]`, or empty when the branch is in sync.
+ *
+ * `gone` means the upstream ref no longer exists — the remote branch was
+ * deleted — which IDEA surfaces rather than showing a meaningless zero.
+ */
+export function parseUpstreamTrack(value: string | undefined): { ahead: number; behind: number; gone: boolean } {
+  if (!value) return { ahead: 0, behind: 0, gone: false };
+  if (/\[gone\]/.test(value)) return { ahead: 0, behind: 0, gone: true };
+  const ahead = /ahead (\d+)/.exec(value);
+  const behind = /behind (\d+)/.exec(value);
+  return { ahead: ahead ? Number(ahead[1]) : 0, behind: behind ? Number(behind[1]) : 0, gone: false };
+}
+
 /** Parses `git status --porcelain=v2 -z --branch` output. */
 export function parsePorcelainV2(output: Buffer | string): GitStatusSnapshot {
   const tokens = (Buffer.isBuffer(output) ? output : Buffer.from(output)).toString("utf8").split("\0");
