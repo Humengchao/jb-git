@@ -13,7 +13,7 @@
  */
 
 /** A single instruction the sequence editor can carry out for one commit. */
-export type RebaseAction = "pick" | "reword" | "squash" | "fixup" | "drop";
+export type RebaseAction = "pick" | "reword" | "edit" | "squash" | "fixup" | "drop";
 
 /** Actions that replace the message of the commit run they belong to. */
 const MESSAGE_ACTIONS = new Set<RebaseAction>(["reword", "squash"]);
@@ -21,7 +21,7 @@ const MESSAGE_ACTIONS = new Set<RebaseAction>(["reword", "squash"]);
 /** Actions that fold a commit into the preceding one instead of keeping it. */
 const FOLD_ACTIONS = new Set<RebaseAction>(["squash", "fixup"]);
 
-export const REBASE_ACTIONS: readonly RebaseAction[] = ["pick", "reword", "squash", "fixup", "drop"];
+export const REBASE_ACTIONS: readonly RebaseAction[] = ["pick", "reword", "edit", "squash", "fixup", "drop"];
 
 export function isRebaseAction(value: unknown): value is RebaseAction {
   return typeof value === "string" && (REBASE_ACTIONS as readonly string[]).includes(value);
@@ -64,6 +64,20 @@ export function validateRebasePlan(steps: readonly RebaseStep[]): string | undef
   }
   if (FOLD_ACTIONS.has(applied[0].action)) {
     return `The first replayed commit cannot be "${applied[0].action}": there is no earlier commit to fold it into.`;
+  }
+
+  // A squash amends its run's final message through an exec guarded by the
+  // leader's subject. A leader that stops for editing invites exactly the
+  // amend that changes that subject, so the guard would fire on the user's own
+  // legitimate edit. Refuse the combination; a fixup carries no message and
+  // stays fine.
+  let leaderAction: RebaseAction | undefined;
+  for (const step of steps) {
+    if (step.action === "drop") continue;
+    if (!FOLD_ACTIONS.has(step.action)) leaderAction = step.action;
+    else if (step.action === "squash" && leaderAction === "edit") {
+      return `Cannot squash into ${step.oid.slice(0, 8)}'s run: its kept commit stops for editing, and the amended message could not be applied safely. Amend during the stop instead.`;
+    }
   }
 
   const seen = new Set<string>();

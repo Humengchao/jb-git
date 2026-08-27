@@ -293,6 +293,71 @@ test("drops a commit and its content", async () => {
   assert.equal(git(root, "ls-files", "one.txt"), "");
 });
 
+test("stops at a commit marked edit and finishes the plan from Continue", async () => {
+  // IDEA's Edit action: the rebase applies the commit, then parks so the user
+  // can amend or test it. Git exits 0 at that stop, so the caller has to read
+  // the operation state rather than trust the exit code.
+  const root = repositoryWithCommits(["one", "two"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+
+  await repository.interactiveRebase("HEAD~2", [
+    { oid: candidates[0].hash, subject: "one", action: "edit" },
+    { oid: candidates[1].hash, subject: "two", action: "pick" },
+  ]);
+  assert.equal((await repository.operationState()).kind, "rebase", "the sequencer parks at the edit stop");
+  assert.deepEqual(subjects(root), ["one", "base"], "the edited commit is applied, the rest is not yet");
+
+  // What the stop exists for: amend the parked commit, then continue.
+  writeFileSync(join(root, "one.txt"), "one, amended during the stop\n");
+  git(root, "add", "one.txt");
+  git(root, "commit", "--amend", "-qm", "one, amended");
+  await repository.continueOperation("rebase");
+  assert.equal((await repository.operationState()).kind, "none");
+  assert.deepEqual(subjects(root), ["two", "one, amended", "base"]);
+  assert.equal(readFileSync(join(root, "one.txt"), "utf8"), "one, amended during the stop\n");
+});
+
+test("an edit stop still applies a reword later in the plan", async () => {
+  // The reword's exec amend runs on Continue, after the stop; the plan has to
+  // survive the pause the same way it survives a conflict pause.
+  const root = repositoryWithCommits(["one", "two"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+
+  await repository.interactiveRebase("HEAD~2", [
+    { oid: candidates[0].hash, subject: "one", action: "edit" },
+    { oid: candidates[1].hash, subject: "two", action: "reword", message: "two, reworded after the stop" },
+  ]);
+  assert.equal((await repository.operationState()).kind, "rebase");
+  await repository.continueOperation("rebase");
+  assert.equal((await repository.operationState()).kind, "none");
+  assert.deepEqual(subjects(root), ["two, reworded after the stop", "one", "base"]);
+});
+
+test("refuses to squash into a run whose kept commit stops for editing", () => {
+  // The squash's amend is guarded by the leader's subject, and an edit stop
+  // invites exactly the amend that changes that subject: the guard would fire
+  // on the user's own legitimate edit.
+  assert.match(
+    validateRebasePlan([
+      { oid: OID_A, subject: "one", action: "edit" },
+      { oid: OID_B, subject: "two", action: "squash", message: "combined" },
+    ]) ?? "",
+    /stops for editing/,
+  );
+  // A fixup carries no message, so nothing needs amending afterwards.
+  assert.equal(validateRebasePlan([
+    { oid: OID_A, subject: "one", action: "edit" },
+    { oid: OID_B, subject: "two", action: "fixup" },
+  ]), undefined);
+  // A squash whose run is led by an ordinary pick is untouched.
+  assert.equal(validateRebasePlan([
+    { oid: OID_A, subject: "one", action: "pick" },
+    { oid: OID_B, subject: "two", action: "squash", message: "combined" },
+  ]), undefined);
+});
+
 test("refuses to rebase over local changes instead of autostashing them", async () => {
   const root = repositoryWithCommits(["one"]);
   const repository = await discoverRepository(root, new GitRunner());

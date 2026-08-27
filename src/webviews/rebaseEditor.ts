@@ -192,6 +192,7 @@ function script(): string {
       'Action for commit': '选择操作：提交', 'Message for commit': '提交消息：提交',
       'Keep this commit as it is': '按原样保留此提交',
       'Keep the changes and edit the commit message': '保留更改，修改提交消息',
+      'Stop here to amend or test this commit, then Continue': '在此停下以修改或测试该提交，然后 Continue',
       'Fold into the previous kept commit and keep both messages': '并入上一个保留的提交，保留两者的消息',
       'Fold into the previous kept commit and discard this message': '并入上一个保留的提交，丢弃此提交的消息',
       'Remove this commit': '丢弃此提交',
@@ -200,6 +201,8 @@ function script(): string {
     const ACTION_HELP = {
       pick: 'Keep this commit as it is',
       reword: 'Keep the changes and edit the commit message',
+      edit: 'Stop here to amend or test this commit, then Continue',
+
       squash: 'Fold into the previous kept commit and keep both messages',
       fixup: 'Fold into the previous kept commit and discard this message',
       drop: 'Remove this commit',

@@ -918,6 +918,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         stashFirst = true;
       }
 
+      let stoppedForEdit = false;
       try {
         // The plan starts one commit earlier, so the chosen commit is itself editable.
         const started = await openRebaseEditor(manager, root, `${from}^`, async (steps) => {
@@ -938,11 +939,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             // on top of it would mix the parked changes into a conflict the
             // user has not resolved yet, so the stash keeps them instead.
             if (parked) {
-              void vscode.window.showWarningMessage(
-                `Your local changes are kept in ${parked.ref}. Apply it from Manage Stashes once the rebase is finished or aborted.`,
-              );
+              void vscode.window.showWarningMessage(vscode.l10n.t("Your local changes are kept in {0}. Apply it from Manage Stashes once the rebase is finished or aborted.", parked.ref));
             }
             throw error;
+          }
+          // An edit row stops the rebase with exit code 0, so success alone
+          // does not mean the plan finished: the sequencer may be parked on the
+          // commit the user asked to amend.
+          if (manager.snapshot(root)?.operation.kind === "rebase") {
+            stoppedForEdit = true;
+            if (parked) {
+              void vscode.window.showWarningMessage(vscode.l10n.t("Your local changes are kept in {0}. Apply it from Manage Stashes once the rebase is finished or aborted.", parked.ref));
+            }
+            return;
           }
           if (!parked) return;
           const restore = await restoreTemporaryStash(manager, root, parked);
@@ -952,7 +961,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes failed and {0} was kept: {1}", parked.ref, formatGitError(restore.error)));
           }
         });
-        if (started) await vscode.window.showInformationMessage(vscode.l10n.t("The interactive rebase finished."));
+        if (started && stoppedForEdit) {
+          await vscode.window.showInformationMessage(vscode.l10n.t("Stopped at the commit marked 'edit'. Amend or test it, then run Continue Operation; the rest of the plan resumes from there."));
+        } else if (started) {
+          await vscode.window.showInformationMessage(vscode.l10n.t("The interactive rebase finished."));
+        }
       } catch (error) {
         if (manager.snapshot(root)?.operation.kind === "rebase") {
           await vscode.window.showWarningMessage(

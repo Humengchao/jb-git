@@ -135,6 +135,15 @@ test("guards the interactive rebase command and keeps a paused rebase recoverabl
   // stay in the stash rather than being restored on top of a live conflict.
   assert.match(command, /Apply it from Manage Stashes once the rebase is finished or aborted\./);
   assert.match(command, /restoreTemporaryStash\(manager, root, parked\)/);
+  // An edit row parks the sequencer with exit code 0, so the success path has
+  // to read the operation state: "finished" would be a lie, and restoring the
+  // parked stash would drop it onto the commit being amended.
+  assert.match(command, /operation\.kind === "rebase"\) \{\s*\n\s*stoppedForEdit = true;/);
+  assert.ok(
+    command.indexOf('stoppedForEdit = true') < command.indexOf("restoreTemporaryStash("),
+    "the edit stop must be detected before the stash restore",
+  );
+  assert.match(command, /Stopped at the commit marked 'edit'/);
 
   const manifest = JSON.parse(source("package.json"));
   const declared = manifest.contributes.commands.filter((entry) => entry.command === "jbGit.interactiveRebase");
