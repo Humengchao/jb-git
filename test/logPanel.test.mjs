@@ -533,7 +533,7 @@ test("routes user-visible strings through the translator with no duplicate keys"
   // Strings assigned to properties bypass node()/button() and must call t().
   assert.match(script, /checkbox\.title = t\('Include in commit'\)/);
   assert.match(script, /message\.placeholder = t\(state\.totalChanges \? 'Commit Message' : 'No changes to commit'\)/);
-  assert.match(script, /input\.placeholder = t\('Filter loaded commits'\)/);
+  assert.match(script, /input\.placeholder = t\(deepActive \? 'Searching all history' : 'Filter loaded commits · Enter searches all history'\)/);
   assert.match(script, /input\.placeholder = t\('src\/path or file name'\)/);
   assert.match(script, /repositories\.title = t\('Git root'\)/);
   // Counted nouns cannot be dictionary keys, so they go through one helper.

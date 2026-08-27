@@ -59,6 +59,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private selectedHash?: string;
   private filePath?: string;
   private logOptions: GitLogOptions = { order: "date", firstParent: false, noMerges: false };
+  /** Whole-history message search, IDEA's log search field. Applied by Git, not by filtering the loaded window. */
+  private logSearch?: string;
   private requestedTab: ToolTab = "log";
   private pendingOpenTab?: ToolTab;
   private currentCommits: GitCommit[] = [];
@@ -128,6 +130,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     if (root && this.manager.snapshot(root)) {
       if (root !== this.selectedRoot) {
         this.logOptions = { ...this.logOptions, author: undefined, since: undefined };
+        this.logSearch = undefined;
         this.logLimit = 300;
       }
       this.selectedRoot = root;
@@ -161,6 +164,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       this.logLimit = 300;
       this.logCache = undefined;
     }
+    // An active message search could exclude exactly the commit being revealed.
+    this.logSearch = undefined;
     this.selectedRoot = root;
     this.requestedTab = "log";
     this.pendingOpenTab = this.view ? undefined : "log";
@@ -309,17 +314,18 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (this.requestedTab === "log") {
         // Everything `git log` depends on is part of this fingerprint, so a
         // working-tree-only refresh (stage/unstage/save) reuses the cache.
+        const readOptions = { ...this.logOptions, ...(this.logSearch ? { grep: this.logSearch } : {}) };
         const fingerprint = JSON.stringify([
           refsKey, snapshot.status?.branch.oid ?? null,
-          this.selectedRef ?? null, this.logLimit, this.filePath ?? null, this.logOptions,
+          this.selectedRef ?? null, this.logLimit, this.filePath ?? null, readOptions,
         ]);
         let commits: GitCommit[];
         if (this.logCache?.fingerprint === fingerprint) {
           commits = this.logCache.commits;
         } else {
           commits = this.selectedRef
-            ? await repository.logRef(this.selectedRef, this.logLimit, this.filePath, this.logOptions)
-            : await repository.log(this.logLimit, this.filePath, this.logOptions);
+            ? await repository.logRef(this.selectedRef, this.logLimit, this.filePath, readOptions)
+            : await repository.log(this.logLimit, this.filePath, readOptions);
           if (version !== this.updateVersion) return;
           this.logCache = { fingerprint, commits };
         }
@@ -339,7 +345,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         }
         logKey = `${fingerprint}\0${this.selectedHash ?? ""}`;
         if (this.lastSentLogKey !== logKey) {
-          logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: this.logLimit < 5_000 && commits.length >= this.logLimit };
+          logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: this.logLimit < 5_000 && commits.length >= this.logLimit, logSearch: this.logSearch ?? "" };
         }
       }
       const lists = this.changelists.lists(root).map((list) => ({
@@ -444,6 +450,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         this.selectedHash = undefined;
         this.filePath = undefined;
         this.logOptions = { ...this.logOptions, author: undefined, since: undefined };
+        this.logSearch = undefined;
         this.logLimit = 300;
         return void this.update();
       }
@@ -758,6 +765,36 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const owned = await this.readOwnedHunks(root, change.path);
         await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...(await this.readHunks(root, change)), owned });
         return;
+      }
+      if (message.type === "deepSearch") {
+        const text = message.text.trim();
+        if (!text) {
+          if (this.logSearch === undefined) return;
+          this.logSearch = undefined;
+          this.logLimit = 300;
+          this.selectedHash = undefined;
+          return void this.update();
+        }
+        // A hash goes to the commit itself, IDEA's go-to-hash: re-root the log
+        // at it so even a commit outside the loaded window is reachable.
+        if (/^[0-9a-f]{4,64}$/i.test(text)) {
+          try {
+            const [commit] = await snapshot.repository.logRef(text, 1);
+            if (commit) {
+              this.logSearch = undefined;
+              this.selectedRef = commit.hash;
+              this.selectedHash = commit.hash;
+              this.logLimit = 300;
+              return void this.update();
+            }
+          } catch {
+            // Hex-looking text that resolves to nothing is searched as text.
+          }
+        }
+        this.logSearch = text;
+        this.selectedHash = undefined;
+        this.logLimit = 300;
+        return void this.update();
       }
       if (message.type === "selectRef") {
         if (message.ref && !snapshot.branches.some((branch) => branch.name === message.ref)) return;
@@ -1191,6 +1228,9 @@ const logStyles = String.raw`
   .toolbar select, .toolbar input { height: 26px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
   .toolbar select { max-width: 220px; padding: 2px 5px; }
   .search { width: min(330px, 32vw); padding: 3px 7px; }
+  /* A whole-history search is a different state from filtering the window, and
+     has to look like one. */
+  .commit-search.deep-active { border-color: var(--vscode-focusBorder); background: color-mix(in srgb, var(--vscode-focusBorder) 12%, var(--vscode-input-background)); }
   .icon-button { min-width: 27px; height: 27px; padding: 0 7px; border-radius: 3px; }
   .icon-button:hover, .action:hover { background: var(--vscode-toolbar-hoverBackground); }
   .spacer { flex: 1; }
@@ -1532,6 +1572,8 @@ const logScript = String.raw`
     'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
     'Changelist': '变更列表', 'Move…': '移动…', 'some changes': '部分更改',
     'Incoming commits: fetched but not merged': '传入提交：已抓取但未合并',
+    'Searching all history': '正在搜索全部历史',
+    'Filter loaded commits · Enter searches all history': '筛选已加载的提交 · 回车搜索全部历史',
     'Outgoing commits: not pushed yet': '传出提交：尚未推送',
     'The upstream branch no longer exists': '上游分支已不存在',
     'Commit Message History': '提交消息历史', 'Move this change to another Changelist': '把这处更改移到其他变更列表',
@@ -2565,11 +2607,31 @@ const logScript = String.raw`
 
   function commitFilterBar() {
     const bar = node('div', 'commit-filters');
-    const input = node('input', 'commit-search'); input.id = 'commit-search'; input.type = 'search'; input.placeholder = t('Filter loaded commits'); input.value = search;
+    const deepActive = Boolean(state.logSearch);
+    const input = node('input', 'commit-search' + (deepActive ? ' deep-active' : '')); input.id = 'commit-search'; input.type = 'search';
+    input.placeholder = t(deepActive ? 'Searching all history' : 'Filter loaded commits · Enter searches all history');
+    input.value = deepActive ? state.logSearch : search;
     input.setAttribute('aria-label', t('Filter the loaded commits by text or hash'));
     const loadedCount = String(state.logLimit || (state.commits || []).length);
-    input.title = isZh ? '筛选当前已加载的 ' + loadedCount + ' 个提交' : 'Filters the ' + loadedCount + ' commits currently loaded';
-    input.addEventListener('input', () => { search = input.value; saveUiState({ search }); renderCommitRows(); refreshDetailsForFilter(); });
+    input.title = deepActive
+      ? (isZh ? '正在于整个历史中搜索：' + state.logSearch : 'Searching the whole history for: ' + state.logSearch)
+      : (isZh ? '筛选当前已加载的 ' + loadedCount + ' 个提交；按 Enter 在整个历史中搜索' : 'Filters the ' + loadedCount + ' commits currently loaded; press Enter to search all history');
+    input.addEventListener('input', () => {
+      search = input.value; saveUiState({ search });
+      // The native ✕ (or emptying the box) also ends an active whole-history
+      // search, so one control clears both layers.
+      if (!input.value && state.logSearch) { post('deepSearch', { text: '' }); return; }
+      renderCommitRows(); refreshDetailsForFilter();
+    });
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      const text = input.value.trim();
+      // Git applies the search over the whole walk, so the loaded-window
+      // filter would only hide rows the search already matched.
+      search = ''; saveUiState({ search });
+      post('deepSearch', { text });
+    });
     const branch = filterButton('Branch', state.selectedRef ? shortRef(state.selectedRef) : '', 'Filter by branch', Boolean(state.selectedRef), branchFilterItems);
     const user = filterButton('User', authorFilter, 'Filter by author', Boolean(authorFilter), userFilterItems);
     const dateLabels = { all: '', today: 'Today', week: '7 days', month: '30 days', year: '1 year' };

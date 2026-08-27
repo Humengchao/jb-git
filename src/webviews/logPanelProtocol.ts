@@ -14,6 +14,7 @@ export type LogMessage =
   | { type: "openCommitFile"; hash: string; path: string }
   | { type: "refresh" | "clearConsole" | "loadMore" | "createChangelist" | "createShelf" }
   | { type: "requestHeadMessage" | "messageHistory" }
+  | { type: "deepSearch"; text: string }
   | { type: "togglePath"; path: string; checked: boolean }
   | { type: "toggleAll"; checked: boolean; listId?: string }
   | { type: "openDiff"; path: string; mode?: "staged" | "unstaged" }
@@ -52,6 +53,11 @@ export function isLogMessage(value: unknown): value is LogMessage {
   // A hunk is named by content, so the key is the only thing that identifies
   // which change is being moved; an index would move whatever is there now.
   if (value.type === "moveHunk") return typeof value.path === "string" && typeof value.key === "string";
+  // A whole-history search: bounded and single-line, because it lands in a
+  // command argument.
+  if (value.type === "deepSearch") {
+    return typeof value.text === "string" && value.text.length <= 512 && !/[\r\n\0]/.test(value.text);
+  }
   if (ID_TYPES.has(value.type)) return typeof value.id === "string";
   switch (value.type) {
     case "ready": return (value.activeTab === undefined || isToolTab(value.activeTab)) && (value.logOptions === undefined || isRecord(value.logOptions));

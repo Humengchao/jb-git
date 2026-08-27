@@ -105,6 +105,8 @@ export interface GitLogOptions {
   noMerges: boolean;
   author?: string;
   since?: string;
+  /** Literal, case-insensitive commit-message search, applied by Git over the whole walk. */
+  grep?: string;
 }
 
 export interface GitCommitFile {

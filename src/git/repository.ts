@@ -206,6 +206,9 @@ export class GitRepository {
       ...(options.noMerges ? ["--no-merges"] : []),
       ...(options.author ? [`--author=${options.author}`] : []),
       ...(options.since ? [`--since=${options.since}`] : []),
+      // Fixed strings: the box is a search box, so a bracket in a message is
+      // findable rather than a broken regular expression.
+      ...(options.grep ? ["--fixed-strings", "--regexp-ignore-case", `--grep=${options.grep}`] : []),
       `--max-count=${Math.max(1, Math.min(limit, 5_000))}`,
       "--log-size",
       "--date=iso-strict",
