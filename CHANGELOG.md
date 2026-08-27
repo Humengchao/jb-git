@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.24
+
+- feat: Issue Navigation, IDEA's issue-id-to-tracker links
+- feat: whole-history log search, IDEA's two-layer search field
+
 ## 0.1.23
 
 - feat: IDEA's incoming/outgoing markers on every local branch
