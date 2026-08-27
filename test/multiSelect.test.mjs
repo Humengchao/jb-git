@@ -14,7 +14,7 @@ test("a multi-commit action is validated at the boundary", () => {
   assert.equal(isLogMessage({ type: "commitsAction", action: "cherryPickCommits", hashes: [42] }), false);
   assert.equal(isLogMessage({ type: "commitsAction", action: "cherryPickCommits", hashes: ["x".repeat(65)] }), false, "longer than a SHA-256 id");
   assert.equal(isLogMessage({ type: "commitsAction", action: "cherryPickCommits", hashes: Array.from({ length: 1001 }, () => HASH("a")) }), false);
-  assert.equal(isLogMessage({ type: "commitsAction", action: "dropCommits", hashes: [HASH("a")] }), false, "unknown action");
+  assert.equal(isLogMessage({ type: "commitsAction", action: "rebaseCommits", hashes: [HASH("a")] }), false, "unknown action");
 });
 
 test("the selection applies in the log's order, not the click order", () => {

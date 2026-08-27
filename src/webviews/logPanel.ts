@@ -17,6 +17,9 @@ import { hunkKeys, partitionHunks } from "../changelists/hunkOwnership";
 import { readFileSync } from "node:fs";
 import { isLogMessage, isToolTab, LogMessage, oldestFirst, ToolTab } from "./logPanelProtocol";
 import { originalMessage } from "./rebaseEditorProtocol";
+import { dropPlan, squashPlan } from "../logHistoryEdit";
+import { RebaseStep } from "../interactiveRebase";
+import { restoreTemporaryStash, stashLocalChanges } from "../temporaryStash";
 
 interface LogSelection {
   commit: GitCommit;
@@ -1041,6 +1044,45 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           await this.showReadOnlyDiff(root, `${hashes[0].slice(0, 8)} → ${hashes[1].slice(0, 8)}`, diff);
           return;
         }
+        if (message.action === "dropCommits" || message.action === "squashCommits") {
+          if (!(await requireTrusted())) return;
+          const squash = message.action === "squashCommits";
+          if (squash && hashes.length < 2) return;
+          const oldest = commits[0];
+          if (!oldest.parents?.length) {
+            return void vscode.window.showWarningMessage(vscode.l10n.t("The root commit has no parent to rebase onto, so it cannot be rewritten from the Log."));
+          }
+          const base = `${oldest.hash}^`;
+          // The same loader the sequence editor uses, with the same refusals:
+          // a range with merges, or a base that is not an ancestor of HEAD,
+          // is reported before any history is touched.
+          const candidates = await this.manager.interactiveRebaseCandidates(root, base);
+          const chosen = new Set(hashes);
+          if (!hashes.every((hash) => candidates.some((commit) => commit.hash === hash))) {
+            return void vscode.window.showWarningMessage(vscode.l10n.t("Only commits on the current branch's linear history can be rewritten from the Log."));
+          }
+          const history = candidates.map((commit) => ({ hash: commit.hash, subject: commit.subject, message: originalMessage(commit) }));
+          const steps = squash ? squashPlan(history, chosen) : dropPlan(history, chosen);
+          // A non-adjacent squash silently reorders the commits in between,
+          // which is worth a sentence before the branch is rewritten.
+          const chosenIndexes = candidates.map((commit, index) => (chosen.has(commit.hash) ? index : -1)).filter((index) => index >= 0);
+          const adjacent = chosenIndexes[chosenIndexes.length - 1] - chosenIndexes[0] === chosenIndexes.length - 1;
+          const detail = commits.map((commit) => `${commit.hash.slice(0, 8)} ${commit.subject}`).join("\n")
+            + (squash && !adjacent ? `\n\n${vscode.l10n.t("The unselected commits in between are reordered to replay after the squashed commit.")}` : "");
+          const button = squash ? vscode.l10n.t("Squash") : vscode.l10n.t("Drop");
+          const confirmed = await vscode.window.showWarningMessage(
+            squash
+              ? vscode.l10n.t("Squash {0} commits into one? The branch is rewritten from {1} onward.", hashes.length, oldest.hash.slice(0, 8))
+              : vscode.l10n.t("Drop {0} commit(s)? The branch is rewritten from {1} onward.", hashes.length, oldest.hash.slice(0, 8)),
+            { modal: true, detail },
+            button,
+          );
+          if (confirmed !== button) return;
+          await this.runHistoryRewrite(root, base, steps, squash
+            ? vscode.l10n.t("Squashed {0} commits into one.", hashes.length)
+            : vscode.l10n.t("Dropped {0} commit(s).", hashes.length));
+          return;
+        }
         const confirmed = await vscode.window.showWarningMessage(
           vscode.l10n.t("Cherry-pick {0} commit(s) onto the current branch, oldest first?", hashes.length),
           { modal: true, detail: commits.map((commit) => `${commit.hash.slice(0, 8)} ${commit.subject}`).join("\n") },
@@ -1110,6 +1152,56 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       await vscode.window.showErrorMessage(formatError(error));
       await this.view?.webview.postMessage({ type: "error", message: formatError(error) });
     }
+  }
+
+  /**
+   * Runs an unattended history rewrite (Drop/Squash from the Log) with the
+   * same working-tree choreography as the interactive rebase command: local
+   * changes are parked only after the user agrees, restored when the rewrite
+   * finishes, and kept in the stash when it stops on a conflict rather than
+   * being replayed on top of one. These plans contain no `edit` rows, so a
+   * successful exit means the plan finished.
+   */
+  private async runHistoryRewrite(root: string, base: string, steps: readonly RebaseStep[], successMessage: string): Promise<void> {
+    const blocking = (this.manager.snapshot(root)?.status?.changes ?? [])
+      .filter((change) => change.kind !== "untracked" && change.kind !== "ignored");
+    let parked;
+    if (blocking.length > 0) {
+      const answer = await vscode.window.showWarningMessage(
+        vscode.l10n.t("{0} local change(s) would block rewriting history.", blocking.length),
+        {
+          modal: true,
+          detail: vscode.l10n.t("JB Git can stash them, run the rebase, and restore the working tree and Index afterwards. If the rebase stops on a conflict the stash is kept instead, so nothing is lost."),
+        },
+        vscode.l10n.t("Stash and Rebase"),
+      );
+      if (answer !== vscode.l10n.t("Stash and Rebase")) return;
+      parked = await stashLocalChanges(this.manager, root, `JB Git history rewrite onto ${base}`, { includeUntracked: false });
+    }
+    try {
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Rebasing {0} commit(s)", steps.length) },
+        () => this.manager.interactiveRebase(root, base, steps),
+      );
+    } catch (error) {
+      if (parked) {
+        void vscode.window.showWarningMessage(vscode.l10n.t("Your local changes are kept in {0}. Apply it from Manage Stashes once the rebase is finished or aborted.", parked.ref));
+      }
+      if (this.manager.snapshot(root)?.operation.kind === "rebase") {
+        await vscode.window.showWarningMessage(vscode.l10n.t("The rebase stopped before the end of the plan. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back."));
+        return;
+      }
+      throw error;
+    }
+    if (parked) {
+      const restore = await restoreTemporaryStash(this.manager, root, parked);
+      if (restore.outcome === "conflicted") {
+        void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes caused conflicts. {0} was kept; resolve the files in Local Changes.", parked.ref));
+      } else if (restore.outcome === "kept") {
+        void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes failed and {0} was kept: {1}", parked.ref, formatError(restore.error)));
+      }
+    }
+    void vscode.window.showInformationMessage(successMessage);
   }
 
   public dispose(): void {
@@ -1648,6 +1740,7 @@ const logScript = String.raw`
     'Commit Message History': '提交消息历史', 'Move this change to another Changelist': '把这处更改移到其他变更列表',
     'Create Patch…': '创建补丁…', 'Copy Revision Number': '复制修订号', 'Cherry-Pick': '拣选提交',
     'Cherry-Pick Selected': '拣选所选提交', 'Compare Versions': '比较版本',
+    'Squash Selected…': '压缩所选提交…', 'Drop Selected…': '丢弃所选提交…', 'Drop Commit…': '丢弃提交…',
     'Right-click the selection to cherry-pick the commits in history order, or compare two.': '右键所选内容可按历史顺序拣选这些提交，选中两个时可比较版本。',
     'Checkout': '检出', 'Rename…': '重命名…', 'Delete…': '删除…', 'New Branch…': '新建分支…',
     'Continue': '继续', 'Skip': '跳过', 'Abort': '中止', 'Reset': '重置',
@@ -2904,6 +2997,9 @@ const logScript = String.raw`
           return [
             { icon: '⌘', label: 'Cherry-Pick Selected', run: () => post('commitsAction', { action: 'cherryPickCommits', hashes }) },
             { icon: '↔', label: 'Compare Versions', disabled: hashes.length !== 2, run: () => post('commitsAction', { action: 'compareCommits', hashes }) },
+            { separator: true },
+            { icon: '⇊', label: 'Squash Selected…', run: () => post('commitsAction', { action: 'squashCommits', hashes }) },
+            { icon: '✕', label: 'Drop Selected…', run: () => post('commitsAction', { action: 'dropCommits', hashes }) },
           ];
         }
         const parent = commit.parents?.[0];
@@ -2919,6 +3015,7 @@ const logScript = String.raw`
           { separator: true },
           { icon: '↶', label: 'Reset Current Branch to Here…', run: () => post('reset', { hash: commit.hash }) },
           { icon: '↩', label: 'Revert Commit', run: () => post('revert', { hash: commit.hash }) },
+          { icon: '✕', label: 'Drop Commit…', run: () => post('commitsAction', { action: 'dropCommits', hashes: [commit.hash] }) },
           { icon: '+', label: 'New Branch…', run: () => post('newBranch', { hash: commit.hash }) },
           { icon: '◆', label: 'New Tag…', run: () => post('contextAction', { action: 'createTag', hash: commit.hash }) },
           { separator: true },

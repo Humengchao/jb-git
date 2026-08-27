@@ -29,7 +29,7 @@ export type LogMessage =
   | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag"; ref: string; kind: GitBranch["kind"] }
   | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
   | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string }
-  | { type: "commitsAction"; action: "cherryPickCommits" | "compareCommits"; hashes: string[] };
+  | { type: "commitsAction"; action: "cherryPickCommits" | "compareCommits" | "dropCommits" | "squashCommits"; hashes: string[] };
 
 const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory"]);
 const HASH_TYPES = new Set(["selectCommit", "newBranch", "cherryPick", "revert", "reset", "showPatch"]);
@@ -40,7 +40,7 @@ const HASH_CONTEXT_ACTIONS = new Set(["copyRevision", "createPatch", "checkoutRe
 const REF_CONTEXT_ACTIONS = new Set(["copyBranch", "newBranchFromRef", "showRefDiff", "createWorktreeFromRef", "renameBranch", "deleteBranch", "mergeRef", "rebaseOntoRef", "pushRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]);
 const BRANCH_CONTEXT_ACTIONS = new Set(["compareBranches", "showBranchesDiff", "deleteBranches"]);
 const FILE_CONTEXT_ACTIONS = new Set(["copyPath", "showFileDiff", "compareFileWithLocal", "openRepositoryFile", "createFilePatch", "restoreFile", "fileHistory"]);
-const COMMITS_ACTIONS = new Set(["cherryPickCommits", "compareCommits"]);
+const COMMITS_ACTIONS = new Set(["cherryPickCommits", "compareCommits", "dropCommits", "squashCommits"]);
 
 export function isToolTab(value: unknown): value is ToolTab {
   return value === "log" || value === "console" || value === "changes" || value === "shelf";
