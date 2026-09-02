@@ -10,6 +10,7 @@ import { parseUnifiedDiff, patchForHunk, patchForHunks } from "./patch";
 import { buildRebaseTodo, posixPath, shellQuote, validateRebasePlan, type InteractiveRebaseExpectation, type RebaseStep } from "../interactiveRebase";
 import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
 import { appendIgnoreLine } from "../ignoreRules";
+import { DEFAULT_COMMENT_CHAR } from "../commitMessage";
 import {
   GitBranch,
   GitCommitOptions,
@@ -1001,6 +1002,11 @@ export class GitRepository {
    * none. A path starting with `~` is the user's home, as Git reads it; a
    * relative one is relative to the working tree.
    */
+  /** `core.commentChar`, which decides which lines `--cleanup=strip` drops. */
+  public async commentChar(): Promise<string> {
+    return (await this.configValue("core.commentChar")) || DEFAULT_COMMENT_CHAR;
+  }
+
   public async commitTemplate(): Promise<string | undefined> {
     let configured: string;
     try {

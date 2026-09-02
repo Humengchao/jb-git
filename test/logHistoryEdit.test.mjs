@@ -246,6 +246,56 @@ test("the Log's Fixup… checks the target before committing and says so when th
   const commitAt = fixup.indexOf("await this.manager.commitFixup(root, commit.hash)");
   assert.ok(preflightAt >= 0 && commitAt >= 0 && preflightAt < commitAt);
   assert.match(fixup, /await this\.manager\.amendStaged\(root, message\.hash\)/);
-  assert.match(fixup, /const folded = await this\.runHistoryRewrite\(/);
+  assert.match(fixup, /const outcome = await this\.runHistoryRewrite\(/);
   assert.match(fixup, /was created but not folded in/);
+});
+
+test("a rewrite that stops on a conflict is not reported as done", async () => {
+  // Two commits touch the same line, so dropping the first makes replaying the
+  // second conflict: the real Git stop this reporting has to survive.
+  const root = mkdtempSync(join(tmpdir(), "jb-git-histedit-stop-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "f.txt"), "base\n");
+  git(root, "add", "f.txt");
+  git(root, "commit", "-qm", "base");
+  writeFileSync(join(root, "f.txt"), "first\n");
+  git(root, "commit", "-qam", "one");
+  writeFileSync(join(root, "f.txt"), "second\n");
+  git(root, "commit", "-qam", "two");
+  const repository = await discoverRepository(root, new GitRunner());
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+  const history = candidates.map((commit) => ({ hash: commit.hash, subject: commit.subject, message: originalMessage(commit) }));
+
+  await assert.rejects(repository.interactiveRebase("HEAD~2", dropPlan(history, new Set([history[0].hash]))));
+  const state = await repository.operationState();
+  assert.equal(state.kind, "rebase", "the branch is parked on the conflict");
+  assert.equal(state.canContinue, true);
+  await repository.abortOperation("rebase");
+
+  // The panel must not claim the rewrite happened while that state is live:
+  // the outcome is three-state, and only "completed" prints the message.
+  const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  assert.match(host, /type HistoryRewriteOutcome = "completed" \| "declined" \| "paused";/);
+  const rewrite = host.slice(host.indexOf("private async runHistoryRewrite"), host.indexOf("public dispose()"));
+  assert.match(rewrite, /outcome = "paused";/);
+  assert.match(rewrite, /if \(outcome !== "completed"\) return outcome;\s*\n\s*void vscode\.window\.showInformationMessage\(successMessage\);/);
+  assert.match(rewrite, /answer !== vscode\.l10n\.t\("Stash and Rebase"\)\) return "declined";/);
+  // A stopped rebase still folds the fixup in on Continue, so only a rewrite
+  // that never ran leaves the fixup commit standing.
+  const fixup = host.slice(host.indexOf('message.type === "fixupCommit"'), host.indexOf('message.type === "rewordCommit"'));
+  assert.match(fixup, /if \(outcome === "declined"\) \{/);
+  assert.match(fixup, /was created but not folded in/);
+});
+
+test("a merge or rebase that pauses from the Log is explained rather than only reported as a Git error", () => {
+  const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const guard = host.slice(host.indexOf("const paused = this.currentSnapshot()?.operation;"));
+  assert.match(guard.slice(0, 800), /if \(paused && paused\.kind !== "none" && paused\.canContinue\)/, "only an operation the user can continue is explained");
+  assert.match(guard.slice(0, 800), /stopped on a conflict\. Resolve the conflicted files in Local Changes and Continue/);
+  // Git's own text still reaches the panel's banner.
+  assert.match(guard.slice(0, 900), /postMessage\(\{ type: "error", message: formatError\(error\) \}\)/);
 });

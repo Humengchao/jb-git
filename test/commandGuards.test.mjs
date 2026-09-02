@@ -225,7 +225,7 @@ test("the commit form has IDEA's Author field and pre-fills from commit.template
   assert.match(script, /const authors = \{ \.\.\.\(uiState\.commitAuthors \|\| \{\}\) \}; delete authors\[state\.selectedRoot \|\| ''\];/);
   const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
   // Comments are stripped exactly when a template is configured, as Git's own editor does.
-  assert.match(host, /const stripComments = \(await this\.manager\.commitTemplate\(root\)\) !== undefined;/);
+  assert.match(host, /const stripComments = commitTemplate !== null;/);
   assert.match(host, /author: message\.author\?\.trim\(\) \|\| undefined, stripComments/);
   // Authors are re-read only when HEAD moves; the template is configuration with a short cache.
   assert.match(host, /if \(!authors \|\| authors\.head !== head\)/);

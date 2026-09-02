@@ -12,6 +12,7 @@ import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
 import { validateGitRefName, validatePathInput } from "../inputValidation";
 import { moveUntrackedToTrash } from "../discardSafety";
+import { DEFAULT_COMMENT_CHAR, effectiveCommitMessage } from "../commitMessage";
 import { ignorePatternsFor } from "../ignoreRules";
 import { conflictSideLabels } from "./mergeEditor";
 import { previewAndPush } from "../pushPreview";
@@ -24,6 +25,13 @@ import { originalMessage } from "./rebaseEditorProtocol";
 import { dropPlan, fixupPlan, rewordPlan, squashPlan } from "../logHistoryEdit";
 import { type InteractiveRebaseExpectation, type RebaseStep, validateRebasePlan } from "../interactiveRebase";
 import { restoreTemporaryStash, stashLocalChanges } from "../temporaryStash";
+
+/**
+ * What became of a history rewrite: it ran to the end, the user declined the
+ * stash it needed, or Git stopped mid-plan on a conflict. Only "completed"
+ * may be reported to the user as done.
+ */
+type HistoryRewriteOutcome = "completed" | "declined" | "paused";
 
 interface LogSelection {
   commit: GitCommit;
@@ -103,7 +111,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   /** IDEA's Author completions, per repository, valid while HEAD stands still. */
   private readonly authorsCache = new Map<string, { head: string | null; authors: string[] }>();
   /** The repository's `commit.template`, re-read at most every so often: it is configuration, not state. */
-  private readonly templateCache = new Map<string, { readAt: number; template?: string }>();
+  private readonly templateCache = new Map<string, { readAt: number; template?: string; commentChar: string }>();
   private readonly disposables: vscode.Disposable[] = [];
   private didRequestNestedDiscovery = false;
   private currentCommitsRoot?: string;
@@ -1121,12 +1129,19 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (message.type === "commit") {
-        const commitMessage = message.message.trim();
-        if (!commitMessage) return void vscode.window.showWarningMessage(vscode.l10n.t("Enter a commit message first."));
-        // With a commit.template configured, `#` lines are the template's
-        // comments — Git strips them in its own editor, so they are stripped
-        // here too; without one they stay, as `git commit -m` keeps them.
-        const stripComments = (await this.manager.commitTemplate(root)) !== undefined;
+        if (!message.message.trim()) return void vscode.window.showWarningMessage(vscode.l10n.t("Enter a commit message first."));
+        // With a commit.template configured, comment lines are the template's
+        // own — Git strips them in its editor, so they are stripped here too;
+        // without one they stay, as `git commit -m` keeps them. What Git will
+        // record is therefore what has to be checked and recorded: a message
+        // that is nothing but the template's comments would otherwise reach
+        // Git and come back as "Aborting commit due to empty commit message".
+        const { commitTemplate, commentChar } = await this.commitFormExtras(root, snapshot);
+        const stripComments = commitTemplate !== null;
+        const commitMessage = effectiveCommitMessage(message.message, stripComments, commentChar);
+        if (!commitMessage) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("The message is only the commit template's comments. Describe the change above them."));
+        }
         const options = { amend: message.amend, signoff: message.signoff, noVerify: message.noVerify, author: message.author?.trim() || undefined, stripComments };
         let revision: string;
         if (message.mode === "staged") {
@@ -1524,8 +1539,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const planProblem = validateRebasePlan(steps);
         if (planProblem) return void vscode.window.showWarningMessage(planProblem);
         const expectation = this.rebaseExpectation(root, candidates, fixup);
-        const folded = await this.runHistoryRewrite(root, base, steps, expectation, vscode.l10n.t("Fixed up {0} with the staged changes.", message.hash.slice(0, 8)));
-        if (!folded) {
+        const outcome = await this.runHistoryRewrite(root, base, steps, expectation, vscode.l10n.t("Fixed up {0} with the staged changes.", message.hash.slice(0, 8)));
+        // A rebase that stopped will still fold the fixup in once it is
+        // continued, so only a rewrite that never ran leaves it standing.
+        if (outcome === "declined") {
           void vscode.window.showInformationMessage(vscode.l10n.t("The fixup commit {0} was created but not folded in. Squash it with Interactively Rebase, or drop it from the Log.", fixup.slice(0, 8)));
         }
         return;
@@ -1592,6 +1609,19 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
     } catch (error) {
       if (isGitAbort(error)) return;
+      // A merge, rebase or cherry-pick that stopped mid-way did not simply
+      // fail: the repository is now holding a conflict the user has to settle.
+      // Git's own message names the files but not the way out, so say it.
+      const paused = this.currentSnapshot()?.operation;
+      if (paused && paused.kind !== "none" && paused.canContinue) {
+        // Git's own text stays available in the panel's error banner below;
+        // a non-modal toast would drop a `detail` anyway.
+        await vscode.window.showWarningMessage(
+          vscode.l10n.t("The {0} stopped on a conflict. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back.", paused.kind),
+        );
+        await this.view?.webview.postMessage({ type: "error", message: formatError(error) });
+        return;
+      }
       await vscode.window.showErrorMessage(formatError(error));
       await this.view?.webview.postMessage({ type: "error", message: formatError(error) });
     }
@@ -1621,7 +1651,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     steps: readonly RebaseStep[],
     expectation: InteractiveRebaseExpectation,
     successMessage: string,
-  ): Promise<boolean> {
+  ): Promise<HistoryRewriteOutcome> {
     const blocking = (this.manager.snapshot(root)?.status?.changes ?? [])
       .filter((change) => change.kind !== "untracked" && change.kind !== "ignored");
     const answer = blocking.length > 0
@@ -1634,7 +1664,12 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         vscode.l10n.t("Stash and Rebase"),
       )
       : vscode.l10n.t("Stash and Rebase");
-    if (blocking.length > 0 && answer !== vscode.l10n.t("Stash and Rebase")) return false;
+    if (blocking.length > 0 && answer !== vscode.l10n.t("Stash and Rebase")) return "declined";
+    // A plan that stops mid-rebase has not done what was asked, so the caller
+    // must not report success: Drop/Squash/Reword would claim the history was
+    // rewritten while the branch is parked on a conflict, and Fixup would skip
+    // saying that its fixup commit is still sitting there unfolded.
+    let outcome: HistoryRewriteOutcome = "completed";
     await this.manager.withExclusive(root, async (lease: RepositoryMutationLease) => {
       const stillBlocking = (this.manager.snapshot(root)?.status?.changes ?? [])
         .some((change) => change.kind !== "untracked" && change.kind !== "ignored");
@@ -1659,6 +1694,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
         }
         if (paused) {
+          outcome = "paused";
           await vscode.window.showWarningMessage(vscode.l10n.t("The rebase stopped before the end of the plan. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back."));
           return;
         }
@@ -1672,8 +1708,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes failed and {0} was kept: {1}", parked.ref, formatError(restore.error)));
       }
     });
+    if (outcome !== "completed") return outcome;
     void vscode.window.showInformationMessage(successMessage);
-    return true;
+    return "completed";
   }
 
   public dispose(): void {
@@ -1704,7 +1741,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
    * Both are cheap to cache — authors change only when HEAD moves, and the
    * template is configuration.
    */
-  private async commitFormExtras(root: string, snapshot: RepositorySnapshot): Promise<{ recentAuthors: string[]; commitTemplate: string | null }> {
+  private async commitFormExtras(root: string, snapshot: RepositorySnapshot): Promise<{ recentAuthors: string[]; commitTemplate: string | null; commentChar: string }> {
     const head = snapshot.status?.branch.oid ?? null;
     let authors = this.authorsCache.get(root);
     if (!authors || authors.head !== head) {
@@ -1713,10 +1750,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     }
     let template = this.templateCache.get(root);
     if (!template || Date.now() - template.readAt > 30_000) {
-      template = { readAt: Date.now(), template: await this.manager.commitTemplate(root).catch(() => undefined) };
+      // The comment character travels with the template: it is only consulted
+      // when comments are stripped, and both come from the same config read.
+      const [text, commentChar] = await Promise.all([
+        this.manager.commitTemplate(root).catch(() => undefined),
+        this.manager.commentChar(root).catch(() => DEFAULT_COMMENT_CHAR),
+      ]);
+      template = { readAt: Date.now(), template: text, commentChar };
       this.templateCache.set(root, template);
     }
-    return { recentAuthors: authors.authors, commitTemplate: template.template ?? null };
+    return { recentAuthors: authors.authors, commitTemplate: template.template ?? null, commentChar: template.commentChar };
   }
 
   private async readHunks(root: string, change: GitChange, refresh = false): Promise<{ staged: GitDiffHunk[]; unstaged: GitDiffHunk[] }> {
@@ -2976,6 +3019,10 @@ const logScript = String.raw`
     // IDEA pre-fills the box from commit.template when nothing has been typed;
     // the template is not a draft, so an emptied box shows it again.
     const template = typeof state.commitTemplate === 'string' ? state.commitTemplate : '';
+    // The same rule the host applies before committing: with a template, the
+    // comment lines are the template's own and Git strips them, so a box
+    // holding nothing else is empty as far as the commit is concerned.
+    const commentChar = typeof state.commentChar === 'string' && state.commentChar ? state.commentChar : '#';
     message.value = drafts[root] || template; message.disabled = !state.totalChanges;
     const modeRow = node('div', 'commit-mode-row');
     const mode = node('select'); mode.id = 'commit-mode'; mode.setAttribute('aria-label', t('Commit source')); mode.title = t('Commit source');
@@ -3037,7 +3084,7 @@ const logScript = String.raw`
     const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'primary'); commitPush.id = 'commit-push-button';
     // With a template configured, lines starting with # are comments Git will
     // strip, so a box holding only the template is still an empty message.
-    const effectivelyEmpty = value => !value.split('\n').some(line => line.trim() && !(template && line.trimStart().startsWith('#')));
+    const effectivelyEmpty = value => !value.split('\n').some(line => line.trim() && !(template && line.trimStart().startsWith(commentChar)));
     const updateEnabled = () => {
       const available = mode.value === 'staged' ? Number(state.stagedCount || 0) : Number(state.selectedCount || 0);
       const disabled = !available || effectivelyEmpty(message.value); commit.disabled = disabled; commitPush.disabled = disabled;

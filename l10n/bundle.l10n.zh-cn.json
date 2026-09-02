@@ -509,5 +509,7 @@
   "The operation did not complete, and your local changes remain in {0}; restore failed: {1}": "操作未完成，你的本地更改仍在 {0} 中；恢复失败：{1}",
   "{0} local change(s) may block or complicate the update.": "{0} 个本地更改可能阻止更新或使其复杂化。",
   "Stash and Update": "贮藏并更新",
-  "Update Anyway": "仍然更新"
+  "Update Anyway": "仍然更新",
+  "The message is only the commit template's comments. Describe the change above them.": "消息中只有提交模板的注释内容。请在注释之上描述本次改动。",
+  "The {0} stopped on a conflict. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back.": "{0} 因冲突停止。请在“本地更改”中解决冲突文件后继续，或中止以恢复分支。"
 }

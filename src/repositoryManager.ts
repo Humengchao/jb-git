@@ -263,6 +263,10 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).recentAuthors(limit);
   }
 
+  public async commentChar(rootPath: string): Promise<string> {
+    return this.requireRepository(rootPath).commentChar();
+  }
+
   public async commitTemplate(rootPath: string): Promise<string | undefined> {
     return this.requireRepository(rootPath).commitTemplate();
   }
