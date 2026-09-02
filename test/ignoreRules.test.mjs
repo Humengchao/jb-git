@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +13,17 @@ function git(cwd, ...args) {
   const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
   if (args[0] === "init") execFileSync("git", ["-C", cwd, "config", "core.autocrlf", "false"]);
   return output;
+}
+
+/**
+ * File identity rather than path text: the repository root is canonical while
+ * the temp dir is not — macOS reaches it through /var → /private/var, Windows
+ * hands out an 8.3 short name (RUNNER~1) that realpathSync does not expand.
+ */
+function sameFile(left, right) {
+  const leftStat = statSync(left);
+  const rightStat = statSync(right);
+  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
 }
 
 function repository() {
@@ -70,11 +81,10 @@ test("writes the rule where it was asked to, and Git then ignores the file", asy
   const repo = await discoverRepository(root, new GitRunner());
 
   const gitignore = await repo.addIgnoreRule("gitignore", "/build/");
-  // The repository root is canonical; a macOS temp dir is reached through /var → /private/var.
-  assert.equal(realpathSync(gitignore), realpathSync(join(root, ".gitignore")));
+  assert.equal(sameFile(gitignore, join(root, ".gitignore")), true, `${gitignore} is the repository's .gitignore`);
   assert.equal(readFileSync(gitignore, "utf8"), "/build/\n");
   const exclude = await repo.addIgnoreRule("exclude", "*.tmp");
-  assert.equal(realpathSync(exclude), realpathSync(join(root, ".git", "info", "exclude")));
+  assert.equal(sameFile(exclude, join(root, ".git", "info", "exclude")), true, `${exclude} is the clone's info/exclude`);
   assert.ok(readFileSync(exclude, "utf8").endsWith("*.tmp\n"), "the exclude file already shipped with comments; the rule goes after them");
 
   const untracked = (await repo.status()).changes.filter((change) => change.kind === "untracked").map((change) => change.path);
