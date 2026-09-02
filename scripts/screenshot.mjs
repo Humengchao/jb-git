@@ -12,6 +12,10 @@
  * Needs a display and a screen grabber:
  *
  *   apt-get install -y xvfb imagemagick libgtk-3-0 libnss3 libasound2t64 libgbm1
+ *
+ * On macOS nothing needs installing: the window opens on the desktop and is
+ * photographed with the system's screencapture (Screen Recording permission).
+ *
  *   node scripts/screenshot.mjs --list
  *   node scripts/screenshot.mjs annotate --out /tmp/annotate.png
  *
@@ -57,6 +61,37 @@ const SCENARIOS = {
     build: buildHistory,
     body: `await sleep(2000);
       await vscode.commands.executeCommand("jbGit.openGitToolWindow");`,
+  },
+  selection: {
+    describe: "History for Selection: the Log narrowed to the lines selected in the editor",
+    build: buildHistory,
+    body: `const document = await vscode.workspace.openTextDocument(vscode.Uri.file(root + "/app.js"));
+      const editor = await vscode.window.showTextDocument(document, { preview: false });
+      await sleep(2000);
+      // The greeting line: touched by the first two commits, not the third.
+      editor.selection = new vscode.Selection(1, 0, 1, 30);
+      // Give the Log's filter bar the whole window width, so the range chip shows.
+      await vscode.commands.executeCommand("workbench.action.closeSidebar");
+      await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+      await vscode.commands.executeCommand("jbGit.historyForSelection");`,
+  },
+  commit: {
+    describe: "The commit form pre-filled from commit.template, with the Author field open",
+    build: (root) => {
+      buildHistory(root);
+      writeFileSync(join(root, ".gitmessage"), "feat(scope): summary\n\n# Why is this change needed?\n# Any follow-ups?\n");
+      git(root, "config", "commit.template", ".gitmessage");
+      writeFileSync(join(root, "app.js"), `${readFileSync(join(root, "app.js"), "utf8")}\n// staged edit\n`);
+      git(root, "add", "app.js");
+    },
+    body: `await sleep(2000);
+      await vscode.commands.executeCommand("workbench.action.closeSidebar");
+      await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+      await vscode.commands.executeCommand("jbGit.openChanges");
+      await sleep(1500);
+      await vscode.commands.executeCommand("workbench.action.toggleMaximizedPanel");
+      // The "extensions are disabled" toast would sit on the commit buttons.
+      await vscode.commands.executeCommand("notifications.clearAll");`,
   },
   changes: {
     describe: "Local Changes with a staged, a modified and an untracked file",
@@ -185,15 +220,18 @@ await runTests({
 });
 `);
 
+// macOS has a display and its own grabber, so nothing needs to be installed
+// there; the window opens on the desktop and is photographed with screencapture.
+const isMac = process.platform === "darwin";
 const display = options.display;
-const xvfb = spawn("Xvfb", [display, "-screen", "0", "1600x1000x24", "-nolisten", "tcp"], { stdio: "ignore" });
-xvfb.on("error", () => {
+const xvfb = isMac ? undefined : spawn("Xvfb", [display, "-screen", "0", "1600x1000x24", "-nolisten", "tcp"], { stdio: "ignore" });
+xvfb?.on("error", () => {
   console.error("Xvfb is not installed. See the header of this file.");
   process.exit(1);
 });
 
 const log = [];
-const host = spawn(process.execPath, [join(harness, "run.mjs")], { env: { ...process.env, DISPLAY: display } });
+const host = spawn(process.execPath, [join(harness, "run.mjs")], { env: isMac ? process.env : { ...process.env, DISPLAY: display } });
 host.stdout.on("data", (chunk) => log.push(String(chunk)));
 host.stderr.on("data", (chunk) => log.push(String(chunk)));
 
@@ -211,18 +249,19 @@ const shown = await ready();
 if (!shown) {
   console.error("The surface never reported itself ready:\n" + log.join("").slice(-2000));
   host.kill();
-  xvfb.kill();
+  xvfb?.kill();
   process.exit(1);
 }
 await new Promise((resolve) => setTimeout(resolve, 2000));
 try {
-  execFileSync("import", ["-window", "root", output], { env: { ...process.env, DISPLAY: display } });
+  if (isMac) execFileSync("screencapture", ["-x", output]);
+  else execFileSync("import", ["-window", "root", output], { env: { ...process.env, DISPLAY: display } });
   console.log(`Wrote ${output}${existsSync(output) ? ` (${readFileSync(output).length} bytes)` : ""}`);
   console.log("Workspace:", workspace);
 } catch {
-  console.error("ImageMagick's `import` is not installed. See the header of this file.");
+  console.error(isMac ? "screencapture failed; grant Screen Recording permission to the terminal." : "ImageMagick's `import` is not installed. See the header of this file.");
   process.exitCode = 1;
 } finally {
   host.kill();
-  xvfb.kill();
+  xvfb?.kill();
 }
