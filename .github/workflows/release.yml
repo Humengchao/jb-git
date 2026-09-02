@@ -25,12 +25,13 @@ jobs:
       fail-fast: true
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [20, 22]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm run test:unit
@@ -122,12 +123,14 @@ jobs:
         run: npx vsce publish --packagePath jb-git-*.vsix
 
       - name: Publish to Open VSX
+        id: publish-ovsx
         if: steps.ovsx.outputs.present == 'true'
+        continue-on-error: true
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        # The namespace is created once by hand; publishing into an existing one
-        # must not fail the release, so a duplicate version is reported, not fatal.
-        run: npx ovsx publish jb-git-*.vsix -p "$OVSX_PAT" || echo "::warning::Open VSX publish failed; upload the VSIX manually at https://open-vsx.org"
+        # Keep the GitHub release usable if Open VSX rejects a duplicate or is
+        # unavailable, but preserve the actual outcome for the summary below.
+        run: npx ovsx publish jb-git-*.vsix -p "$OVSX_PAT"
 
       - name: Create the GitHub release
         env:
@@ -140,11 +143,14 @@ jobs:
           VERSION: ${{ steps.bump.outputs.version }}
           PUBLISHED: ${{ steps.token.outputs.present }}
           OPEN_VSX: ${{ steps.ovsx.outputs.present }}
+          OPEN_VSX_OUTCOME: ${{ steps.publish-ovsx.outcome }}
         run: |
           {
             echo "## JB Git $VERSION"
-            if [ "$OPEN_VSX" = "true" ]; then
+            if [ "$OPEN_VSX_OUTCOME" = "success" ]; then
               echo "Published to Open VSX (Cursor, Windsurf, VSCodium)."
+            elif [ "$OPEN_VSX" = "true" ]; then
+              echo "**Open VSX publish failed**: upload the VSIX manually at https://open-vsx.org."
             else
               echo "**Not on Open VSX**: \`OVSX_PAT\` is not configured."
             fi

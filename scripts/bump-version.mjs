@@ -16,8 +16,11 @@ if (!["patch", "minor", "major"].includes(release)) {
   process.exit(1);
 }
 
-const read = (name) => readFileSync(join(root, name), "utf8");
-const write = (name, content) => writeFileSync(join(root, name), content);
+const pendingWrites = new Map();
+const read = (name) => pendingWrites.get(name) ?? readFileSync(join(root, name), "utf8");
+// Stage every edit in memory.  A malformed changelog or lockfile must not
+// leave half of a release bump applied to the checkout.
+const write = (name, content) => pendingWrites.set(name, content);
 
 const manifest = JSON.parse(read("package.json"));
 const current = manifest.version;
@@ -111,6 +114,8 @@ for (const name of docs) {
   const updated = content.replaceAll(`jb-git-${current}.vsix`, `jb-git-${next}.vsix`);
   if (updated !== content) write(name, updated);
 }
+
+for (const [name, content] of pendingWrites) writeFileSync(join(root, name), content);
 
 console.log(next);
 if (process.env.GITHUB_OUTPUT) {
