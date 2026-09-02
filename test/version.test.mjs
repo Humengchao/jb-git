@@ -144,3 +144,16 @@ test("keeps the Node type surface within the oldest supported extension runtime"
   const nodeTypes = manifest.devDependencies["@types/node"];
   assert.match(nodeTypes, /(?:\^|~)?20\./, "VS Code 1.95 ships a Node 20 extension host");
 });
+
+test("the unit runner lists its files itself instead of trusting the shell to expand a glob", () => {
+  // PowerShell does not expand `test/*.test.mjs`, and Node 20's test runner
+  // does not either, which is how the Windows/Node 20 CI job failed while
+  // every bash-based job passed.
+  const manifest = JSON.parse(readText("../package.json"));
+  assert.equal(manifest.scripts["test:unit"], "npm run compile && node scripts/run-unit-tests.mjs");
+  assert.doesNotMatch(JSON.stringify(manifest.scripts), /--test test\/\*/);
+  const runner = readText("../scripts/run-unit-tests.mjs");
+  assert.match(runner, /name\.endsWith\("\.test\.mjs"\)/, "only unit test files run; the extension-host suite lives beside them");
+  assert.match(runner, /spawnSync\(process\.execPath, \["--test", \.\.\.files/);
+  assert.match(runner, /process\.exit\(result\.status \?\? 1\)/);
+});
