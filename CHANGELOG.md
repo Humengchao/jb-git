@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.26
+
+- fix: compare ignore-file paths by file identity so the test passes on Windows
+- fix: run the unit suite from an explicit file list so Windows and Node 20 can run it
+- docs: describe the new IDEA workflows, their boundaries and the macOS screenshot tool
+- chore: let scripts/screenshot.mjs run on macOS and add a History for Selection scenario
+- feat: Undo/Edit/Fixup Commit, Accept Yours/Theirs, Ignore, History for Selection, Rebase dialog, Hide Revision, branch popup groups
+- chore: keep the release bump atomic, report the real Open VSX outcome, test Node 20 and 22
+
 ## 0.1.25
 
 - feat: Drop Commit and Squash Selected, IDEA's history editing in the log
