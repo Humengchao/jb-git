@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.27
+
+- fix: stop claiming a paused history rewrite succeeded, and refuse a comment-only commit message
+
 ## 0.1.26
 
 - fix: compare ignore-file paths by file identity so the test passes on Windows
