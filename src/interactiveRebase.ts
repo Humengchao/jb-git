@@ -37,6 +37,16 @@ export interface RebaseStep {
   readonly message?: string;
 }
 
+/** Immutable repository state captured when a user reviewed a rebase plan. */
+export interface InteractiveRebaseExpectation {
+  /** The exact HEAD object id that the reviewed plan was built from. */
+  readonly head: string;
+  /** The checked-out local branch, or null for detached HEAD. Omit when the snapshot was unavailable. */
+  readonly branch?: string | null;
+  /** Candidate commits in the reviewed todo order (oldest first). */
+  readonly commits: readonly string[];
+}
+
 /** A message file an `exec` line reads, named relative to the scratch directory. */
 export interface RebaseMessageFile {
   readonly name: string;

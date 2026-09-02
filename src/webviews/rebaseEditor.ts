@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { RepositoryManager } from "../repositoryManager";
-import { REBASE_ACTIONS, validateRebasePlan, isNoOpPlan, type RebaseStep } from "../interactiveRebase";
+import { REBASE_ACTIONS, validateRebasePlan, isNoOpPlan, type InteractiveRebaseExpectation, type RebaseStep } from "../interactiveRebase";
 import { isRebaseEditorMessage, originalMessage, planCoversSameCommits } from "./rebaseEditorProtocol";
 import { webviewDocument } from "./html";
 
@@ -28,7 +28,7 @@ export async function openRebaseEditor(
   manager: RepositoryManager,
   rootPath: string,
   base: string,
-  runRebase: (steps: readonly RebaseStep[]) => Promise<void>,
+  runRebase: (steps: readonly RebaseStep[], expectation: InteractiveRebaseExpectation) => Promise<void>,
 ): Promise<boolean> {
   const candidates = await manager.interactiveRebaseCandidates(rootPath, base);
   if (candidates.length === 0) {
@@ -45,6 +45,14 @@ export async function openRebaseEditor(
   }));
   const offered = commits.map((commit) => commit.oid);
   const subjects = new Map(commits.map((commit) => [commit.oid, commit.subject]));
+  const status = manager.snapshot(rootPath)?.status;
+  const expectation: InteractiveRebaseExpectation = {
+    // HEAD itself, not the newest candidate: onto a diverged branch, a HEAD
+    // whose patch is already upstream is left out of the plan.
+    head: status?.branch.oid ?? offered[offered.length - 1],
+    branch: status?.branch.head,
+    commits: offered,
+  };
 
   const panel = vscode.window.createWebviewPanel(
     "jbGit.rebaseEditor",
@@ -56,9 +64,16 @@ export async function openRebaseEditor(
   try {
     return await new Promise<boolean>((resolve, reject) => {
       let settled = false;
+      // `panel.dispose()` is part of the normal Start path.  Mark the plan as
+      // accepted before disposing so the close event cannot race in and turn a
+      // running rebase into a false (cancelled) result.
+      let accepted = false;
+      let running = false;
+      let messageRegistration: vscode.Disposable | undefined;
       const finish = (result: boolean | Error): void => {
         if (settled) return;
         settled = true;
+        messageRegistration?.dispose();
         if (result instanceof Error) reject(result);
         else resolve(result);
       };
@@ -66,10 +81,13 @@ export async function openRebaseEditor(
       const disposeRegistration = panel.onDidDispose(() => {
         disposeRegistration.dispose();
         // Closing the panel is a cancel, not a failure.
-        finish(false);
+        if (!accepted && !running) finish(false);
       });
 
-      panel.webview.onDidReceiveMessage(async (message: unknown) => {
+      messageRegistration = panel.webview.onDidReceiveMessage(async (message: unknown) => {
+        // A Webview can have a queued message when the panel is being closed;
+        // once a plan is accepted, no second Start/Cancel may alter its result.
+        if (settled || accepted || running) return;
         if (!isRebaseEditorMessage(message)) return;
         if (message.type === "ready") {
           await panel.webview.postMessage({ type: "load", commits, actions: REBASE_ACTIONS });
@@ -101,11 +119,13 @@ export async function openRebaseEditor(
           return;
         }
 
+        accepted = true;
+        running = true;
         // The panel closes before the rebase starts: it must not look editable
         // while Git rewrites the commits it was showing.
         panel.dispose();
         try {
-          await runRebase(steps);
+          await runRebase(steps, expectation);
           finish(true);
         } catch (error) {
           finish(error instanceof Error ? error : new Error(String(error)));

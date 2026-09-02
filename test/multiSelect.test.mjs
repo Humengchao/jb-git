@@ -52,10 +52,12 @@ test("the host reorders, confirms, and reports how far a stopped batch got", () 
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
   const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
   // The order the Webview sent is never trusted; the host's own log decides.
-  assert.match(host, /oldestFirst\(message\.hashes\.filter\(\(hash\) => isFullObjectId\(hash\)\), this\.currentCommits\.map\(\(commit\) => commit\.hash\)\)/);
-  // Comparing reads oldest → newest, and cherry-picking applies sequentially so
-  // a conflict stops the batch instead of stacking picks on a dirty tree.
+  assert.match(host, /const requestedHashes = \[\.\.\.new Set\(message\.hashes\)\];/);
+  assert.match(host, /oldestFirst\(requestedHashes, this\.currentCommits\.map\(\(commit\) => commit\.hash\)\)/);
+  assert.match(host, /if \(hashes\.length !== requestedHashes\.length\) return;/);
+  // Comparing reads oldest → newest, and the host uses one cancellable,
+  // serialized batch operation so a conflict stops without N refreshes.
   assert.match(host, /if \(hashes\.length !== 2\) return;\s*\n\s*\/\/[^\n]*\n\s*const diff = await snapshot\.repository\.diffRefs\(hashes\[0\], hashes\[1\]\);/);
-  assert.match(host, /await this\.manager\.cherryPick\(root, hash\);\s*\n\s*applied \+= 1;/);
-  assert.match(host, /hashes\[applied\]\.slice\(0, 8\), applied, hashes\.length, formatError\(error\)/);
+  assert.match(host, /await this\.manager\.cherryPickMany\(root, hashes, controller\.signal, /);
+  assert.match(host, /batch\?\.currentHash\.slice\(0, 8\)/);
 });

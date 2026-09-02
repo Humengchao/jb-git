@@ -115,39 +115,74 @@ test("guards the interactive rebase command and keeps a paused rebase recoverabl
   const next = extension.indexOf("vscode.commands.registerCommand(", start + 1);
   const command = extension.slice(start, next > start ? next : undefined);
   assert.match(command.slice(0, 400), /requireTrustedWorkspace\(\)/);
-  // A rebase that stopped mid-plan must be explained as recoverable rather than
-  // reported as a plain command failure.
-  assert.match(command, /operation\.kind === "rebase"/);
-  assert.match(command, /Continue, or Abort/);
   // Root commits have no parent, so "from here" cannot offer them.
   assert.match(command, /commit\.parents\.length > 0/);
+  // The plan starts one commit earlier so the chosen commit is itself editable;
+  // the workflow around the editor is the shared one the Rebase dialog uses too.
+  assert.match(command, /await runInteractiveRebase\(manager, root, `\$\{from\}\^`, from\.slice\(0, 8\)\)/);
+
+  const flow = source("src/interactiveRebaseFlow.ts");
+  // A rebase that stopped mid-plan must be explained as recoverable rather than
+  // reported as a plain command failure.
+  assert.match(flow, /operation\.kind === "rebase"/);
+  assert.match(flow, /Continue, or Abort/);
   // IDEA offers to park local changes; Git's own autostash is deliberately not
   // used, because it would restore into a rebase that stopped on a conflict.
-  assert.match(command, /"Stash and Rebase"/);
-  assert.match(command, /modal: true/);
-  assert.match(command, /stashLocalChanges\(manager, root, .*\{ includeUntracked: false \}\)/);
+  assert.match(flow, /"Stash and Rebase"/);
+  assert.match(flow, /modal: true/);
+  assert.match(flow, /stashLocalChanges\(manager, root, .*\{ includeUntracked: false \}, lease\)/);
   // Nothing may be stashed until the user actually starts the rebase.
   assert.ok(
-    command.indexOf("openRebaseEditor(") < command.indexOf("stashLocalChanges("),
+    flow.indexOf("openRebaseEditor(") < flow.indexOf("stashLocalChanges("),
     "the stash has to happen inside the run callback, not before the sequence editor opens",
   );
   // A rebase that stopped mid-plan owns the working tree, so the parked changes
   // stay in the stash rather than being restored on top of a live conflict.
-  assert.match(command, /Apply it from Manage Stashes once the rebase is finished or aborted\./);
-  assert.match(command, /restoreTemporaryStash\(manager, root, parked\)/);
+  assert.match(flow, /Apply it from Manage Stashes once the rebase is finished or aborted\./);
+  assert.match(flow, /restoreTemporaryStash\(manager, root, parked, lease\)/);
+  assert.match(flow, /openRebaseEditor\(manager, root, base, async \(steps, expectation\)/);
+  assert.match(flow, /manager\.interactiveRebase\(root, base, steps, expectation, lease\)/);
   // An edit row parks the sequencer with exit code 0, so the success path has
   // to read the operation state: "finished" would be a lie, and restoring the
   // parked stash would drop it onto the commit being amended.
-  assert.match(command, /operation\.kind === "rebase"\) \{\s*\n\s*stoppedForEdit = true;/);
-  assert.ok(
-    command.indexOf('stoppedForEdit = true') < command.indexOf("restoreTemporaryStash("),
-    "the edit stop must be detected before the stash restore",
-  );
-  assert.match(command, /Stopped at the commit marked 'edit'/);
+  assert.match(flow, /if \(manager\.snapshot\(root\)\?\.operation\.kind === "rebase"\) \{\s*\n\s*stoppedForEdit = true;/);
+  assert.match(flow, /Stopped at the commit marked 'edit'/);
+  // Only modal questions may be awaited inside the flow; a toast awaited there
+  // would pin the progress notification open.
+  for (const [, args] of flow.matchAll(/await vscode\.window\.showWarningMessage\(([\s\S]{0,400}?)\);/g)) {
+    assert.match(args, /modal: true|Continue, or Abort/, `awaited warning must be modal or the final report: ${args.slice(0, 60)}`);
+  }
 
   const manifest = JSON.parse(source("package.json"));
   const declared = manifest.contributes.commands.filter((entry) => entry.command === "jbGit.interactiveRebase");
   assert.equal(declared.length, 1, "the command must appear once in the manifest");
+});
+
+test("the Rebase dialog's Interactive option plans onto the branch itself and stands alone", () => {
+  const extension = source("src/extension.ts");
+  const rebase = extension.slice(extension.indexOf('registerCommand("jbGit.rebase"'), extension.indexOf('registerCommand("jbGit.resolveSimpleConflicts"'));
+  assert.match(rebase, /description: "--interactive"/);
+  assert.match(rebase, /await runInteractiveRebase\(manager, root, branch\?\.fullName \?\? ref, ref\)/);
+  // The editor plans exactly what Git would replay, so --onto/--rebase-merges do not combine with it.
+  assert.match(rebase, /if \(picked\.length > 1\) return void vscode\.window\.showWarningMessage/);
+  // The editor's expectation names HEAD itself: onto a diverged branch the
+  // newest candidate can be missing when its patch is already upstream.
+  const editor = source("src/webviews/rebaseEditor.ts");
+  assert.match(editor, /head: status\?\.branch\.oid \?\? offered\[offered\.length - 1\]/);
+  // Candidates and the verifier walk the same range Git's own rebase does.
+  const repository = source("src/git/repository.ts");
+  assert.match(repository, /REBASE_RANGE_FLAGS = \["--right-only", "--cherry-pick"\] as const/);
+  assert.match(repository, /const current = \(await this\.rebaseRange\(revision, Math\.max\(1, expectation\.commits\.length \+ 1\)\)\)\.reverse\(\);/);
+});
+
+test("does not let closing the panel cancel an accepted rebase", () => {
+  const editor = source("src/webviews/rebaseEditor.ts");
+  const accepted = editor.indexOf("accepted = true;");
+  const disposed = editor.indexOf("panel.dispose();", accepted);
+  assert.ok(accepted >= 0 && disposed > accepted, "Start must mark the plan accepted before disposing the panel");
+  assert.match(editor, /if \(!accepted && !running\) finish\(false\)/);
+  assert.match(editor, /messageRegistration = panel\.webview\.onDidReceiveMessage/);
+  assert.match(editor, /await runRebase\(steps, expectation\);\s*\n\s*finish\(true\)/);
 });
 
 test("reorders by drag handle and Alt+arrows, and speaks the user's language", () => {

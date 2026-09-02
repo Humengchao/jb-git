@@ -1,9 +1,10 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { ChangelistStore } from "../changelists/store";
-import { GitBranch, GitChange, GitCommit, GitCommitFile, GitDiffHunk, GitLogOptions } from "../git/types";
+import { GitBranch, GitChange, GitCommit, GitCommitFile, GitDiffHunk, GitLineRange, GitLogOptions, GitResetMode } from "../git/types";
 import { GitTraceEvent, isGitAbort } from "../git/runner";
-import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
+import { GitBatchError } from "../git/repository";
+import { RepositoryManager, type RepositoryMutationLease, type RepositorySnapshot } from "../repositoryManager";
 import { ShelfEntry, ShelfStore } from "../shelves/store";
 import { ChangeNode } from "../views/nodes";
 import { DiffContentProvider, diffSide, isBinaryContent } from "../views/diffProvider";
@@ -11,14 +12,17 @@ import { BranchComparisonWorkspace } from "./branchComparison";
 import { webviewDocument } from "./html";
 import { validateGitRefName, validatePathInput } from "../inputValidation";
 import { moveUntrackedToTrash } from "../discardSafety";
+import { ignorePatternsFor } from "../ignoreRules";
+import { conflictSideLabels } from "./mergeEditor";
 import { previewAndPush } from "../pushPreview";
 import { checkoutWithLocalChanges } from "../smartCheckout";
+import { rebaseWithLocalChanges } from "../smartRebase";
 import { hunkKeys, partitionHunks } from "../changelists/hunkOwnership";
 import { readFileSync } from "node:fs";
 import { isLogMessage, isToolTab, LogMessage, oldestFirst, ToolTab } from "./logPanelProtocol";
 import { originalMessage } from "./rebaseEditorProtocol";
-import { dropPlan, squashPlan } from "../logHistoryEdit";
-import { RebaseStep } from "../interactiveRebase";
+import { dropPlan, fixupPlan, rewordPlan, squashPlan } from "../logHistoryEdit";
+import { type InteractiveRebaseExpectation, type RebaseStep, validateRebasePlan } from "../interactiveRebase";
 import { restoreTemporaryStash, stashLocalChanges } from "../temporaryStash";
 
 interface LogSelection {
@@ -54,6 +58,11 @@ const ALLOWED_COMMANDS = new Set([
   "jbGit.skipOperation",
 ]);
 
+// Read-only lookups can overlap; their root/request generations below discard
+// stale replies. Keeping them out of the mutation queue makes keyboard
+// navigation responsive even when one commit has a very large file list.
+const CONCURRENT_LOOKUP_MESSAGES = new Set(["selectCommit", "requestHeadMessage"]);
+
 export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = "jbGit.toolWindow";
 
@@ -62,6 +71,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private selectedRef?: string;
   private selectedHash?: string;
   private filePath?: string;
+  /** True when `filePath` names one exact file (File History), which is followed through renames; false for the typed suffix filter. */
+  private filePathExact = false;
+  /** IDEA's History for Selection: restricts the walk to the commits that touched these lines of `filePath`. */
+  private lineRange?: GitLineRange;
   private logOptions: GitLogOptions = { order: "date", firstParent: false, noMerges: false };
   /** Whole-history message search, IDEA's log search field. Applied by Git, not by filtering the loaded window. */
   private logSearch?: string;
@@ -72,17 +85,32 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private readonly selectedPaths = new Map<string, Set<string>>();
   private readonly knownPaths = new Map<string, Set<string>>();
   private updateVersion = 0;
+  private selectionRequestVersion = 0;
+  private hunkRequestVersion = 0;
+  private headMessageRequestVersion = 0;
   private logLimit = 300;
   private updateTimer?: NodeJS.Timeout;
-  private logCache?: { fingerprint: string; commits: GitCommit[] };
+  private logCache?: { root: string; fingerprint: string; limit: number; commits: GitCommit[]; exhausted: boolean };
   private selectionCache?: { key: string; files: LogSelection["files"] };
   private lastSentBranchesKey?: string;
   private lastSentTracesKey?: string;
-  private lastSentLogKey?: string;
+  private lastSentLogDataKey?: string;
+  private lastSentSelectionKey?: string;
   private readonly branchComparisons: BranchComparisonWorkspace;
   private readonly hunkCache = new Map<string, { staged: GitDiffHunk[]; unstaged: GitDiffHunk[] }>();
+  private readonly commitFilesCache = new Map<string, GitCommitFile[]>();
+  private readonly commitMessageCache = new Map<string, string>();
+  /** IDEA's Author completions, per repository, valid while HEAD stands still. */
+  private readonly authorsCache = new Map<string, { head: string | null; authors: string[] }>();
+  /** The repository's `commit.template`, re-read at most every so often: it is configuration, not state. */
+  private readonly templateCache = new Map<string, { readAt: number; template?: string }>();
   private readonly disposables: vscode.Disposable[] = [];
   private didRequestNestedDiscovery = false;
+  private currentCommitsRoot?: string;
+  private messageQueue: Promise<void> = Promise.resolve();
+  private logRequestController?: AbortController;
+  private selectionController?: AbortController;
+  private viewGeneration = 0;
 
   public constructor(
     private readonly manager: RepositoryManager,
@@ -101,25 +129,50 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     this.branchComparisons = new BranchComparisonWorkspace(diffProvider);
     this.disposables.push(
       this.branchComparisons,
-      manager.onDidChange(() => { this.hunkCache.clear(); this.scheduleUpdate(); }),
+      manager.onDidChange(() => {
+        this.hunkCache.clear(); this.commitFilesCache.clear(); this.commitMessageCache.clear();
+        // A mutation can finish while a detail lookup is still in flight; its
+        // response must not repopulate a view that was just invalidated.
+        this.invalidateRequests();
+        this.scheduleUpdate();
+      }),
       changelists.onDidChange(() => this.scheduleUpdate()),
       shelves.onDidChange(() => this.scheduleUpdate()),
     );
   }
 
   public resolveWebviewView(view: vscode.WebviewView): void {
+    // A previous panel may still have lookups in flight. Invalidate them before
+    // attaching the new view so an old response cannot accidentally match a
+    // freshly reset request id.
+    this.invalidateRequests(true);
     this.view = view;
+    const generation = ++this.viewGeneration;
     view.webview.options = { enableScripts: true };
     view.webview.html = webviewDocument("Git", logStyles, `${issueNavigationScript()}${logScript}`);
     const registrations: vscode.Disposable[] = [
       view.webview.onDidReceiveMessage((message: unknown) => {
-        if (isLogMessage(message)) void this.handleMessage(message);
+        if (!isLogMessage(message)) return;
+        if (generation !== this.viewGeneration || this.view !== view) return;
+        if (CONCURRENT_LOOKUP_MESSAGES.has(message.type)) {
+          void this.handleMessage(message);
+          return;
+        }
+        // Keep host-side requests in arrival order.  This is especially
+        // important while a commit detail or hunk request is reading Git.
+        this.messageQueue = this.messageQueue
+          .then(() => generation === this.viewGeneration && this.view === view ? this.handleMessage(message) : undefined)
+          .catch(() => undefined);
       }),
       view.onDidChangeVisibility(() => { if (view.visible) this.scheduleUpdate(0); }),
     ];
     registrations.push(view.onDidDispose(() => {
       for (const registration of registrations.splice(0)) registration.dispose();
-      if (this.view === view) this.view = undefined;
+      if (this.view === view) {
+        this.view = undefined;
+        this.viewGeneration += 1;
+        this.invalidateRequests(true);
+      }
     }));
     this.scheduleUpdate(0);
     if (!this.didRequestNestedDiscovery) {
@@ -130,18 +183,24 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     }
   }
 
-  public async open(root?: string, filePath?: string, tab: ToolTab = "log"): Promise<void> {
+  public async open(root?: string, filePath?: string, tab: ToolTab = "log", lineRange?: GitLineRange): Promise<void> {
+    const rootChanged = Boolean(root && root !== this.selectedRoot);
     if (root && this.manager.snapshot(root)) {
-      if (root !== this.selectedRoot) {
+      if (rootChanged) {
         this.logOptions = { ...this.logOptions, author: undefined, since: undefined };
         this.logSearch = undefined;
         this.logLimit = 300;
       }
       this.selectedRoot = root;
     }
+    this.invalidateRequests(rootChanged, true);
     this.requestedTab = tab;
     this.pendingOpenTab = this.view ? undefined : tab;
+    // A path handed in by a command is a real file, so it is read literally
+    // and followed through renames; only the typed filter is a suffix search.
     this.filePath = filePath;
+    this.filePathExact = Boolean(filePath);
+    this.lineRange = filePath && lineRange ? { ...lineRange, path: filePath } : undefined;
     this.selectedRef = undefined;
     this.selectedHash = undefined;
     await vscode.commands.executeCommand(`${IntelliJGitToolWindowProvider.viewType}.focus`);
@@ -163,17 +222,20 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
    */
   public async revealCommit(root: string, hash: string): Promise<boolean> {
     if (!this.manager.snapshot(root)) return false;
-    if (root !== this.selectedRoot) {
+    const rootChanged = root !== this.selectedRoot;
+    if (rootChanged) {
       this.logOptions = { ...this.logOptions, author: undefined, since: undefined };
       this.logLimit = 300;
-      this.logCache = undefined;
     }
     // An active message search could exclude exactly the commit being revealed.
     this.logSearch = undefined;
     this.selectedRoot = root;
+    this.invalidateRequests(rootChanged, true);
     this.requestedTab = "log";
     this.pendingOpenTab = this.view ? undefined : "log";
     this.filePath = undefined;
+    this.filePathExact = false;
+    this.lineRange = undefined;
     this.selectedRef = undefined;
     this.selectedHash = hash;
     await vscode.commands.executeCommand(`${IntelliJGitToolWindowProvider.viewType}.focus`);
@@ -201,6 +263,25 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       this.updateTimer = undefined;
       void this.update();
     }, delay);
+  }
+
+  /** Invalidates asynchronous replies that belong to an older view selection. */
+  private invalidateRequests(rootChanged = false, historyChanged = false): void {
+    this.selectionRequestVersion += 1;
+    this.hunkRequestVersion += 1;
+    this.headMessageRequestVersion += 1;
+    this.selectionCache = undefined;
+    this.logRequestController?.abort();
+    this.selectionController?.abort();
+    // update() checks this generation after every Git await.
+    this.updateVersion += 1;
+    if (rootChanged || historyChanged) {
+      this.currentCommits = [];
+      this.currentCommitsRoot = undefined;
+      this.logCache = undefined;
+      this.lastSentLogDataKey = undefined;
+      this.lastSentSelectionKey = undefined;
+    }
   }
 
   private currentSnapshot() {
@@ -285,6 +366,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     const webview = view?.webview;
     if (!webview || !view.visible) return;
     const version = ++this.updateVersion;
+    this.logRequestController?.abort();
     const snapshot = this.currentSnapshot();
     const repositories = this.manager.all.map((item) => ({
       root: item.repository.info.rootPath,
@@ -292,7 +374,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       branch: item.status?.branch.head ?? "detached HEAD",
     }));
     if (!snapshot) {
-      await webview.postMessage({ type: "state", state: { empty: true, repositories } });
+      await webview.postMessage({ type: "state", state: { empty: true, repositories, stateVersion: version } });
       return;
     }
     try {
@@ -314,24 +396,70 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       const refsKey = this.refsFingerprint(snapshot);
       let selection: LogSelection | undefined;
       let logState: Record<string, unknown> = {};
-      let logKey: string | undefined;
+      let logDataKey: string | undefined;
+      let selectionKey: string | undefined;
       if (this.requestedTab === "log") {
         // Everything `git log` depends on is part of this fingerprint, so a
         // working-tree-only refresh (stage/unstage/save) reuses the cache.
-        const readOptions = { ...this.logOptions, ...(this.logSearch ? { grep: this.logSearch } : {}) };
+        // The list only needs subjects and metadata. Full commit messages are
+        // fetched for the selected row, preventing a 5,000-commit log from
+        // copying every body through Git, parsing, and Webview IPC.
+        const readOptions: Partial<GitLogOptions> = {
+          ...this.logOptions,
+          includeBody: false,
+          ...(this.logSearch ? { grep: this.logSearch } : {}),
+          ...(this.filePath && this.filePathExact ? { exactPath: true, follow: true } : {}),
+          ...(this.lineRange ? { lineRange: this.lineRange } : {}),
+        };
         const fingerprint = JSON.stringify([
           refsKey, snapshot.status?.branch.oid ?? null,
-          this.selectedRef ?? null, this.logLimit, this.filePath ?? null, readOptions,
+          this.selectedRef ?? null, this.filePath ?? null, readOptions,
         ]);
         let commits: GitCommit[];
-        if (this.logCache?.fingerprint === fingerprint) {
-          commits = this.logCache.commits;
+        const cache = this.logCache;
+        const cacheMatches = cache?.fingerprint === fingerprint && cache.root === root && this.currentCommitsRoot === root;
+        if (!cacheMatches && this.currentCommitsRoot === root) {
+          // Do not let a context-menu action use the previous ref/history while
+          // a fresh walk is still in flight.
+          this.currentCommits = [];
+          this.currentCommitsRoot = undefined;
+        }
+        if (cacheMatches) {
+          if (cache.limit >= this.logLimit || cache.exhausted) {
+            commits = cache.commits.slice(0, this.logLimit);
+          } else {
+            // Grow the existing walk with --skip instead of asking Git to
+            // serialize and parse every older record again.
+            const additional = this.logLimit - cache.limit;
+            const controller = new AbortController();
+            this.logRequestController = controller;
+            let page: GitCommit[];
+            try {
+              page = this.selectedRef
+                ? await this.manager.logRefPage(root, this.selectedRef, additional, cache.limit, this.filePath, readOptions, controller.signal)
+                : await this.manager.logPage(root, additional, cache.limit, this.filePath, readOptions, controller.signal);
+            } finally {
+              if (this.logRequestController === controller) this.logRequestController = undefined;
+            }
+            if (version !== this.updateVersion) return;
+            cache.commits = [...cache.commits, ...page];
+            cache.limit = cache.commits.length;
+            cache.exhausted = page.length < additional;
+            commits = cache.commits.slice(0, this.logLimit);
+          }
         } else {
-          commits = this.selectedRef
-            ? await repository.logRef(this.selectedRef, this.logLimit, this.filePath, readOptions)
-            : await repository.log(this.logLimit, this.filePath, readOptions);
+          const controller = new AbortController();
+          this.logRequestController = controller;
+          try {
+            commits = this.selectedRef
+              ? await repository.logRef(this.selectedRef, this.logLimit, this.filePath, readOptions, controller.signal)
+              : await repository.log(this.logLimit, this.filePath, readOptions, controller.signal);
+          } finally {
+            if (this.logRequestController === controller) this.logRequestController = undefined;
+          }
           if (version !== this.updateVersion) return;
-          this.logCache = { fingerprint, commits };
+          this.logCache = { root, fingerprint, limit: commits.length, commits, exhausted: commits.length < this.logLimit };
+          this.currentCommitsRoot = root;
         }
         this.currentCommits = commits;
         if (!this.selectedHash || !commits.some((commit) => commit.hash === this.selectedHash)) {
@@ -340,45 +468,63 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const commit = commits.find((item) => item.hash === this.selectedHash);
         if (commit) {
           const selectionKey = `${fingerprint}\0${commit.hash}`;
+          const selectionVersion = this.selectionRequestVersion;
           if (this.selectionCache?.key !== selectionKey) {
-            const files = await this.manager.commitFiles(root, commit.hash);
-            if (version !== this.updateVersion) return;
+            const controller = new AbortController();
+            this.selectionController?.abort();
+            this.selectionController = controller;
+            let files: GitCommitFile[];
+            let message: string;
+            try {
+              ({ files, message } = await this.readCommitSelection(root, commit.hash, controller.signal));
+            } finally {
+              if (this.selectionController === controller) this.selectionController = undefined;
+            }
+            if (version !== this.updateVersion || selectionVersion !== this.selectionRequestVersion
+              || this.selectedRoot !== root || this.selectedHash !== commit.hash) return;
             this.selectionCache = { key: selectionKey, files };
+            selection = { commit: { ...commit, body: message }, files };
           }
-          selection = { commit, files: this.selectionCache.files };
+          if (!selection) {
+            const controller = new AbortController();
+            this.selectionController?.abort();
+            this.selectionController = controller;
+            let messageText: string;
+            try {
+              try {
+                messageText = await this.readCommitMessage(root, commit.hash, controller.signal);
+              } catch (error) {
+                if (isGitAbort(error)) throw error;
+                messageText = "";
+              }
+            } finally {
+              if (this.selectionController === controller) this.selectionController = undefined;
+            }
+            if (version !== this.updateVersion || selectionVersion !== this.selectionRequestVersion
+              || this.selectedRoot !== root || this.selectedHash !== commit.hash) return;
+            selection = { commit: { ...commit, body: messageText }, files: this.selectionCache.files };
+          }
         }
-        logKey = `${fingerprint}\0${this.selectedHash ?? ""}`;
-        if (this.lastSentLogKey !== logKey) {
-          logState = { commits, selection: selection ?? null, logLimit: this.logLimit, hasMoreCommits: this.logLimit < 5_000 && commits.length >= this.logLimit, logSearch: this.logSearch ?? "" };
+        logDataKey = `${fingerprint}\0${commits.length}\0${commits[0]?.hash ?? ""}\0${commits[commits.length - 1]?.hash ?? ""}`;
+        selectionKey = `${fingerprint}\0${this.selectedHash ?? ""}`;
+        if (this.lastSentLogDataKey !== logDataKey) {
+          logState = {
+            ...logState,
+            commits,
+            logLimit: this.logLimit,
+            hasMoreCommits: this.logLimit < 5_000 && !this.logCache?.exhausted && commits.length >= this.logLimit,
+            logSearch: this.logSearch ?? "",
+          };
         }
+        if (this.lastSentSelectionKey !== selectionKey) logState = { ...logState, selection: selection ?? null };
+        // Keep these keys separate: changing only the selected row should not
+        // resend thousands of unchanged commit records over the Webview IPC.
       }
-      const lists = this.changelists.lists(root).map((list) => ({
-        id: list.id,
-        name: list.name,
-        description: list.description,
-        active: list.id === this.changelists.activeId(root),
-        changes: changes
-          // A file whose hunks were split appears under every list that owns
-          // part of it. Listing it only under its home list left the claiming
-          // list looking empty while its commit would have taken those hunks.
-          .filter((change) => {
-            const home = this.changelists.listForFile(root, change.path).id;
-            return home === list.id || this.changelists.claims(root, change.path).has(list.id);
-          })
-          .map((change) => ({
-            path: change.path,
-            partial: this.changelists.claims(root, change.path).size > 0,
-            directory: path.dirname(change.path) === "." ? "" : path.dirname(change.path),
-            fileName: path.basename(change.path),
-            originalPath: change.originalPath,
-            kind: change.kind,
-            staged: change.staged,
-            unstaged: change.unstaged,
-            conflicted: change.conflicted,
-            checked: selected.has(change.path),
-            status: statusLabel(change),
-          })),
-      }));
+      // The Log tab does not render local-change ownership; defer this
+      // potentially large model until the Local Changes tab is active.
+      const lists = this.requestedTab === "changes" ? this.buildChangeLists(root, changes, selected) : undefined;
+      const commitForm = this.requestedTab === "changes" ? await this.commitFormExtras(root, snapshot) : undefined;
+      if (version !== this.updateVersion) return;
       // Omitted fields keep their previous value in the webview, which merges
       // incoming state; large arrays are resent only when their identity moved.
       const tracesKey = this.tracesFingerprint();
@@ -387,12 +533,14 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       await webview.postMessage({
         type: "state",
         state: {
+          stateVersion: version,
           repositories,
           empty: false,
           selectedRoot: repository.info.rootPath,
           branch: snapshot.status?.branch.head ?? "detached HEAD",
           selectedRef: this.selectedRef ?? null,
           filePath: this.filePath ?? null,
+          lineRange: this.lineRange ? { start: this.lineRange.start, end: this.lineRange.end } : null,
           logOptions: this.logOptions,
           issueRules: vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []),
           ...(this.lastSentBranchesKey === refsKey ? {} : { branches: snapshot.branches }),
@@ -400,7 +548,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           operation: snapshot.operation,
           error: snapshot.error ?? null,
           ...(includeTraces ? { traces: this.traces } : {}),
-          lists,
+          ...(lists ? { lists } : {}),
+          ...(commitForm ?? {}),
           totalChanges: changes.length,
           stagedCount: changes.filter((change) => change.staged).length,
           selectedCount: selected.size,
@@ -416,15 +565,24 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       });
       this.lastSentBranchesKey = refsKey;
       if (includeTraces) this.lastSentTracesKey = tracesKey;
-      if (logKey !== undefined) this.lastSentLogKey = logKey;
+      if (logDataKey !== undefined) this.lastSentLogDataKey = logDataKey;
+      if (selectionKey !== undefined) this.lastSentSelectionKey = selectionKey;
     } catch (error) {
+      if (isGitAbort(error)) return;
       if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
     }
   }
 
   private async handleMessage(message: LogMessage): Promise<void> {
     try {
+      // Every Webview request carries the repository it was rendered for. A
+      // delayed click from a previous repository must never be interpreted in
+      // the newly selected one. Repository selection itself is the exception,
+      // because its root is the destination rather than the current state.
+      if (message.type !== "ready" && message.type !== "selectRepository"
+        && message.root !== undefined && message.root !== this.selectedRoot) return;
       if (message.type === "ready") {
+        this.invalidateRequests(false, true);
         this.logOptions = normalizeLogOptions(message.logOptions);
         if (this.pendingOpenTab) {
           this.requestedTab = this.pendingOpenTab;
@@ -433,7 +591,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         // A reloaded webview starts empty, so nothing counts as already sent.
         this.lastSentBranchesKey = undefined;
         this.lastSentTracesKey = undefined;
-        this.lastSentLogKey = undefined;
+        this.lastSentLogDataKey = undefined;
+        this.lastSentSelectionKey = undefined;
         await this.view?.webview.postMessage({ type: "activateTab", tab: this.requestedTab });
         return void this.update();
       }
@@ -450,7 +609,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (message.type === "selectRepository") {
-        if (this.manager.snapshot(message.root)) this.selectedRoot = message.root;
+        if (this.manager.snapshot(message.root)) {
+          if (message.root !== this.selectedRoot) this.invalidateRequests(true);
+          this.selectedRoot = message.root;
+        }
         this.selectedRef = undefined;
         this.selectedHash = undefined;
         this.filePath = undefined;
@@ -537,9 +699,39 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
               if (!remote) return void vscode.window.showWarningMessage(vscode.l10n.t("'{0}' does not belong to a configured remote.", branch.name));
               await this.withCancellableProgress(`Fetching ${remote}`, (signal) => this.manager.fetchRemote(root, remote, signal));
             }
+            if (rebase) {
+              // IDEA's smart handling of local changes: parked for the rebase,
+              // restored after it, kept in the stash if it stops on a conflict.
+              await rebaseWithLocalChanges(this.manager, root, branch.fullName, branch.name);
+              return;
+            }
             await vscode.window.withProgress(
-              { location: vscode.ProgressLocation.Notification, title: `${rebase ? "Rebasing onto" : "Merging"} ${branch.name}` },
-              () => rebase ? this.manager.rebase(root, branch.fullName) : this.manager.merge(root, branch.fullName),
+              { location: vscode.ProgressLocation.Notification, title: `Merging ${branch.name}` },
+              () => this.manager.merge(root, branch.fullName),
+            );
+            return;
+          }
+          if (message.action === "checkoutAndRebase") {
+            // IDEA's Checkout and Rebase onto Current: the selected branch is
+            // checked out and rewritten on top of the branch that was current.
+            const head = snapshot.status?.branch.head;
+            if (!head) return void vscode.window.showWarningMessage(vscode.l10n.t("Check out a branch before merging or rebasing."));
+            if (branch.kind === "tag" || (branch.kind === "local" && branch.name === head)) return;
+            const confirmed = await vscode.window.showWarningMessage(
+              vscode.l10n.t("Check out '{0}' and rebase it onto '{1}'?", branch.name, head),
+              { modal: true, detail: vscode.l10n.t("Commits on '{0}' that are not on '{1}' are rewritten. Local changes are parked in a stash for the duration and restored afterwards.", branch.name, head) },
+              vscode.l10n.t("Checkout and Rebase"),
+            );
+            if (confirmed !== vscode.l10n.t("Checkout and Rebase")) return;
+            const onto = `refs/heads/${head}`;
+            await vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Checking out {0} and rebasing onto {1}", branch.name, head) },
+              // A conflict surfaces as Git's own message through the panel's
+              // error path, exactly as "Rebase onto" does; the checkout flow
+              // keeps the parked changes in their stash when that happens.
+              () => checkoutWithLocalChanges(this.manager, root, branch, {
+                afterCheckout: (lease) => this.manager.rebase(root, onto, lease),
+              }),
             );
             return;
           }
@@ -601,10 +793,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           return;
         }
         if (!isFullObjectId(message.hash)) return;
+        if (this.currentCommitsRoot !== root) return;
         const commit = this.currentCommits.find((item) => item.hash === message.hash);
         if (!commit) return;
         if ("path" in message) {
-          const files = await this.manager.commitFiles(root, commit.hash);
+          const files = await this.readCommitFiles(root, commit.hash);
           const file = files.find((item) => item.path === message.path);
           if (!file) return;
           if (message.action === "copyPath") {
@@ -641,6 +834,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           if (message.action === "fileHistory") {
             this.filePath = file.path;
+            this.filePathExact = true;
+            this.lineRange = undefined;
             this.selectedRef = commit.hash;
             this.selectedHash = undefined;
             return void this.update();
@@ -714,6 +909,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "requestHeadMessage") {
         // IDEA fills the message box with the commit being amended. An unborn
         // branch has nothing to amend, and an empty reply leaves the box alone.
+        const requestId = ++this.headMessageRequestVersion;
         let full = "";
         try {
           const [head] = await snapshot.repository.logRef("HEAD", 1);
@@ -721,7 +917,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         } catch {
           // No HEAD yet.
         }
-        await this.view?.webview.postMessage({ type: "headMessage", message: full });
+        if (requestId !== this.headMessageRequestVersion || this.selectedRoot !== root) return;
+        await this.view?.webview.postMessage({ type: "headMessage", root, requestId, message: full });
         return;
       }
       if (message.type === "messageHistory") {
@@ -743,17 +940,22 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "requestHunks") {
         const change = changes.find((item) => item.path === message.path);
         if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
+        const requestVersion = ++this.hunkRequestVersion;
+        const requestId = message.requestId ?? requestVersion;
         const [hunks, owned] = await Promise.all([
           this.readHunks(root, change),
           // Only offered where there is somewhere to move a change to.
           this.changelists.lists(root).length > 1 ? this.readOwnedHunks(root, change.path) : Promise.resolve([]),
         ]);
-        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...hunks, owned });
+        if (requestVersion !== this.hunkRequestVersion || this.selectedRoot !== root) return;
+        await this.view?.webview.postMessage({ type: "hunks", root, requestId, path: change.path, ...hunks, owned });
         return;
       }
       if (message.type === "moveHunk") {
         const change = changes.find((item) => item.path === message.path);
         if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
+        const requestVersion = ++this.hunkRequestVersion;
+        const requestId = message.requestId ?? requestVersion;
         const lists = this.changelists.lists(root);
         if (lists.length < 2) return;
         const home = this.changelists.homeListId(root, change.path);
@@ -768,13 +970,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (!picked) return;
         await this.changelists.assignHunks(root, change.path, [message.key], picked.id);
         const owned = await this.readOwnedHunks(root, change.path);
-        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...(await this.readHunks(root, change)), owned });
+        const hunks = await this.readHunks(root, change);
+        if (requestVersion !== this.hunkRequestVersion || this.selectedRoot !== root) return;
+        await this.view?.webview.postMessage({ type: "hunks", root, requestId, path: change.path, ...hunks, owned });
         return;
       }
       if (message.type === "deepSearch") {
         const text = message.text.trim();
         if (!text) {
           if (this.logSearch === undefined) return;
+          this.invalidateRequests(false, true);
           this.logSearch = undefined;
           this.logLimit = 300;
           this.selectedHash = undefined;
@@ -786,8 +991,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           try {
             const [commit] = await snapshot.repository.logRef(text, 1);
             if (commit) {
+              this.invalidateRequests(false, true);
               this.logSearch = undefined;
               this.selectedRef = commit.hash;
+              this.lineRange = undefined;
               this.selectedHash = commit.hash;
               this.logLimit = 300;
               return void this.update();
@@ -796,6 +1003,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             // Hex-looking text that resolves to nothing is searched as text.
           }
         }
+        this.invalidateRequests(false, true);
         this.logSearch = text;
         this.selectedHash = undefined;
         this.logLimit = 300;
@@ -803,7 +1011,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "selectRef") {
         if (message.ref && !snapshot.branches.some((branch) => branch.name === message.ref)) return;
+        this.invalidateRequests(false, true);
         this.selectedRef = message.ref;
+        // A line range names lines of HEAD's file; another branch's version of
+        // the file need not have them, so the range does not survive the switch.
+        this.lineRange = undefined;
         this.selectedHash = undefined;
         this.logLimit = 300;
         return void this.update();
@@ -811,12 +1023,27 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "setPathFilter") {
         const filePath = message.path?.trim();
         if (filePath && (filePath.length > 4096 || /[\r\n\0]/.test(filePath))) return;
+        this.invalidateRequests(false, true);
+        // Typed by hand: a suffix search, and no longer one exact file's
+        // history, so a line range that belonged to the old path is dropped.
         this.filePath = filePath || undefined;
+        this.filePathExact = false;
+        this.lineRange = undefined;
+        this.selectedHash = undefined;
+        this.logLimit = 300;
+        return void this.update();
+      }
+      if (message.type === "clearLineRange") {
+        if (!this.lineRange) return;
+        // Back to the whole file's history; the path filter stays.
+        this.invalidateRequests(false, true);
+        this.lineRange = undefined;
         this.selectedHash = undefined;
         this.logLimit = 300;
         return void this.update();
       }
       if (message.type === "setLogOptions") {
+        this.invalidateRequests(false, true);
         this.logOptions = normalizeLogOptions(message.options);
         this.selectedHash = undefined;
         this.logLimit = 300;
@@ -824,12 +1051,25 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "selectCommit") {
         if (!isFullObjectId(message.hash)) return;
+        if (this.currentCommitsRoot !== root) return;
         const commit = this.currentCommits.find((item) => item.hash === message.hash);
         if (!commit) return;
+        const requestId = message.requestId;
+        const selectionVersion = ++this.selectionRequestVersion;
         this.selectedHash = message.hash;
-        const files = await this.manager.commitFiles(root, commit.hash);
-        if (this.selectedHash !== commit.hash) return;
-        await this.view?.webview.postMessage({ type: "selection", selection: { commit, files } });
+        const controller = new AbortController();
+        this.selectionController?.abort();
+        this.selectionController = controller;
+        let files: GitCommitFile[];
+        let messageText: string;
+        try {
+          ({ files, message: messageText } = await this.readCommitSelection(root, commit.hash, controller.signal));
+        } finally {
+          if (this.selectionController === controller) this.selectionController = undefined;
+        }
+        if (this.selectedHash !== commit.hash || selectionVersion !== this.selectionRequestVersion
+          || this.selectedRoot !== root) return;
+        await this.view?.webview.postMessage({ type: "selection", root, requestId, selection: { commit: { ...commit, body: messageText }, files } });
         return;
       }
       if (message.type === "refresh") {
@@ -844,9 +1084,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (message.type === "openCommitFile") {
         if (!isFullObjectId(message.hash)) return;
+        if (this.currentCommitsRoot !== root) return;
         const commit = this.currentCommits.find((item) => item.hash === message.hash);
         if (!commit) return;
-        const files = await this.manager.commitFiles(root, commit.hash);
+        const files = await this.readCommitFiles(root, commit.hash);
         const file = files.find((item) => item.path === message.path);
         if (!file) return;
         await this.openCommitFile(snapshot.repository, commit, file);
@@ -860,6 +1101,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (message.type === "applyHunk") {
         const change = changes.find((item) => item.path === message.path);
         if (!change || change.conflicted || !Number.isInteger(message.index) || message.index < 0) return;
+        const requestVersion = ++this.hunkRequestVersion;
+        const requestId = message.requestId ?? requestVersion;
         const hunks = await this.readHunks(root, change);
         const expected = hunks[message.source][message.index];
         if (!expected) return;
@@ -868,17 +1111,23 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         const latest = this.manager.snapshot(root)?.status?.changes.find((item) => item.path === change.path);
         if (!latest) {
           this.hunkCache.delete(`${root}\0${change.path}`);
-          await this.view?.webview.postMessage({ type: "hunks", path: change.path, staged: [], unstaged: [] });
+          if (requestVersion !== this.hunkRequestVersion || this.selectedRoot !== root) return;
+          await this.view?.webview.postMessage({ type: "hunks", root, requestId, path: change.path, staged: [], unstaged: [] });
           return;
         }
         const refreshed = await this.readHunks(root, latest, true);
-        await this.view?.webview.postMessage({ type: "hunks", path: change.path, ...refreshed });
+        if (requestVersion !== this.hunkRequestVersion || this.selectedRoot !== root) return;
+        await this.view?.webview.postMessage({ type: "hunks", root, requestId, path: change.path, ...refreshed });
         return;
       }
       if (message.type === "commit") {
         const commitMessage = message.message.trim();
         if (!commitMessage) return void vscode.window.showWarningMessage(vscode.l10n.t("Enter a commit message first."));
-        const options = { amend: message.amend, signoff: message.signoff, noVerify: message.noVerify };
+        // With a commit.template configured, `#` lines are the template's
+        // comments — Git strips them in its own editor, so they are stripped
+        // here too; without one they stay, as `git commit -m` keeps them.
+        const stripComments = (await this.manager.commitTemplate(root)) !== undefined;
+        const options = { amend: message.amend, signoff: message.signoff, noVerify: message.noVerify, author: message.author?.trim() || undefined, stripComments };
         let revision: string;
         if (message.mode === "staged") {
           if (!changes.some((change) => change.staged)) return void vscode.window.showWarningMessage(vscode.l10n.t("Stage at least one change before committing the staging area."));
@@ -967,6 +1216,49 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         else await this.manager.unstage(root, [change.path]);
         return;
       }
+      if (message.type === "resolveWith") {
+        // IDEA's Accept Yours / Accept Theirs for one conflicted file. The side
+        // labels come from the operation, so during a rebase "yours" is the
+        // rebase target rather than the replayed commit.
+        if (!(await requireTrusted())) return;
+        const change = changes.find((item) => item.path === message.path);
+        if (!change?.conflicted) return;
+        const labels = await conflictSideLabels(snapshot);
+        const chosen = message.side === "ours" ? labels.ours : labels.theirs;
+        const resolveLabel = vscode.l10n.t("Resolve");
+        const answer = await vscode.window.showWarningMessage(
+          vscode.l10n.t("Replace {0} with '{1}' and mark it resolved?", change.path, chosen),
+          { modal: true },
+          resolveLabel,
+        );
+        if (answer !== resolveLabel) return;
+        await this.manager.acceptConflictSide(root, change.path, message.side);
+        return;
+      }
+      if (message.type === "ignorePath") {
+        if (!(await requireTrusted())) return;
+        const change = changes.find((item) => item.path === message.path);
+        if (!change || change.kind !== "untracked") return;
+        const kindLabel = { file: vscode.l10n.t("Ignore File"), directory: vscode.l10n.t("Ignore Directory"), extension: vscode.l10n.t("Ignore All Files with This Extension") };
+        const pattern = await vscode.window.showQuickPick(
+          ignorePatternsFor(change.path).map((option) => ({ label: kindLabel[option.kind], description: option.pattern, pattern: option.pattern })),
+          { title: vscode.l10n.t("Ignore {0}", change.path), placeHolder: vscode.l10n.t("Which rule should be added?") },
+        );
+        if (!pattern) return;
+        const target = await vscode.window.showQuickPick(
+          [
+            { label: ".gitignore", description: vscode.l10n.t("Shared with everyone who clones the repository"), target: "gitignore" as const },
+            { label: ".git/info/exclude", description: vscode.l10n.t("Private to this clone"), target: "exclude" as const },
+          ],
+          { title: vscode.l10n.t("Add '{0}' to", pattern.pattern) },
+        );
+        if (!target) return;
+        const file = await this.manager.addIgnoreRule(root, target.target, pattern.pattern);
+        const open = vscode.l10n.t("Open");
+        const answer = await vscode.window.showInformationMessage(vscode.l10n.t("Added '{0}' to {1}.", pattern.pattern, target.label), open);
+        if (answer === open) await vscode.window.showTextDocument(vscode.Uri.file(file));
+        return;
+      }
       if (message.type === "discard") {
         const change = changes.find((item) => item.path === message.path);
         if (!change) return;
@@ -1031,10 +1323,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (message.type === "commitsAction") {
+        if (this.currentCommitsRoot !== root) return;
         // The set was gathered by clicks in whatever order the user made them;
         // the log's own display order decides how the selection is applied,
         // and a hash outside the loaded window is dropped, not guessed about.
-        const hashes = oldestFirst(message.hashes.filter((hash) => isFullObjectId(hash)), this.currentCommits.map((commit) => commit.hash));
+        const requestedHashes = [...new Set(message.hashes)];
+        if (!requestedHashes.every((hash) => isFullObjectId(hash))) return;
+        const hashes = oldestFirst(requestedHashes, this.currentCommits.map((commit) => commit.hash));
+        // A stale request is rejected as a whole; silently dropping one hash
+        // could turn a reviewed multi-commit operation into a different one.
+        if (hashes.length !== requestedHashes.length) return;
         const commits = hashes.map((hash) => this.currentCommits.find((commit) => commit.hash === hash)!);
         if (!hashes.length) return;
         if (message.action === "compareCommits") {
@@ -1063,6 +1361,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           }
           const history = candidates.map((commit) => ({ hash: commit.hash, subject: commit.subject, message: originalMessage(commit) }));
           const steps = squash ? squashPlan(history, chosen) : dropPlan(history, chosen);
+          const planProblem = validateRebasePlan(steps);
+          if (planProblem) return void vscode.window.showWarningMessage(planProblem);
+          const expectation = this.rebaseExpectation(root, candidates);
           // A non-adjacent squash silently reorders the commits in between,
           // which is worth a sentence before the branch is rewritten.
           const chosenIndexes = candidates.map((commit, index) => (chosen.has(commit.hash) ? index : -1)).filter((index) => index >= 0);
@@ -1078,7 +1379,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             button,
           );
           if (confirmed !== button) return;
-          await this.runHistoryRewrite(root, base, steps, squash
+          await this.runHistoryRewrite(root, base, steps, expectation, squash
             ? vscode.l10n.t("Squashed {0} commits into one.", hashes.length)
             : vscode.l10n.t("Dropped {0} commit(s).", hashes.length));
           return;
@@ -1092,23 +1393,32 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         let applied = 0;
         try {
           await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Cherry-picking {0} commit(s)", hashes.length) },
-            async (progress) => {
-              for (const [index, hash] of hashes.entries()) {
-                progress.report({ message: `${hash.slice(0, 8)} (${index + 1}/${hashes.length})` });
-                await this.manager.cherryPick(root, hash);
-                applied += 1;
+            { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Cherry-picking {0} commit(s)", hashes.length), cancellable: true },
+            async (progress, token) => {
+              const controller = new AbortController();
+              const registration = token.onCancellationRequested(() => controller.abort());
+              try {
+                progress.report({ message: `0/${hashes.length}` });
+                await this.manager.cherryPickMany(root, hashes, controller.signal, (count) => progress.report({ message: `${count}/${hashes.length}` }));
+                applied = hashes.length;
+              } finally {
+                registration.dispose();
               }
             },
           );
         } catch (error) {
-          // The failed pick owns the working tree now. Naming how far the batch
-          // got matters more than the raw error alone: the commits after the
-          // stop were never picked and stay the user's to redo.
-          await vscode.window.showWarningMessage(vscode.l10n.t(
-            "Cherry-pick stopped at {0} after {1} of {2} commit(s): {3} Resolve the conflicts and Continue, or Abort; the remaining commits were not picked.",
-            hashes[applied].slice(0, 8), applied, hashes.length, formatError(error),
-          ));
+          const batch = error instanceof GitBatchError ? error : undefined;
+          applied = batch?.applied ?? applied;
+          const paused = this.manager.snapshot(root)?.operation.kind === "cherry-pick";
+          if (isGitAbort(error) || (batch && isGitAbort(batch.cause))) return;
+          if (paused) {
+            await vscode.window.showWarningMessage(vscode.l10n.t(
+              "Cherry-pick stopped at {0} after {1} of {2} commit(s): {3} Resolve the conflicts and Continue, or Abort; the remaining commits were not picked.",
+              batch?.currentHash.slice(0, 8) ?? hashes[applied]?.slice(0, 8) ?? "?", applied, hashes.length, formatError(error),
+            ));
+          } else {
+            await vscode.window.showErrorMessage(formatError(error));
+          }
           return;
         }
         void vscode.window.showInformationMessage(vscode.l10n.t("Cherry-picked {0} commit(s).", hashes.length));
@@ -1130,12 +1440,145 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (confirmed === vscode.l10n.t("Revert")) await this.manager.revert(root, message.hash);
         return;
       }
+      if (message.type === "undoCommit") {
+        if (!(await requireTrusted())) return;
+        const head = snapshot.status?.branch.oid;
+        if (!head || head.toLowerCase() !== message.hash.toLowerCase()) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Only the last commit can be undone. Use Reset or Drop Commit for an older one."));
+        }
+        if (snapshot.operation.kind !== "none") {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Finish or abort the active {0} before undoing a commit.", snapshot.operation.kind));
+        }
+        const commit = this.currentCommits.find((item) => item.hash === message.hash);
+        if ((commit?.parents.length ?? 0) > 1) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("A merge commit cannot be undone from the Log; use Reset instead."));
+        }
+        const pushed = await this.manager.isPushed(root, message.hash);
+        const undo = vscode.l10n.t("Undo Commit");
+        const confirmed = await vscode.window.showWarningMessage(
+          vscode.l10n.t("Undo commit {0}?", message.hash.slice(0, 8)),
+          {
+            modal: true,
+            detail: [
+              commit?.subject ?? "",
+              vscode.l10n.t("The branch moves back to the parent and the commit's changes stay staged in Local Changes."),
+              ...(pushed ? [vscode.l10n.t("This commit has already been pushed: the remote branch keeps it, and pushing again will be rejected without a force push.")] : []),
+            ].filter(Boolean).join("\n\n"),
+          },
+          undo,
+        );
+        if (confirmed !== undo) return;
+        await this.manager.undoCommit(root, message.hash);
+        void vscode.window.showInformationMessage(vscode.l10n.t("Undid commit {0}; its changes are staged.", message.hash.slice(0, 8)));
+        return;
+      }
+      if (message.type === "fixupCommit") {
+        // IDEA's Fixup…: the staged changes become part of the chosen commit.
+        if (!(await requireTrusted())) return;
+        if (this.currentCommitsRoot !== root) return;
+        const commit = this.currentCommits.find((item) => item.hash === message.hash);
+        if (!commit) return;
+        if (snapshot.operation.kind !== "none") {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Finish or abort the active {0} before fixing up a commit.", snapshot.operation.kind));
+        }
+        const stagedPaths = changes.filter((change) => change.staged && !change.conflicted).map((change) => change.path);
+        if (!stagedPaths.length) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Stage the changes that belong in {0} first; Fixup takes exactly what is in the Index.", message.hash.slice(0, 8)));
+        }
+        if (await this.manager.isPushed(root, message.hash)) {
+          const rewrite = vscode.l10n.t("Fix Up Anyway");
+          const answer = await vscode.window.showWarningMessage(
+            vscode.l10n.t("Commit {0} has already been pushed.", message.hash.slice(0, 8)),
+            { modal: true, detail: vscode.l10n.t("Fixing it up rewrites the branch, so the next push will need a force push.") },
+            rewrite,
+          );
+          if (answer !== rewrite) return;
+        }
+        const fixUp = vscode.l10n.t("Fix Up");
+        const confirmed = await vscode.window.showWarningMessage(
+          vscode.l10n.t("Fix up {0} with the {1} staged file(s)?", message.hash.slice(0, 8), stagedPaths.length),
+          { modal: true, detail: `${commit.subject}\n\n${stagedPaths.join("\n")}` },
+          fixUp,
+        );
+        if (confirmed !== fixUp) return;
+        const head = snapshot.status?.branch.oid;
+        if (head && head.toLowerCase() === message.hash.toLowerCase()) {
+          // The last commit: the staged changes are amended in, message kept.
+          await this.manager.amendStaged(root, message.hash);
+          void vscode.window.showInformationMessage(vscode.l10n.t("Fixed up {0} with the staged changes.", message.hash.slice(0, 8)));
+          return;
+        }
+        if (!commit.parents.length) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("The root commit has no parent to rebase onto, so it cannot be rewritten from the Log."));
+        }
+        const base = `${commit.hash}^`;
+        // Checked before anything is committed, so a commit off the linear
+        // history is refused while the staged changes are still just staged.
+        if (!(await this.manager.interactiveRebaseCandidates(root, base)).some((candidate) => candidate.hash === commit.hash)) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Only commits on the current branch's linear history can be rewritten from the Log."));
+        }
+        const fixup = await this.manager.commitFixup(root, commit.hash);
+        const candidates = await this.manager.interactiveRebaseCandidates(root, base);
+        const history = candidates.map((candidate) => ({ hash: candidate.hash, subject: candidate.subject, message: originalMessage(candidate) }));
+        const steps = fixupPlan(history, commit.hash, fixup);
+        const planProblem = validateRebasePlan(steps);
+        if (planProblem) return void vscode.window.showWarningMessage(planProblem);
+        const expectation = this.rebaseExpectation(root, candidates, fixup);
+        const folded = await this.runHistoryRewrite(root, base, steps, expectation, vscode.l10n.t("Fixed up {0} with the staged changes.", message.hash.slice(0, 8)));
+        if (!folded) {
+          void vscode.window.showInformationMessage(vscode.l10n.t("The fixup commit {0} was created but not folded in. Squash it with Interactively Rebase, or drop it from the Log.", fixup.slice(0, 8)));
+        }
+        return;
+      }
+      if (message.type === "rewordCommit") {
+        if (!(await requireTrusted())) return;
+        const text = message.message.replace(/\r\n/g, "\n");
+        if (!text.trim()) return void vscode.window.showWarningMessage(vscode.l10n.t("A commit message cannot be empty."));
+        if (this.currentCommitsRoot !== root) return;
+        const commit = this.currentCommits.find((item) => item.hash === message.hash);
+        if (!commit) return;
+        if (snapshot.operation.kind !== "none") {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Finish or abort the active {0} before editing a commit message.", snapshot.operation.kind));
+        }
+        if (await this.manager.isPushed(root, message.hash)) {
+          const rewrite = vscode.l10n.t("Edit Anyway");
+          const answer = await vscode.window.showWarningMessage(
+            vscode.l10n.t("Commit {0} has already been pushed.", message.hash.slice(0, 8)),
+            { modal: true, detail: vscode.l10n.t("Editing its message rewrites the branch, so the next push will need a force push.") },
+            rewrite,
+          );
+          if (answer !== rewrite) return;
+        }
+        const head = snapshot.status?.branch.oid;
+        if (head && head.toLowerCase() === message.hash.toLowerCase()) {
+          // The last commit: an amend of the message alone, nothing else moves.
+          await this.manager.rewordHead(root, message.hash, text);
+          void vscode.window.showInformationMessage(vscode.l10n.t("Edited the message of {0}.", message.hash.slice(0, 8)));
+          return;
+        }
+        if (!commit.parents.length) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("The root commit has no parent to rebase onto, so it cannot be rewritten from the Log."));
+        }
+        const base = `${commit.hash}^`;
+        const candidates = await this.manager.interactiveRebaseCandidates(root, base);
+        if (!candidates.some((candidate) => candidate.hash === commit.hash)) {
+          return void vscode.window.showWarningMessage(vscode.l10n.t("Only commits on the current branch's linear history can be rewritten from the Log."));
+        }
+        const history = candidates.map((candidate) => ({ hash: candidate.hash, subject: candidate.subject, message: originalMessage(candidate) }));
+        const steps = rewordPlan(history, commit.hash, text);
+        const planProblem = validateRebasePlan(steps);
+        if (planProblem) return void vscode.window.showWarningMessage(planProblem);
+        const expectation = this.rebaseExpectation(root, candidates);
+        await this.runHistoryRewrite(root, base, steps, expectation, vscode.l10n.t("Edited the message of {0}.", message.hash.slice(0, 8)));
+        return;
+      }
       if (message.type === "reset") {
-        const choice = await vscode.window.showQuickPick(
+        const choice = await vscode.window.showQuickPick<vscode.QuickPickItem & { mode: GitResetMode }>(
           [
-            { label: vscode.l10n.t("Soft"), description: vscode.l10n.t("Keep index and working tree"), mode: "soft" as const },
-            { label: vscode.l10n.t("Mixed"), description: vscode.l10n.t("Reset index; keep working tree"), mode: "mixed" as const },
-            { label: vscode.l10n.t("Hard"), description: vscode.l10n.t("Discard index and working tree changes"), mode: "hard" as const },
+            { label: vscode.l10n.t("Soft"), description: vscode.l10n.t("Keep index and working tree"), mode: "soft" },
+            { label: vscode.l10n.t("Mixed"), description: vscode.l10n.t("Reset index; keep working tree"), mode: "mixed" },
+            { label: vscode.l10n.t("Hard"), description: vscode.l10n.t("Discard index and working tree changes"), mode: "hard" },
+            { label: vscode.l10n.t("Keep"), description: vscode.l10n.t("Move the branch; keep local changes, refusing if a changed file differs between the two commits"), mode: "keep" },
           ],
           { title: vscode.l10n.t("Reset current branch to {0}", message.hash.slice(0, 12)) },
         );
@@ -1154,6 +1597,16 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     }
   }
 
+  /** The repository state a reviewed plan was built from: HEAD, branch and the candidate set, compared again inside the mutex. */
+  private rebaseExpectation(root: string, candidates: readonly GitCommit[], head?: string): InteractiveRebaseExpectation {
+    const status = this.manager.snapshot(root)?.status;
+    return {
+      head: head ?? status?.branch.oid ?? candidates[candidates.length - 1].hash,
+      branch: status?.branch.head,
+      commits: candidates.map((candidate) => candidate.hash),
+    };
+  }
+
   /**
    * Runs an unattended history rewrite (Drop/Squash from the Log) with the
    * same working-tree choreography as the interactive rebase command: local
@@ -1162,50 +1615,71 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
    * being replayed on top of one. These plans contain no `edit` rows, so a
    * successful exit means the plan finished.
    */
-  private async runHistoryRewrite(root: string, base: string, steps: readonly RebaseStep[], successMessage: string): Promise<void> {
+  private async runHistoryRewrite(
+    root: string,
+    base: string,
+    steps: readonly RebaseStep[],
+    expectation: InteractiveRebaseExpectation,
+    successMessage: string,
+  ): Promise<boolean> {
     const blocking = (this.manager.snapshot(root)?.status?.changes ?? [])
       .filter((change) => change.kind !== "untracked" && change.kind !== "ignored");
-    let parked;
-    if (blocking.length > 0) {
-      const answer = await vscode.window.showWarningMessage(
+    const answer = blocking.length > 0
+      ? await vscode.window.showWarningMessage(
         vscode.l10n.t("{0} local change(s) would block rewriting history.", blocking.length),
         {
           modal: true,
           detail: vscode.l10n.t("JB Git can stash them, run the rebase, and restore the working tree and Index afterwards. If the rebase stops on a conflict the stash is kept instead, so nothing is lost."),
         },
         vscode.l10n.t("Stash and Rebase"),
-      );
-      if (answer !== vscode.l10n.t("Stash and Rebase")) return;
-      parked = await stashLocalChanges(this.manager, root, `JB Git history rewrite onto ${base}`, { includeUntracked: false });
-    }
-    try {
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Rebasing {0} commit(s)", steps.length) },
-        () => this.manager.interactiveRebase(root, base, steps),
-      );
-    } catch (error) {
-      if (parked) {
-        void vscode.window.showWarningMessage(vscode.l10n.t("Your local changes are kept in {0}. Apply it from Manage Stashes once the rebase is finished or aborted.", parked.ref));
+      )
+      : vscode.l10n.t("Stash and Rebase");
+    if (blocking.length > 0 && answer !== vscode.l10n.t("Stash and Rebase")) return false;
+    await this.manager.withExclusive(root, async (lease: RepositoryMutationLease) => {
+      const stillBlocking = (this.manager.snapshot(root)?.status?.changes ?? [])
+        .some((change) => change.kind !== "untracked" && change.kind !== "ignored");
+      const parked = blocking.length > 0 && stillBlocking
+        ? await stashLocalChanges(this.manager, root, `JB Git history rewrite onto ${base}`, { includeUntracked: false }, lease)
+        : undefined;
+      try {
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Rebasing {0} commit(s)", steps.length) },
+          () => this.manager.interactiveRebase(root, base, steps, expectation, lease),
+        );
+      } catch (error) {
+        const paused = this.manager.snapshot(root)?.operation.kind === "rebase";
+        if (parked && paused) {
+          void vscode.window.showWarningMessage(vscode.l10n.t("Your local changes are kept in {0}. Apply it from Manage Stashes once the rebase is finished or aborted.", parked.ref));
+        } else if (parked) {
+          // A stale plan or another preflight failure never started a rebase;
+          // restore the user's changes instead of making them recover manually.
+          const restore = await restoreTemporaryStash(this.manager, root, parked, lease);
+          if (restore.outcome !== "restored") {
+            void vscode.window.showWarningMessage(vscode.l10n.t("The rebase did not start, and your local changes remain in {0}; restore failed: {1}", parked.ref, formatError(restore.error)));
+          }
+        }
+        if (paused) {
+          await vscode.window.showWarningMessage(vscode.l10n.t("The rebase stopped before the end of the plan. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back."));
+          return;
+        }
+        throw error;
       }
-      if (this.manager.snapshot(root)?.operation.kind === "rebase") {
-        await vscode.window.showWarningMessage(vscode.l10n.t("The rebase stopped before the end of the plan. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back."));
-        return;
-      }
-      throw error;
-    }
-    if (parked) {
-      const restore = await restoreTemporaryStash(this.manager, root, parked);
+      if (!parked) return;
+      const restore = await restoreTemporaryStash(this.manager, root, parked, lease);
       if (restore.outcome === "conflicted") {
         void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes caused conflicts. {0} was kept; resolve the files in Local Changes.", parked.ref));
       } else if (restore.outcome === "kept") {
         void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes failed and {0} was kept: {1}", parked.ref, formatError(restore.error)));
       }
-    }
+    });
     void vscode.window.showInformationMessage(successMessage);
+    return true;
   }
 
   public dispose(): void {
     if (this.updateTimer) clearTimeout(this.updateTimer);
+    this.logRequestController?.abort();
+    this.invalidateRequests(true);
     for (const disposable of this.disposables.splice(0)) disposable.dispose();
   }
 
@@ -1224,6 +1698,27 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       .find((remote) => prefix.startsWith(`${remote.name}/`))?.name;
   }
 
+  /**
+   * What the commit form needs beyond the change list: the authors IDEA's
+   * Author field completes from, and the `commit.template` text it pre-fills.
+   * Both are cheap to cache — authors change only when HEAD moves, and the
+   * template is configuration.
+   */
+  private async commitFormExtras(root: string, snapshot: RepositorySnapshot): Promise<{ recentAuthors: string[]; commitTemplate: string | null }> {
+    const head = snapshot.status?.branch.oid ?? null;
+    let authors = this.authorsCache.get(root);
+    if (!authors || authors.head !== head) {
+      authors = { head, authors: await this.manager.recentAuthors(root, 100).catch(() => []) };
+      this.authorsCache.set(root, authors);
+    }
+    let template = this.templateCache.get(root);
+    if (!template || Date.now() - template.readAt > 30_000) {
+      template = { readAt: Date.now(), template: await this.manager.commitTemplate(root).catch(() => undefined) };
+      this.templateCache.set(root, template);
+    }
+    return { recentAuthors: authors.authors, commitTemplate: template.template ?? null };
+  }
+
   private async readHunks(root: string, change: GitChange, refresh = false): Promise<{ staged: GitDiffHunk[]; unstaged: GitDiffHunk[] }> {
     const key = `${root}\0${change.path}`;
     if (!refresh) {
@@ -1237,6 +1732,83 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     const value = { staged, unstaged };
     this.hunkCache.set(key, value);
     return value;
+  }
+
+  private buildChangeLists(root: string, changes: readonly GitChange[], selected: ReadonlySet<string>) {
+    const definitions = this.changelists.lists(root);
+    const activeId = this.changelists.activeId(root);
+    const homeByPath = new Map<string, string>();
+    for (const list of definitions) {
+      for (const filePath of list.files) if (!homeByPath.has(filePath)) homeByPath.set(filePath, list.id);
+    }
+    for (const change of changes) if (!homeByPath.has(change.path)) homeByPath.set(change.path, activeId);
+    const claimsByPath = new Map(changes.map((change) => [change.path, this.changelists.claims(root, change.path)]));
+    return definitions.map((list) => ({
+      id: list.id,
+      name: list.name,
+      description: list.description,
+      active: list.id === activeId,
+      changes: changes
+        // A file whose hunks were split appears under every list that owns
+        // part of it. Listing it only under its home list left the claiming
+        // list looking empty while its commit would have taken those hunks.
+        .filter((change) => {
+          const home = homeByPath.get(change.path);
+          return home === list.id || claimsByPath.get(change.path)?.has(list.id);
+        })
+        .map((change) => ({
+          path: change.path,
+          partial: (claimsByPath.get(change.path)?.size ?? 0) > 0,
+          directory: path.dirname(change.path) === "." ? "" : path.dirname(change.path),
+          fileName: path.basename(change.path),
+          originalPath: change.originalPath,
+          kind: change.kind,
+          staged: change.staged,
+          unstaged: change.unstaged,
+          conflicted: change.conflicted,
+          checked: selected.has(change.path),
+          status: statusLabel(change),
+        })),
+    }));
+  }
+
+  private async readCommitFiles(root: string, hash: string, signal?: AbortSignal): Promise<GitCommitFile[]> {
+    const key = `${root}\0${hash}`;
+    const cached = this.commitFilesCache.get(key);
+    if (cached) return cached;
+    const files = await this.manager.commitFiles(root, hash, signal);
+    this.commitFilesCache.set(key, files);
+    while (this.commitFilesCache.size > 100) this.commitFilesCache.delete(this.commitFilesCache.keys().next().value!);
+    return files;
+  }
+
+  private async readCommitMessage(root: string, hash: string, signal?: AbortSignal): Promise<string> {
+    const key = `${root}\0${hash}`;
+    const cached = this.commitMessageCache.get(key);
+    if (cached !== undefined) return cached;
+    const message = await this.manager.commitMessage(root, hash, signal);
+    // Avoid retaining a pathological multi-megabyte commit message in the LRU;
+    // the selected detail can still display it once without making it permanent.
+    if (message.length <= 1_000_000) {
+      this.commitMessageCache.set(key, message);
+      while (this.commitMessageCache.size > 100) this.commitMessageCache.delete(this.commitMessageCache.keys().next().value!);
+    }
+    return message;
+  }
+
+  private async readCommitSelection(root: string, hash: string, signal?: AbortSignal): Promise<{ files: GitCommitFile[]; message: string }> {
+    const [filesResult, messageResult] = await Promise.allSettled([
+      this.readCommitFiles(root, hash, signal),
+      this.readCommitMessage(root, hash, signal),
+    ]);
+    if (filesResult.status === "rejected") throw filesResult.reason;
+    if (messageResult.status === "rejected") {
+      if (isGitAbort(messageResult.reason)) throw messageResult.reason;
+      // A pathological message should not make the entire log disappear; the
+      // selected row can still be shown with its subject as a fallback.
+      return { files: filesResult.value, message: "" };
+    }
+    return { files: filesResult.value, message: messageResult.value };
   }
 
   /**
@@ -1452,6 +2024,11 @@ const logStyles = String.raw`
   .detail-meta { display: grid; grid-template-columns: 54px 1fr; gap: 4px 6px; color: var(--vscode-descriptionForeground); }
   .detail-meta strong { color: var(--vscode-foreground); font-weight: 400; overflow-wrap: anywhere; }
   .detail-body { margin-top: 9px; white-space: pre-wrap; line-height: 1.45; }
+  .reword-editor { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .reword-editor textarea { width: 100%; min-height: 96px; padding: 6px 8px; resize: vertical; border: 1px solid var(--vscode-focusBorder); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); line-height: 1.45; }
+  .reword-actions { display: flex; gap: 6px; align-items: center; }
+  .reword-actions .hint { margin-left: auto; font-size: 11px; color: var(--vscode-descriptionForeground); }
+  .primary-action { height: 25px; padding: 0 9px; border-radius: 3px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .action { height: 25px; padding: 0 7px; border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .files { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .detail-splitter { position: relative; min-height: 9px; cursor: row-resize; background: transparent; outline: none; touch-action: none; }
@@ -1585,6 +2162,12 @@ const logStyles = String.raw`
   .commit-message::placeholder { color: var(--vscode-input-placeholderForeground); }
   .commit-options { min-height: 32px; display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 4px 9px 7px; color: var(--vscode-foreground); }
   .commit-options label { display: flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; user-select: none; }
+  .commit-options .author-toggle { height: 22px; padding: 0 7px; border-radius: 3px; background: transparent; border: 1px solid var(--vscode-panel-border); color: var(--vscode-foreground); }
+  .commit-options .author-toggle.active { border-color: var(--vscode-focusBorder); }
+  .commit-author-row { display: flex; align-items: center; gap: 8px; padding: 0 9px 7px; }
+  .commit-author-row[hidden] { display: none; }
+  .commit-author-row input { flex: 1; min-width: 0; height: 24px; padding: 0 7px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+  .commit-author-row input::placeholder { color: var(--vscode-input-placeholderForeground); }
   .commit-options #selected-count { color: var(--vscode-descriptionForeground); }
   .commit-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, auto); gap: 4px; padding: 0 7px 7px; }
   .primary { min-height: 29px; padding: 4px 10px; border-radius: 2px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
@@ -1633,6 +2216,11 @@ const logScript = String.raw`
   let state = { repositories: [], branches: [], commits: [] };
   let uiState = vscode.getState() || {};
   const hunkState = new Map();
+  const hunkRequestIds = new Map();
+  let requestSequence = 0;
+  let pendingSelectionRequestId;
+  let pendingHeadRequestId;
+  let lastStateVersion = 0;
   // What the message box held before Amend replaced it, per repository.
   const preAmendDrafts = {};
 
@@ -1680,10 +2268,18 @@ const logScript = String.raw`
   // is authoritative; the anchor is where a Shift range grows from.
   let multiSelectedHashes = new Set();
   let commitSelectionAnchor;
+  // IDEA's Edit Commit Message: the commit whose message is being edited in
+  // place of the details pane's read-only message, if any.
+  let rewordEditingHash;
+  // What has been typed so far: every state message re-renders the pane, and
+  // the box must not fall back to the commit's message mid-edit.
+  let rewordDraft;
+  let rewordNeedsFocus = false;
   let selectedFilePath;
   let openMenu;
   let menuInvoker;
   let deferredState;
+  let deferredStateVersion = 0;
   let virtualCommits = [];
   let virtualGraph = [];
   let virtualRenderFrame;
@@ -1723,7 +2319,14 @@ const logScript = String.raw`
     'Commit source': '提交内容来源',
     'selected': '已选择',
     'No shelved changes': '没有已搁置的更改', 'Unshelve': '取消搁置',
-    'Branch': '分支', 'User': '用户', 'Date': '日期', 'Paths': '路径',
+    'Branch': '分支', 'User': '用户', 'Date': '日期', 'Paths': '路径', 'Lines': '行',
+    'Only commits that changed these lines; click to show the whole file': '仅显示改动过这些行的提交；点击可查看整个文件的历史',
+    'Edit Commit Message…': '编辑提交消息…', 'Undo Commit…': '撤销提交…',
+    'Save Message': '保存消息', 'Rewrite the commit with this message': '用这条消息重写该提交',
+    'Cancel': '取消', 'Keep the current message': '保留当前消息', 'Commit message': '提交消息',
+    'Accept Yours': '接受你的版本', 'Accept Theirs': '接受对方版本', 'Ignore…': '忽略…',
+    'Fixup…': '修正到此提交…', 'Author…': '作者…', 'Commit as another author': '以其他作者身份提交',
+    'Author (Name <email>), leave empty for yourself': '作者（姓名 <邮箱>），留空则为本人',
     'All Branches': '所有分支', 'All Users': '所有用户', 'All Dates': '所有日期',
     'Today': '今天', 'Last 7 Days': '最近 7 天', 'Last 30 Days': '最近 30 天', 'Last Year': '最近一年',
     'Sort': '排序', 'By Commit Date': '按提交日期', 'Topologically': '按拓扑', 'Options': '选项',
@@ -1759,7 +2362,16 @@ const logScript = String.raw`
     'Open a folder containing a Git repository.': '请打开包含 Git 仓库的文件夹。',
   } : {};
   const t = value => typeof value === 'string' ? (zh[value] || value) : value;
-  const post = (type, extra = {}) => vscode.postMessage({ type, ...extra });
+  const post = (type, extra = {}) => vscode.postMessage({ type, root: state.selectedRoot, ...extra });
+  const nextRequestId = () => { requestSequence += 1; return requestSequence; };
+  const requestHunks = (path, key) => {
+    const requestId = nextRequestId(); hunkRequestIds.set(key, requestId);
+    post('requestHunks', { path, requestId });
+  };
+  const requestCommitSelection = hash => {
+    const requestId = nextRequestId(); pendingSelectionRequestId = requestId;
+    post('selectCommit', { hash, requestId });
+  };
   const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = t(text); return n; };
   const button = (label, title, handler, className = 'icon-button') => { const b = node('button', className, label); b.type = 'button'; b.title = t(title); b.addEventListener('click', handler); return b; };
   const selectShell = select => { const shell = node('div', 'select-shell'); shell.append(select); return shell; };
@@ -1909,6 +2521,8 @@ const logScript = String.raw`
   }
 
   function applyIncomingState(next) {
+    if (typeof next.stateVersion === 'number' && next.stateVersion < lastStateVersion) return;
+    if (typeof next.stateVersion === 'number') lastStateVersion = next.stateVersion;
     const previousRoot = state.selectedRoot;
     // Keep an in-flight selection unless this push fulfils it or removed its commit;
     // clearing it unconditionally made the highlight jump back to the previous commit.
@@ -1921,6 +2535,8 @@ const logScript = String.raw`
     saveUiState({ knownAuthors: [...knownAuthors].slice(-500) });
     if (previousRoot && state.selectedRoot && previousRoot !== state.selectedRoot) {
       search = ''; authorFilter = ''; dateFilter = 'all'; selectedFilePath = undefined;
+      pendingSelectionRequestId = undefined; pendingHeadRequestId = undefined;
+      hunkRequestIds.clear();
       if (!('commits' in next)) { state.commits = []; state.selection = null; }
       collapsedGraphSeries.clear(); selectedGraphSeries = ''; hoveredGraphSeries = '';
       saveUiState({ search, authorFilter, dateFilter, collapsedGraphSeries: [], selectedGraphSeries: '' });
@@ -1953,6 +2569,7 @@ const logScript = String.raw`
   function flushDeferredState() {
     if (!deferredState || blocksStateRender()) return;
     const next = deferredState; deferredState = undefined; applyIncomingState(next);
+    deferredStateVersion = 0;
   }
 
   function render() {
@@ -2174,7 +2791,7 @@ const logScript = String.raw`
       } else {
         expandedChangeHunks.add(hunkKey);
         hunkState.set(hunkKey, { loading: true });
-        post('requestHunks', { path: change.path });
+        requestHunks(change.path, hunkKey);
       }
       saveUiState({ expandedChangeHunks: [...expandedChangeHunks] }); render();
     }, 'hunk-toggle');
@@ -2222,7 +2839,11 @@ const logScript = String.raw`
       }
     });
     const contextItems = [];
-    if (change.conflicted) contextItems.push({ icon: '↔', label: 'Open Merge Conflict Editor', run: () => post('openDiff', { path: change.path }) });
+    if (change.conflicted) contextItems.push(
+      { icon: '↔', label: 'Open Merge Conflict Editor', run: () => post('openDiff', { path: change.path }) },
+      { icon: '◧', label: 'Accept Yours', run: () => post('resolveWith', { path: change.path, side: 'ours' }) },
+      { icon: '◨', label: 'Accept Theirs', run: () => post('resolveWith', { path: change.path, side: 'theirs' }) },
+    );
     else {
       if (change.staged) contextItems.push({ icon: 'I', label: 'Show HEAD ↔ Index Diff', run: () => post('openDiff', { path: change.path, mode: 'staged' }) });
       if (change.unstaged) contextItems.push({ icon: 'W', label: 'Show Index ↔ Working Tree Diff', run: () => post('openDiff', { path: change.path, mode: 'unstaged' }) });
@@ -2232,8 +2853,9 @@ const logScript = String.raw`
     contextItems.push(
       { icon: '⇥', label: 'Move to Changelist…', run: () => post('moveToChangelist', { path: change.path }) },
       { separator: true },
-      { icon: '↶', label: change.kind === 'untracked' ? 'Delete…' : 'Rollback…', run: () => post('discard', { path: change.path }) },
     );
+    if (change.kind === 'untracked') contextItems.push({ icon: '⊘', label: 'Ignore…', run: () => post('ignorePath', { path: change.path }) });
+    contextItems.push({ icon: '↶', label: change.kind === 'untracked' ? 'Delete…' : 'Rollback…', run: () => post('discard', { path: change.path }) });
     attachContextMenu(row, contextItems);
     item.append(row);
     if (expanded) item.append(changeHunks(change, hunkKey));
@@ -2247,7 +2869,7 @@ const logScript = String.raw`
       panel.append(node('div', 'hunk-empty', 'Loading change hunks…'));
       if (!value) {
         hunkState.set(hunkKey, { loading: true });
-        queueMicrotask(() => post('requestHunks', { path: change.path }));
+        queueMicrotask(() => requestHunks(change.path, hunkKey));
       }
       return panel;
     }
@@ -2260,7 +2882,8 @@ const logScript = String.raw`
         const header = node('div', 'hunk-header');
         const apply = button(action, action + ' this hunk', () => {
           apply.disabled = true;
-          post('applyHunk', { path: change.path, source, index });
+          const requestId = nextRequestId(); hunkRequestIds.set(hunkKey, requestId);
+          post('applyHunk', { path: change.path, source, index, requestId });
         }, 'small-button');
         header.append(node('code', '', hunk.header), node('span', 'spacer'), apply);
         const preview = node('pre', 'hunk-preview');
@@ -2297,7 +2920,8 @@ const logScript = String.raw`
       const header = node('div', 'hunk-header');
       const move = button(t('Move…'), t('Move this change to another Changelist'), () => {
         move.disabled = true;
-        post('moveHunk', { path: change.path, key: entry.key });
+        const requestId = nextRequestId(); hunkRequestIds.set(hunkKey, requestId);
+        post('moveHunk', { path: change.path, key: entry.key, requestId });
       }, 'small-button');
       header.append(
         node('code', '', entry.header),
@@ -2348,7 +2972,11 @@ const logScript = String.raw`
     );
     form.append(title);
     const drafts = { ...(uiState.commitMessages || {}) }; const root = state.selectedRoot || '';
-    const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = t(state.totalChanges ? 'Commit Message' : 'No changes to commit'); message.value = drafts[root] || ''; message.disabled = !state.totalChanges;
+    const message = node('textarea', 'commit-message'); message.id = 'commit-message'; message.placeholder = t(state.totalChanges ? 'Commit Message' : 'No changes to commit');
+    // IDEA pre-fills the box from commit.template when nothing has been typed;
+    // the template is not a draft, so an emptied box shows it again.
+    const template = typeof state.commitTemplate === 'string' ? state.commitTemplate : '';
+    message.value = drafts[root] || template; message.disabled = !state.totalChanges;
     const modeRow = node('div', 'commit-mode-row');
     const mode = node('select'); mode.id = 'commit-mode'; mode.setAttribute('aria-label', t('Commit source')); mode.title = t('Commit source');
     const stagedMode = node('option', '', 'Staging area (Index)'); stagedMode.value = 'staged';
@@ -2371,7 +2999,8 @@ const logScript = String.raw`
     amend.input.addEventListener('change', () => {
       if (amend.input.checked) {
         preAmendDrafts[root] = message.value;
-        post('requestHeadMessage');
+        pendingHeadRequestId = nextRequestId();
+        post('requestHeadMessage', { requestId: pendingHeadRequestId });
       } else if (root in preAmendDrafts) {
         message.value = preAmendDrafts[root];
         delete preAmendDrafts[root];
@@ -2381,20 +3010,43 @@ const logScript = String.raw`
     const signoff = checkboxOption('Sign-off', 'signoff', root);
     const noVerify = checkboxOption('Skip hooks', 'noVerify', root);
     const count = node('span', '', ''); count.id = 'selected-count';
-    options.append(amend.label, signoff.label, noVerify.label, node('span', 'spacer'), count);
-    const submit = push => post('commit', { message: message.value, mode: mode.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push });
+    // IDEA's Author field: hidden until asked for, remembered per repository
+    // until the commit is made, completing from the recent history's authors.
+    const authors = { ...(uiState.commitAuthors || {}) };
+    const authorRow = node('div', 'commit-author-row'); authorRow.hidden = !authors[root] && !uiState.authorFieldOpen;
+    const authorInput = node('input'); authorInput.id = 'commit-author'; authorInput.type = 'text'; authorInput.setAttribute('list', 'commit-authors');
+    authorInput.placeholder = t('Author (Name <email>), leave empty for yourself'); authorInput.value = authors[root] || '';
+    authorInput.setAttribute('aria-label', t('Author'));
+    const authorList = node('datalist'); authorList.id = 'commit-authors';
+    for (const author of state.recentAuthors || []) { const option = node('option'); option.value = author; authorList.append(option); }
+    authorInput.addEventListener('input', () => {
+      const next = { ...(uiState.commitAuthors || {}) };
+      if (authorInput.value.trim()) next[root] = authorInput.value; else delete next[root];
+      saveUiState({ commitAuthors: next });
+    });
+    authorRow.append(node('span', '', 'Author'), authorInput, authorList);
+    const authorToggle = button('Author…', 'Commit as another author', () => {
+      authorRow.hidden = !authorRow.hidden; saveUiState({ authorFieldOpen: !authorRow.hidden });
+      authorToggle.classList.toggle('active', !authorRow.hidden || Boolean(authorInput.value.trim()));
+      if (!authorRow.hidden) authorInput.focus();
+    }, 'author-toggle' + (!authorRow.hidden || authors[root] ? ' active' : ''));
+    options.append(amend.label, signoff.label, noVerify.label, authorToggle, node('span', 'spacer'), count);
+    const submit = push => post('commit', { message: message.value, mode: mode.value, amend: amend.input.checked, signoff: signoff.input.checked, noVerify: noVerify.input.checked, push, author: authorInput.value.trim() || undefined });
     const actions = node('div', 'commit-actions');
     const commit = button('Commit', 'Commit selected changes', () => submit(false), 'primary'); commit.id = 'commit-button';
     const commitPush = button('Commit & Push', 'Commit selected changes and push', () => submit(true), 'primary'); commitPush.id = 'commit-push-button';
+    // With a template configured, lines starting with # are comments Git will
+    // strip, so a box holding only the template is still an empty message.
+    const effectivelyEmpty = value => !value.split('\n').some(line => line.trim() && !(template && line.trimStart().startsWith('#')));
     const updateEnabled = () => {
       const available = mode.value === 'staged' ? Number(state.stagedCount || 0) : Number(state.selectedCount || 0);
-      const disabled = !available || !message.value.trim(); commit.disabled = disabled; commitPush.disabled = disabled;
+      const disabled = !available || effectivelyEmpty(message.value); commit.disabled = disabled; commitPush.disabled = disabled;
       count.textContent = mode.value === 'staged' ? available + ' indexed files' : available + ' ' + t('selected');
     };
     message.addEventListener('input', () => { drafts[root] = message.value; saveUiState({ commitMessages: drafts, commitMessage: undefined }); updateEnabled(); });
     mode.addEventListener('change', updateEnabled);
     updateEnabled(); actions.append(commit, commitPush);
-    form.append(modeRow, message, options, actions); return form;
+    form.append(modeRow, message, options, authorRow, actions); return form;
   }
 
   function checkboxOption(text, key, root) {
@@ -2636,6 +3288,7 @@ const logScript = String.raw`
     if (!isCurrent && kind !== 'tag') items.push(
       { icon: '⇤', label: 'Merge ' + branch.name + ' into ' + into, disabled: !current, run: act('mergeRef') },
       { icon: '⇧', label: 'Rebase ' + into + ' onto ' + branch.name, disabled: !current, run: act('rebaseOntoRef') },
+      { icon: '⇪', label: 'Checkout ' + branch.name + ' and Rebase onto ' + into, disabled: !current, run: act('checkoutAndRebase') },
     );
     items.push(
       { separator: true },
@@ -2804,7 +3457,16 @@ const logScript = String.raw`
     const paths = button('', 'Filter by changed path', () => showPathFilterPopover(paths), 'filter-button' + (state.filePath ? ' active' : ''));
     paths.append(node('span', '', 'Paths'), node('span', 'filter-value', pathValue ? ': ' + pathValue : ''), node('span', '', '⌄'));
     const sort = button('⇵', 'Graph and sort options', () => showMenuForElement(sort, graphOptionItems()), 'filter-button sort-button' + ((firstParent || noMerges || sortMode === 'topological') ? ' active' : ''));
-    bar.append(input, branch, user, date, paths, sort); return bar;
+    bar.append(input, branch, user, date, paths);
+    if (state.lineRange && state.filePath) {
+      // IDEA's History for Selection: the walk is narrowed to the lines shown
+      // here, and the × widens it back to the whole file.
+      const range = state.lineRange.start === state.lineRange.end ? String(state.lineRange.start) : state.lineRange.start + '–' + state.lineRange.end;
+      const lines = button('', 'Only commits that changed these lines; click to show the whole file', () => post('clearLineRange'), 'filter-button active line-range-filter');
+      lines.append(node('span', '', 'Lines'), node('span', 'filter-value', ': ' + range), node('span', '', '×'));
+      bar.append(lines);
+    }
+    bar.append(sort); return bar;
   }
 
   function graphOptionItems() {
@@ -2932,7 +3594,7 @@ const logScript = String.raw`
     }
     const currentHash = pendingCommitHash || state.selection?.commit?.hash;
     if (commits.length && !commits.some(commit => commit.hash === currentHash)) {
-      pendingCommitHash = commits[0].hash; post('selectCommit', { hash: pendingCommitHash });
+      pendingCommitHash = commits[0].hash; requestCommitSelection(pendingCommitHash);
     }
     if (!commits.length) {
       pendingCommitHash = undefined;
@@ -2980,7 +3642,7 @@ const logScript = String.raw`
           const active = item.dataset.hash === pendingCommitHash;
           item.classList.toggle('selected', active); item.setAttribute('aria-selected', String(active));
         });
-        post('selectCommit', { hash: commit.hash });
+        requestCommitSelection(commit.hash);
       };
       row.addEventListener('click', event => {
         if (event.ctrlKey || event.metaKey) return toggleCommitInSelection(commit.hash);
@@ -3004,6 +3666,8 @@ const logScript = String.raw`
         }
         const parent = commit.parents?.[0];
         const child = (state.commits || []).find(item => (item.parents || []).includes(commit.hash));
+        // Git decorates the checked-out commit as 'HEAD' or 'HEAD -> branch'.
+        const isHead = (commit.refs || []).some(ref => ref === 'HEAD' || ref.startsWith('HEAD -> '));
         select();
         return [
           { icon: '⧉', label: 'Copy Revision Number', run: () => post('contextAction', { action: 'copyRevision', hash: commit.hash }) },
@@ -3013,6 +3677,9 @@ const logScript = String.raw`
           { icon: '⑂', label: 'Checkout Revision…', run: () => post('contextAction', { action: 'checkoutRevision', hash: commit.hash }) },
           { icon: '↔', label: 'Compare with Local', run: () => post('contextAction', { action: 'compareWithLocal', hash: commit.hash }) },
           { separator: true },
+          { icon: '✎', label: 'Edit Commit Message…', run: () => beginRewordEditing(commit.hash) },
+          { icon: '⤵', label: 'Fixup…', run: () => post('fixupCommit', { hash: commit.hash }) },
+          { icon: '⟲', label: 'Undo Commit…', disabled: !isHead || (commit.parents || []).length !== 1, run: () => post('undoCommit', { hash: commit.hash }) },
           { icon: '↶', label: 'Reset Current Branch to Here…', run: () => post('reset', { hash: commit.hash }) },
           { icon: '↩', label: 'Revert Commit', run: () => post('revert', { hash: commit.hash }) },
           { icon: '✕', label: 'Drop Commit…', run: () => post('commitsAction', { action: 'dropCommits', hashes: [commit.hash] }) },
@@ -3050,7 +3717,14 @@ const logScript = String.raw`
       const target = virtualCommits[next]; if (!target) return;
       extendCommitSelection(target.hash);
       const focusRow = document.querySelector('.commit-row[data-hash="' + target.hash + '"]');
-      if (focusRow) { focusRow.scrollIntoView({ block: 'nearest' }); focusRow.focus({ preventScroll: true }); }
+      if (focusRow) {
+        focusRow.scrollIntoView({ block: 'nearest' }); focusRow.focus({ preventScroll: true });
+      } else {
+        // The target can be outside the currently materialized virtual window.
+        // Rebuild around it while preserving the range instead of silently
+        // leaving keyboard focus on the old row.
+        selectVirtualCommit(next, true, true);
+      }
       return;
     }
     selectVirtualCommit(next, true);
@@ -3097,10 +3771,10 @@ const logScript = String.raw`
     if (pane) replaceDetailsPane(pane);
   }
 
-  function selectVirtualCommit(index, focus = false) {
+  function selectVirtualCommit(index, focus = false, preserveMulti = false) {
     const commit = virtualCommits[index]; if (!commit) return;
-    pendingCommitHash = commit.hash; post('selectCommit', { hash: commit.hash });
-    multiSelectedHashes = new Set(); commitSelectionAnchor = commit.hash;
+    pendingCommitHash = commit.hash; requestCommitSelection(commit.hash);
+    if (!preserveMulti) multiSelectedHashes = new Set(); commitSelectionAnchor = commit.hash;
     if (virtualCommits.length <= virtualThreshold) {
       // Every row already exists; rebuilding them all made holding an arrow key janky.
       let target;
@@ -3194,6 +3868,48 @@ const logScript = String.raw`
     }
   }
 
+  function beginRewordEditing(hash) {
+    rewordEditingHash = hash; rewordDraft = undefined; rewordNeedsFocus = true;
+    // The editor needs the complete message, which arrives with the selection.
+    if (pendingCommitHash !== hash && state.selection?.commit?.hash !== hash) selectCommitByHash(hash);
+    render();
+  }
+
+  function endRewordEditing() {
+    rewordEditingHash = undefined; rewordDraft = undefined; rewordNeedsFocus = false;
+    render();
+  }
+
+  /** The message of the selected commit as an editable box: Ctrl/Cmd+Enter saves, Escape cancels. */
+  function rewordEditor(commit) {
+    const editor = node('div', 'reword-editor');
+    const box = node('textarea'); box.id = 'reword-message'; box.spellcheck = true;
+    box.value = rewordDraft !== undefined ? rewordDraft : ((commit.body && commit.body.trim()) || commit.subject || '');
+    box.setAttribute('aria-label', t('Commit message'));
+    const save = () => {
+      if (!box.value.trim()) { box.focus(); return; }
+      post('rewordCommit', { hash: commit.hash, message: box.value });
+      endRewordEditing();
+    };
+    box.addEventListener('input', () => { rewordDraft = box.value; });
+    box.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { event.preventDefault(); endRewordEditing(); return; }
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); save(); }
+    });
+    const actions = node('div', 'reword-actions');
+    actions.append(
+      button('Save Message', 'Rewrite the commit with this message', save, 'primary-action'),
+      button('Cancel', 'Keep the current message', endRewordEditing, 'action'),
+      node('span', 'hint', isZh ? 'Ctrl/Cmd+Enter 保存 · Esc 取消' : 'Ctrl/Cmd+Enter saves · Esc cancels'),
+    );
+    editor.append(box, actions);
+    if (rewordNeedsFocus) {
+      rewordNeedsFocus = false;
+      requestAnimationFrame(() => { box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+    }
+    return editor;
+  }
+
   function detailsPane() {
     const pane = node('aside', 'pane details'); pane.id = 'details-pane'; const selection = state.selection;
     if (multiSelectedHashes.size > 1) {
@@ -3217,9 +3933,13 @@ const logScript = String.raw`
     if (!selection || !visible.has(selection.commit.hash)) { pane.append(node('div', 'empty', visible.size ? 'Select a commit to view details' : 'No commit matches the current filters')); return pane; }
     const commit = selection.commit; const details = node('div', 'commit-details');
     details.id = 'commit-details';
-    const subjectLine = node('div', 'detail-subject');
-    appendIssueLinked(subjectLine, commit.subject || t('(no subject)'));
-    details.append(subjectLine);
+    if (rewordEditingHash === commit.hash) {
+      details.append(rewordEditor(commit));
+    } else {
+      const subjectLine = node('div', 'detail-subject');
+      appendIssueLinked(subjectLine, commit.subject || t('(no subject)'));
+      details.append(subjectLine);
+    }
     if ((commit.refs || []).length) {
       const refs = node('div', 'detail-refs');
       for (const ref of orderedRefs(commit.refs)) refs.append(refChip(ref));
@@ -3228,7 +3948,7 @@ const logScript = String.raw`
     const meta = node('div', 'detail-meta');
     for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', new Date(commit.authoredAt).toLocaleString()], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
     details.append(meta);
-    if (commit.body && commit.body !== commit.subject) {
+    if (rewordEditingHash !== commit.hash && commit.body && commit.body !== commit.subject) {
       const body = node('div', 'detail-body');
       appendIssueLinked(body, commit.body);
       details.append(body);
@@ -3595,16 +4315,26 @@ const logScript = String.raw`
 
   window.addEventListener('message', event => {
     if (event.data.type === 'state') {
-      if (blocksStateRender()) deferredState = { ...deferredState, ...event.data.state };
+      const incomingVersion = event.data.state?.stateVersion;
+      if (typeof incomingVersion === 'number' && incomingVersion < Math.max(lastStateVersion, deferredStateVersion)) return;
+      if (blocksStateRender()) {
+        deferredState = { ...deferredState, ...event.data.state };
+        if (typeof incomingVersion === 'number') deferredStateVersion = incomingVersion;
+      }
       else applyIncomingState(event.data.state);
     }
     if (event.data.type === 'selection') {
+      if (event.data.root !== state.selectedRoot || event.data.requestId !== pendingSelectionRequestId) return;
       state.selection = event.data.selection; pendingCommitHash = undefined;
+      pendingSelectionRequestId = undefined;
       if (!(state.selection.files || []).some(file => file.path === selectedFilePath)) selectedFilePath = state.selection.files[0]?.path;
       updateSelectionWithoutRerender();
     }
     if (event.data.type === 'hunks' && typeof event.data.path === 'string') {
+      if (event.data.root !== state.selectedRoot) return;
       const key = (state.selectedRoot || '') + '::' + event.data.path;
+      if (event.data.requestId !== hunkRequestIds.get(key)) return;
+      hunkRequestIds.delete(key);
       hunkState.set(key, { staged: event.data.staged || [], unstaged: event.data.unstaged || [], owned: event.data.owned || [] });
       if (activeToolTab === 'changes' && expandedChangeHunks.has(key)) render();
     }
@@ -3612,7 +4342,11 @@ const logScript = String.raw`
       // Filled only while Amend is still checked: the reply may arrive after
       // the user already changed their mind.
       const amendBox = document.getElementById('amend-toggle');
-      if (amendBox && amendBox.checked) fillCommitMessage(event.data.message);
+      if (event.data.root === state.selectedRoot && event.data.requestId === pendingHeadRequestId
+        && amendBox && amendBox.checked) {
+        pendingHeadRequestId = undefined;
+        fillCommitMessage(event.data.message);
+      }
     }
     if (event.data.type === 'applyCommitMessage') fillCommitMessage(event.data.message);
     if (event.data.type === 'trace') { state.traces = [...(state.traces || []), event.data.trace].slice(-200); if (activeToolTab === 'console') appendConsoleTrace(event.data.trace); }
@@ -3621,7 +4355,9 @@ const logScript = String.raw`
     if (event.data.type === 'committed') {
       const drafts = { ...(uiState.commitMessages || {}) }; delete drafts[state.selectedRoot || ''];
       const options = { ...(uiState.commitOptions || {}) }; delete options[state.selectedRoot || ''];
-      saveUiState({ commitMessages: drafts, commitMessage: undefined, commitOptions: options }); render();
+      // The author was for that one commit; the next one is the user's own again.
+      const authors = { ...(uiState.commitAuthors || {}) }; delete authors[state.selectedRoot || ''];
+      saveUiState({ commitMessages: drafts, commitMessage: undefined, commitOptions: options, commitAuthors: authors, authorFieldOpen: false }); render();
     }
     if (event.data.type === 'error') {
       showErrorBanner(event.data.message);

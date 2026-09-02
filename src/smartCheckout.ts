@@ -1,7 +1,19 @@
 import * as vscode from "vscode";
 import { GitBranch } from "./git/types";
 import { RepositoryManager } from "./repositoryManager";
+import { RepositoryMutationLease } from "./repositoryManager";
 import { restoreTemporaryStash, stashLocalChanges } from "./temporaryStash";
+
+export interface SmartCheckoutOptions {
+  /**
+   * Work to do on the freshly checked-out branch before the parked changes
+   * come back — IDEA's Checkout and Rebase onto Current runs its rebase here.
+   * If it leaves a Git operation paused (a conflict), the stash is kept
+   * rather than replayed on top of it; any other failure restores the changes
+   * and is rethrown.
+   */
+  readonly afterCheckout?: (lease?: RepositoryMutationLease) => Promise<void>;
+}
 
 /**
  * Preserves a dirty worktree and Index around checkout, mirroring IDEA's Smart
@@ -12,6 +24,7 @@ export async function checkoutWithLocalChanges(
   manager: RepositoryManager,
   rootPath: string,
   branch: Pick<GitBranch, "name" | "kind" | "fullName">,
+  options: SmartCheckoutOptions = {},
 ): Promise<boolean> {
   const snapshot = manager.snapshot(rootPath);
   if (!snapshot?.status) return false;
@@ -23,7 +36,14 @@ export async function checkoutWithLocalChanges(
     return false;
   }
   if (!snapshot.status.changes.length) {
-    await manager.checkout(rootPath, branch.name, branch.kind, branch.fullName);
+    if (!options.afterCheckout) {
+      await manager.checkout(rootPath, branch.name, branch.kind, branch.fullName);
+      return true;
+    }
+    await manager.withExclusive(rootPath, async (lease) => {
+      await manager.checkout(rootPath, branch.name, branch.kind, branch.fullName, lease);
+      await options.afterCheckout?.(lease);
+    });
     return true;
   }
 
@@ -35,32 +55,52 @@ export async function checkoutWithLocalChanges(
   );
   if (choice !== smartLabel) return false;
 
-  // Checkout can be blocked by an untracked file it would overwrite, so those
-  // are parked too.
-  const temporary = await stashLocalChanges(manager, rootPath, `JB Git Smart Checkout → ${branch.name}`, { includeUntracked: true });
+  return manager.withExclusive(rootPath, async (lease) => {
+    // Checkout can be blocked by an untracked file it would overwrite, so those
+    // are parked too. The lease covers stash, checkout and restore as one flow.
+    const temporary = await stashLocalChanges(manager, rootPath, `JB Git Smart Checkout → ${branch.name}`, { includeUntracked: true }, lease);
 
-  try {
-    await manager.checkout(rootPath, branch.name, branch.kind, branch.fullName);
-  } catch (error) {
-    // Checkout normally leaves the original branch untouched on failure. Put
-    // the user's changes back there; if this also fails, the immutable stash
-    // remains available in the Stash command.
-    const recovery = await restoreTemporaryStash(manager, rootPath, temporary);
-    if (recovery.outcome !== "restored") {
-      void vscode.window.showWarningMessage(vscode.l10n.t("Checkout failed. Local changes remain safely stored in {0}.", temporary.ref));
+    try {
+      await manager.checkout(rootPath, branch.name, branch.kind, branch.fullName, lease);
+    } catch (error) {
+      // Checkout normally leaves the original branch untouched on failure. Put
+      // the user's changes back there; if this also fails, the immutable stash
+      // remains available in the Stash command.
+      const recovery = await restoreTemporaryStash(manager, rootPath, temporary, lease);
+      if (recovery.outcome !== "restored") {
+        void vscode.window.showWarningMessage(vscode.l10n.t("Checkout failed. Local changes remain safely stored in {0}.", temporary.ref));
+      }
+      throw error;
     }
-    throw error;
-  }
 
-  const restore = await restoreTemporaryStash(manager, rootPath, temporary);
-  if (restore.outcome === "restored") {
-    void vscode.window.showInformationMessage(vscode.l10n.t("Checked out {0} and restored local changes.", branch.name));
+    if (options.afterCheckout) {
+      try {
+        await options.afterCheckout(lease);
+      } catch (error) {
+        if (manager.snapshot(rootPath)?.operation.kind !== "none") {
+          // Replaying the parked changes onto a live conflict would mix them
+          // into the resolution, so they wait in the stash instead.
+          void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}, but the follow-up stopped on a conflict. Your local changes are kept in {1}; apply it from Manage Stashes once the operation is finished or aborted.", branch.name, temporary.ref));
+          throw error;
+        }
+        const recovery = await restoreTemporaryStash(manager, rootPath, temporary, lease);
+        if (recovery.outcome !== "restored") {
+          void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}. Automatic restore failed and {1} was kept: {2}", branch.name, temporary.ref, recovery.error instanceof Error ? recovery.error.message : String(recovery.error)));
+        }
+        throw error;
+      }
+    }
+
+    const restore = await restoreTemporaryStash(manager, rootPath, temporary, lease);
+    if (restore.outcome === "restored") {
+      void vscode.window.showInformationMessage(vscode.l10n.t("Checked out {0} and restored local changes.", branch.name));
+      return true;
+    }
+    if (restore.outcome === "conflicted") {
+      void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}, but restoring local changes caused conflicts. The stash was kept; resolve the files in Local Changes.", branch.name));
+      return true;
+    }
+    void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}. Automatic restore failed and {1} was kept: {2}", branch.name, temporary.ref, restore.error instanceof Error ? restore.error.message : String(restore.error)));
     return true;
-  }
-  if (restore.outcome === "conflicted") {
-    void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}, but restoring local changes caused conflicts. The stash was kept; resolve the files in Local Changes.", branch.name));
-    return true;
-  }
-  void vscode.window.showWarningMessage(vscode.l10n.t("Checked out {0}. Automatic restore failed and {1} was kept: {2}", branch.name, temporary.ref, restore.error instanceof Error ? restore.error.message : String(restore.error)));
-  return true;
+  });
 }

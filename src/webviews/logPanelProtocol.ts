@@ -2,17 +2,18 @@ import { GitBranch, GitLogOptions } from "../git/types";
 
 export type ToolTab = "log" | "console" | "changes" | "shelf";
 
-export type LogMessage =
+type LogMessagePayload =
   | { type: "ready"; logOptions?: Partial<GitLogOptions>; activeTab?: ToolTab }
   | { type: "setActiveTab"; tab: ToolTab }
   | { type: "selectRepository"; root: string }
   | { type: "selectRef"; ref?: string }
   | { type: "setPathFilter"; path?: string }
   | { type: "setLogOptions"; options: GitLogOptions }
-  | { type: "selectCommit" | "newBranch" | "cherryPick" | "revert" | "reset" | "showPatch"; hash: string }
+  | { type: "selectCommit" | "newBranch" | "cherryPick" | "revert" | "reset" | "showPatch" | "undoCommit" | "fixupCommit"; hash: string }
+  | { type: "rewordCommit"; hash: string; message: string }
   | { type: "checkout"; name: string; kind: GitBranch["kind"] }
   | { type: "openCommitFile"; hash: string; path: string }
-  | { type: "refresh" | "clearConsole" | "loadMore" | "createChangelist" | "createShelf" }
+  | { type: "refresh" | "clearConsole" | "loadMore" | "createChangelist" | "createShelf" | "clearLineRange" }
   | { type: "requestHeadMessage" | "messageHistory" }
   | { type: "deepSearch"; text: string }
   | { type: "togglePath"; path: string; checked: boolean }
@@ -21,23 +22,30 @@ export type LogMessage =
   | { type: "requestHunks"; path: string }
   | { type: "applyHunk"; path: string; source: "staged" | "unstaged"; index: number }
   | { type: "moveHunk"; path: string; key: string }
-  | { type: "commit"; message: string; mode: "staged" | "files"; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean }
+  | { type: "commit"; message: string; mode: "staged" | "files"; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean; author?: string }
   | { type: "editChangelist" | "deleteChangelist" | "setActiveChangelist" | "applyShelf" | "deleteShelf"; id: string }
-  | { type: "moveToChangelist" | "stage" | "unstage" | "discard"; path: string }
+  | { type: "moveToChangelist" | "stage" | "unstage" | "discard" | "ignorePath"; path: string }
+  | { type: "resolveWith"; path: string; side: "ours" | "theirs" }
   | { type: "runCommand"; command: string }
   | { type: "contextAction"; action: "copyRevision" | "createPatch" | "checkoutRevision" | "compareWithLocal" | "createTag"; hash: string }
-  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag"; ref: string; kind: GitBranch["kind"] }
+  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "checkoutAndRebase" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag"; ref: string; kind: GitBranch["kind"] }
   | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
   | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string }
   | { type: "commitsAction"; action: "cherryPickCommits" | "compareCommits" | "dropCommits" | "squashCommits"; hashes: string[] };
 
-const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory"]);
-const HASH_TYPES = new Set(["selectCommit", "newBranch", "cherryPick", "revert", "reset", "showPatch"]);
-const PATH_TYPES = new Set(["requestHunks", "moveToChangelist", "stage", "unstage", "discard"]);
+/** Every Webview request may identify the repository and asynchronous request it belongs to. */
+export type LogMessage = LogMessagePayload & {
+  readonly root?: string;
+  readonly requestId?: number;
+};
+
+const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory", "clearLineRange"]);
+const HASH_TYPES = new Set(["selectCommit", "newBranch", "cherryPick", "revert", "reset", "showPatch", "undoCommit", "fixupCommit"]);
+const PATH_TYPES = new Set(["requestHunks", "moveToChangelist", "stage", "unstage", "discard", "ignorePath"]);
 const ID_TYPES = new Set(["editChangelist", "deleteChangelist", "setActiveChangelist", "applyShelf", "deleteShelf"]);
 const BRANCH_KINDS = new Set(["local", "remote", "tag"]);
 const HASH_CONTEXT_ACTIONS = new Set(["copyRevision", "createPatch", "checkoutRevision", "compareWithLocal", "createTag"]);
-const REF_CONTEXT_ACTIONS = new Set(["copyBranch", "newBranchFromRef", "showRefDiff", "createWorktreeFromRef", "renameBranch", "deleteBranch", "mergeRef", "rebaseOntoRef", "pushRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]);
+const REF_CONTEXT_ACTIONS = new Set(["copyBranch", "newBranchFromRef", "showRefDiff", "createWorktreeFromRef", "renameBranch", "deleteBranch", "mergeRef", "rebaseOntoRef", "checkoutAndRebase", "pushRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]);
 const BRANCH_CONTEXT_ACTIONS = new Set(["compareBranches", "showBranchesDiff", "deleteBranches"]);
 const FILE_CONTEXT_ACTIONS = new Set(["copyPath", "showFileDiff", "compareFileWithLocal", "openRepositoryFile", "createFilePatch", "restoreFile", "fileHistory"]);
 const COMMITS_ACTIONS = new Set(["cherryPickCommits", "compareCommits", "dropCommits", "squashCommits"]);
@@ -49,6 +57,8 @@ export function isToolTab(value: unknown): value is ToolTab {
 /** Runtime boundary for messages arriving from the untyped Webview sandbox. */
 export function isLogMessage(value: unknown): value is LogMessage {
   if (!isRecord(value) || typeof value.type !== "string") return false;
+  if (value.root !== undefined && (typeof value.root !== "string" || value.root.length > 4_096)) return false;
+  if (value.requestId !== undefined && (!Number.isSafeInteger(value.requestId) || Number(value.requestId) < 1)) return false;
   if (SIMPLE_TYPES.has(value.type)) return true;
   if (HASH_TYPES.has(value.type)) return typeof value.hash === "string";
   if (PATH_TYPES.has(value.type)) return typeof value.path === "string";
@@ -62,6 +72,9 @@ export function isLogMessage(value: unknown): value is LogMessage {
   }
   if (ID_TYPES.has(value.type)) return typeof value.id === "string";
   switch (value.type) {
+    // The same bound as a commit: the text lands in Git's message file.
+    case "rewordCommit": return typeof value.hash === "string" && typeof value.message === "string" && value.message.length <= 1_000_000;
+    case "resolveWith": return typeof value.path === "string" && (value.side === "ours" || value.side === "theirs");
     case "ready": return (value.activeTab === undefined || isToolTab(value.activeTab)) && (value.logOptions === undefined || isRecord(value.logOptions));
     case "setActiveTab": return isToolTab(value.tab);
     case "selectRepository": return typeof value.root === "string";
@@ -80,7 +93,9 @@ export function isLogMessage(value: unknown): value is LogMessage {
       && optionalBoolean(value.amend)
       && optionalBoolean(value.signoff)
       && optionalBoolean(value.noVerify)
-      && optionalBoolean(value.push);
+      && optionalBoolean(value.push)
+      // IDEA's Author field: one line, bounded, because it becomes `--author=`.
+      && (value.author === undefined || (typeof value.author === "string" && value.author.length <= 512 && !/[\r\n\0]/.test(value.author)));
     case "runCommand": return typeof value.command === "string";
     case "contextAction": return validContextAction(value);
     // A multi-selection action. The bound matches the branch actions; each

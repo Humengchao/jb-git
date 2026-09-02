@@ -49,7 +49,7 @@
     "package": "npm run compile && vsce package --allow-missing-repository"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^20.19.43",
     "@types/vscode": "^1.95.0",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.9.2",
@@ -94,6 +94,18 @@
         "title": "JB Git: File History"
       },
       {
+        "command": "jbGit.historyForSelection",
+        "title": "JB Git: Show History for Selection"
+      },
+      {
+        "command": "jbGit.compareWithBranch",
+        "title": "JB Git: Compare with Branch…"
+      },
+      {
+        "command": "jbGit.compareWithRevision",
+        "title": "JB Git: Compare with Revision…"
+      },
+      {
         "command": "jbGit.blame",
         "title": "JB Git: Blame Active File"
       },
@@ -116,6 +128,14 @@
       {
         "command": "jbGit.blameShowCommit",
         "title": "JB Git: Show Commit for Annotated Line"
+      },
+      {
+        "command": "jbGit.blameHideRevision",
+        "title": "JB Git: Hide Revision in Annotation"
+      },
+      {
+        "command": "jbGit.blameShowHiddenRevisions",
+        "title": "JB Git: Show Hidden Revisions in Annotation"
       },
       {
         "command": "jbGit.commit",
@@ -409,6 +429,21 @@
           "group": "jbGit@10"
         },
         {
+          "command": "jbGit.historyForSelection",
+          "when": "resourceScheme == file && editorHasSelection && jbGit.hasRepository",
+          "group": "jbGit@10"
+        },
+        {
+          "command": "jbGit.compareWithBranch",
+          "when": "resourceScheme == file && jbGit.hasRepository",
+          "group": "jbGit@14"
+        },
+        {
+          "command": "jbGit.compareWithRevision",
+          "when": "resourceScheme == file && jbGit.hasRepository",
+          "group": "jbGit@15"
+        },
+        {
           "command": "jbGit.toggleBlameAnnotations",
           "when": "resourceScheme == file && jbGit.hasRepository",
           "group": "jbGit@11"
@@ -429,6 +464,16 @@
           "command": "jbGit.fileHistory",
           "when": "resourceScheme == file && !explorerResourceIsFolder && jbGit.hasRepository",
           "group": "git@20"
+        },
+        {
+          "command": "jbGit.compareWithBranch",
+          "when": "resourceScheme == file && !explorerResourceIsFolder && jbGit.hasRepository",
+          "group": "git@22"
+        },
+        {
+          "command": "jbGit.compareWithRevision",
+          "when": "resourceScheme == file && !explorerResourceIsFolder && jbGit.hasRepository",
+          "group": "git@23"
         },
         {
           "command": "jbGit.blame",
@@ -559,16 +604,20 @@
         },
         "jbGit.issueNavigation": {
           "type": "array",
+          "restricted": true,
+          "maxItems": 100,
           "items": {
             "type": "object",
             "required": ["pattern", "url"],
             "properties": {
               "pattern": {
                 "type": "string",
+                "maxLength": 512,
                 "description": "%configuration.issueNavigation.pattern%"
               },
               "url": {
                 "type": "string",
+                "maxLength": 2048,
                 "description": "%configuration.issueNavigation.url%"
               }
             }

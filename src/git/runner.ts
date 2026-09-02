@@ -72,6 +72,7 @@ export function redactGitArgs(args: readonly string[]): string[] {
 
 /** Bytes of process output decoded for a trace preview before redaction. */
 const TRACE_PREVIEW_BYTES = 16_000;
+const ERROR_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const TERMINATION_GRACE_MS = 2_000;
 const TERMINATION_SETTLE_MS = 5_000;
@@ -114,8 +115,15 @@ export class GitAbortError extends Error {
 
 /** True when the user cancelled the operation rather than Git failing. */
 export function isGitAbort(error: unknown): boolean {
+  return isGitAbortInner(error, new Set<unknown>());
+}
+
+function isGitAbortInner(error: unknown, seen: Set<unknown>): boolean {
+  if (seen.has(error)) return false;
+  seen.add(error);
   if (error instanceof GitAbortError) return true;
-  return error instanceof GitCommandError && error.cause instanceof GitAbortError;
+  if (error instanceof GitCommandError && error.cause instanceof GitAbortError) return true;
+  return error instanceof Error && error.cause !== undefined && isGitAbortInner(error.cause, seen);
 }
 
 export class GitCommandError extends Error {
@@ -126,9 +134,9 @@ export class GitCommandError extends Error {
 
   public constructor(args: readonly string[], result: Partial<GitResult> = {}, cause?: unknown) {
     const safeArgs = redactGitArgs(args);
-    const stderr = redactGitText(result.stderr?.toString("utf8") ?? "");
-    const stdout = redactGitText(result.stdout?.toString("utf8") ?? "");
-    const detail = redactGitText(cause instanceof Error ? cause.message : stderr.trim() || stdout.trim() || "Git command failed");
+    const stderr = boundedErrorText(result.stderr);
+    const stdout = boundedErrorText(result.stdout);
+    const detail = boundedErrorText(cause instanceof Error ? cause.message : stderr.trim() || stdout.trim() || "Git command failed");
     super(`git ${safeArgs.join(" ")}: ${detail}`);
     this.name = "GitCommandError";
     this.exitCode = result.exitCode ?? null;
@@ -139,6 +147,19 @@ export class GitCommandError extends Error {
       this.cause = cause;
     }
   }
+}
+
+/** Decode only a bounded prefix/suffix for errors; successful command output remains lossless. */
+function boundedErrorText(value: Buffer | string | undefined): string {
+  if (value === undefined) return "";
+  if (typeof value === "string") {
+    if (value.length <= ERROR_OUTPUT_BYTES) return redactGitText(value);
+    const half = Math.floor(ERROR_OUTPUT_BYTES / 2);
+    return `${redactGitText(value.slice(0, half))}\n… output truncated …\n${redactGitText(value.slice(-half))}`;
+  }
+  if (value.length <= ERROR_OUTPUT_BYTES) return redactGitText(value.toString("utf8"));
+  const half = Math.floor(ERROR_OUTPUT_BYTES / 2);
+  return `${redactGitText(value.subarray(0, half).toString("utf8"))}\n… output truncated …\n${redactGitText(value.subarray(-half).toString("utf8"))}`;
 }
 
 /** Executes Git without passing a command through a shell. */

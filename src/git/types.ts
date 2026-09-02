@@ -76,6 +76,25 @@ export interface GitCommitOptions {
   amend?: boolean;
   signoff?: boolean;
   noVerify?: boolean;
+  /**
+   * IDEA's Author field: `Name <email>`, or a pattern Git matches against an
+   * existing author. Absent means the configured identity.
+   */
+  author?: string;
+  /**
+   * `--cleanup=strip`: comment lines are dropped, which is what Git itself does
+   * to a message that started from `commit.template`. The default keeps them,
+   * because `#123` at the start of a line is a legitimate subject otherwise.
+   */
+  stripComments?: boolean;
+}
+
+/** The options of IDEA's Rebase dialog. */
+export interface GitRebaseOptions {
+  /** `--onto <newbase>`: replay the commits after the upstream onto this ref instead of onto the upstream itself. */
+  onto?: string;
+  /** `--rebase-merges`: keep merge commits instead of flattening the history. */
+  rebaseMerges?: boolean;
 }
 
 export interface GitStashEntry {
@@ -107,7 +126,51 @@ export interface GitLogOptions {
   since?: string;
   /** Literal, case-insensitive commit-message search, applied by Git over the whole walk. */
   grep?: string;
+  /** When false, omit the full `%B` body from list records; details can load it on demand. */
+  includeBody?: boolean;
+  /**
+   * Treat the path filter as one exact file rather than IDEA's suffix search,
+   * so a root-level `README.md` is not also every `README.md` below it.
+   */
+  exactPath?: boolean;
+  /**
+   * Continue a single file's history through renames (`--follow`). Git only
+   * accepts this for one literal pathspec, so a suffix (glob) filter ignores it.
+   */
+  follow?: boolean;
+  /**
+   * IDEA's History for Selection: the commits that changed lines `start`–`end`
+   * (1-based, inclusive) of `path` as it is at the starting revision. Git
+   * walks this from a single revision and refuses a pathspec alongside it.
+   */
+  lineRange?: GitLineRange;
 }
+
+export interface GitLineRange {
+  path: string;
+  start: number;
+  end: number;
+}
+
+/** The options of IDEA's Merge dialog that change what the merge produces. */
+export interface GitMergeOptions {
+  /** `--no-ff`: always record a merge commit, even when fast-forwarding is possible. */
+  noFastForward?: boolean;
+  /** `--ff-only`: refuse to merge unless the current branch can be fast-forwarded. */
+  fastForwardOnly?: boolean;
+  /** `--squash`: stage the other branch's changes as one uncommitted change instead of merging its history. */
+  squash?: boolean;
+  /** `--no-commit`: stop before the merge commit so the result can be reviewed or amended. */
+  noCommit?: boolean;
+  /** `--allow-unrelated-histories`: merge a branch that shares no ancestor with the current one. */
+  allowUnrelatedHistories?: boolean;
+}
+
+/** IDEA's Reset Head modes. `keep` moves the branch while refusing to discard uncommitted work. */
+export type GitResetMode = "soft" | "mixed" | "hard" | "keep";
+
+/** Where an ignore rule is written: the shared top-level `.gitignore`, or this clone's private `info/exclude`. */
+export type GitIgnoreTarget = "gitignore" | "exclude";
 
 export interface GitCommitFile {
   status: string;
@@ -163,6 +226,8 @@ export interface GitBlameOptions {
   detectMovementsWithinFile?: boolean;
   /** `-C`: also follow a block copied in from another file the same commit touched. */
   detectMovementsAcrossFiles?: boolean;
+  /** IDEA's Hide Revision: `--ignore-rev` for each, so their lines are credited to the change before them. */
+  ignoreRevisions?: readonly string[];
 }
 
 export interface GitBlameEntry {

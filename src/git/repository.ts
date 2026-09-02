@@ -2,27 +2,32 @@ import * as path from "node:path";
 import { constants, type Stats } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, open, opendir, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { GitCommandError, GitRunner } from "./runner";
+import { GitAbortError, GitCommandError, GitRunner, isGitAbort } from "./runner";
 import { parsePorcelainV2, parseUpstreamTrack } from "./status";
 import { parsePorcelainBlame } from "./blame";
 import { hunkKeys, type HunkSelection } from "../changelists/hunkOwnership";
 import { parseUnifiedDiff, patchForHunk, patchForHunks } from "./patch";
-import { buildRebaseTodo, posixPath, shellQuote, type RebaseStep } from "../interactiveRebase";
+import { buildRebaseTodo, posixPath, shellQuote, validateRebasePlan, type InteractiveRebaseExpectation, type RebaseStep } from "../interactiveRebase";
 import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
+import { appendIgnoreLine } from "../ignoreRules";
 import {
   GitBranch,
   GitCommitOptions,
   GitCommit,
   GitCommitFile,
   GitConflictVersions,
+  GitIgnoreTarget,
   GitLogOptions,
   GitBlameEntry,
   GitBlameOptions,
   GitDiffHunk,
+  GitMergeOptions,
   GitPullStrategy,
   GitOperationState,
   GitRepositoryInfo,
+  GitRebaseOptions,
   GitRemote,
+  GitResetMode,
   GitStashEntry,
   GitStatusSnapshot,
   GitSubmodule,
@@ -118,6 +123,18 @@ function parseLengthPrefixedLog(output: Buffer): GitCommit[] {
   return commits;
 }
 
+/** Carries progress when a sequential multi-commit operation stops early. */
+export class GitBatchError extends Error {
+  public constructor(
+    public readonly applied: number,
+    public readonly currentHash: string,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "GitBatchError";
+  }
+}
+
 export class GitRepository {
   private operationPromise: Promise<unknown> = Promise.resolve();
 
@@ -165,14 +182,29 @@ export class GitRepository {
     return { kind: "none", canContinue: false, canAbort: false };
   }
 
-  public async log(limit = 50, filePath?: string, options?: Partial<GitLogOptions>): Promise<GitCommit[]> {
-    const head = await this.currentRevision();
-    return this.readLog(["--branches", "--remotes", "--tags", ...(head ? [head] : [])], limit, filePath, options);
+  public async log(limit = 50, filePath?: string, options?: Partial<GitLogOptions>, signal?: AbortSignal): Promise<GitCommit[]> {
+    return this.logPage(limit, 0, filePath, options, signal);
   }
 
-  public async logRef(ref: string, limit = 200, filePath?: string, options?: Partial<GitLogOptions>): Promise<GitCommit[]> {
-    const revision = await this.resolveCommit(ref);
-    return this.readLog([revision], limit, filePath, options);
+  /** Reads a page of the same walk without re-sending the commits before it. */
+  public async logPage(limit = 50, skip = 0, filePath?: string, options?: Partial<GitLogOptions>, signal?: AbortSignal): Promise<GitCommit[]> {
+    const head = await this.currentRevision(signal);
+    // A line-range walk is limited by Git to a single starting revision, and
+    // the lines it names exist in HEAD's file, so that is the revision it walks.
+    const revisions = options?.lineRange
+      ? [head ?? "HEAD"]
+      : ["--branches", "--remotes", "--tags", ...(head ? [head] : [])];
+    return this.readLog(revisions, limit, filePath, options, skip, signal);
+  }
+
+  public async logRef(ref: string, limit = 200, filePath?: string, options?: Partial<GitLogOptions>, signal?: AbortSignal): Promise<GitCommit[]> {
+    const revision = await this.resolveCommit(ref, signal);
+    return this.readLog([revision], limit, filePath, options, 0, signal);
+  }
+
+  public async logRefPage(ref: string, limit = 200, skip = 0, filePath?: string, options?: Partial<GitLogOptions>, signal?: AbortSignal): Promise<GitCommit[]> {
+    const revision = await this.resolveCommit(ref, signal);
+    return this.readLog([revision], limit, filePath, options, skip, signal);
   }
 
   public async logRange(baseExclusive: string, head = "HEAD", limit = 200): Promise<GitCommit[]> {
@@ -197,8 +229,22 @@ export class GitRepository {
     limit: number,
     filePath?: string,
     options: Partial<GitLogOptions> = {},
+    skip = 0,
+    signal?: AbortSignal,
   ): Promise<GitCommit[]> {
     const order = options.order === "topological" ? "--topo-order" : "--date-order";
+    const safeSkip = Number.isFinite(skip) && skip > 0 ? Math.min(Math.floor(skip), 5_000) : 0;
+    const pretty = options.includeBody === false
+      ? "%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00"
+      : "%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B";
+    const lineRange = options.lineRange ? lineRangeArgument(options.lineRange) : undefined;
+    // Git refuses a pathspec next to -L: the range already names its file.
+    const pathspec = filePath && !lineRange
+      ? (options.exactPath ? literalPathspec(filePath) : logPathspec(filePath))
+      : undefined;
+    // `--follow` rejects pathspec magic other than literal, so a suffix search
+    // simply does not follow renames rather than failing the whole log.
+    const follow = Boolean(options.follow && pathspec?.startsWith(":(literal)"));
     const result = await this.runner.run([
       "log",
       order,
@@ -209,18 +255,31 @@ export class GitRepository {
       // Fixed strings: the box is a search box, so a bracket in a message is
       // findable rather than a broken regular expression.
       ...(options.grep ? ["--fixed-strings", "--regexp-ignore-case", `--grep=${options.grep}`] : []),
+      ...(safeSkip > 0 ? [`--skip=${safeSkip}`] : []),
       `--max-count=${Math.max(1, Math.min(limit, 5_000))}`,
       "--log-size",
       "--date=iso-strict",
-      "--pretty=format:%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%s%x00%B",
+      `--pretty=format:${pretty}`,
+      ...(follow ? ["--follow"] : []),
+      // -L implies a patch per commit; the list only needs the records.
+      ...(lineRange ? [lineRange, "--no-patch"] : []),
       ...revisions,
-      ...(filePath ? ["--", logPathspec(filePath)] : []),
-    ], { cwd: this.info.rootPath });
+      ...(pathspec ? ["--", pathspec] : []),
+    ], { cwd: this.info.rootPath, signal });
     return parseLengthPrefixedLog(result.stdout);
   }
 
   public async showCommit(hash: string): Promise<string> {
     return this.runner.text(["show", "--format=fuller", "--stat", "--patch", "--decorate=short", hash], { cwd: this.info.rootPath });
+  }
+
+  public async commitMessage(hash: string, signal?: AbortSignal): Promise<string> {
+    const revision = await this.resolveCommit(hash, signal);
+    return trimOutput(await this.runner.text(["show", "-s", "--format=%B", revision], {
+      cwd: this.info.rootPath,
+      signal,
+      maxOutputBytes: 8 * 1024 * 1024,
+    }));
   }
 
   public async formatPatch(ref: string, pathSpec?: string): Promise<string> {
@@ -261,22 +320,23 @@ export class GitRepository {
     return parseNameStatus(output);
   }
 
-  public async commitFiles(hash: string): Promise<GitCommitFile[]> {
-    const revision = await this.resolveCommit(hash);
+  public async commitFiles(hash: string, signal?: AbortSignal): Promise<GitCommitFile[]> {
+    const revision = await this.resolveCommit(hash, signal);
     try {
       // Diffing against the first parent also covers merge commits, which a
       // plain `diff-tree <commit>` lists as empty; IntelliJ shows first-parent.
       const output = await this.runner.text(
         ["diff", "--no-ext-diff", "--name-status", "-z", "-M", `${revision}^`, revision, "--"],
-        { cwd: this.info.rootPath },
+        { cwd: this.info.rootPath, signal },
       );
       return parseNameStatus(output);
     } catch (error) {
+      if (isGitAbort(error)) throw error;
       if (!(error instanceof GitCommandError)) throw error;
       // A root commit has no first parent.
       const output = await this.runner.text(
         ["diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-M", "-z", revision],
-        { cwd: this.info.rootPath },
+        { cwd: this.info.rootPath, signal },
       );
       return parseNameStatus(output);
     }
@@ -308,6 +368,9 @@ export class GitRepository {
       ...(options.ignoreWhitespace ? ["-w"] : []),
       ...(options.detectMovementsWithinFile ? ["-M"] : []),
       ...(options.detectMovementsAcrossFiles ? ["-C"] : []),
+      // IDEA's Hide Revision. Only object ids get through: anything else would
+      // be parsed as a revision expression, or as another option.
+      ...(options.ignoreRevisions ?? []).filter((hash) => /^[0-9a-f]{4,64}$/i.test(hash)).flatMap((hash) => ["--ignore-rev", hash]),
       ...(contents !== undefined ? ["--contents", "-"] : []),
       ...(commit ? [commit] : []),
       "--",
@@ -834,12 +897,126 @@ export class GitRepository {
     });
   }
 
-  public async merge(ref: string): Promise<void> {
-    await this.serial(() => this.runner.run(["merge", ref], { cwd: this.info.rootPath }));
+  public async merge(ref: string, options: GitMergeOptions = {}): Promise<void> {
+    await this.serial(() => this.runner.run(["merge", ...mergeArguments(options), "--", ref], { cwd: this.info.rootPath }));
   }
 
-  public async rebase(ref: string): Promise<void> {
-    await this.serial(() => this.runner.run(["rebase", ref], { cwd: this.info.rootPath }));
+  public async rebase(ref: string, options: GitRebaseOptions = {}): Promise<void> {
+    await this.serial(() => this.runner.run([
+      "rebase",
+      ...(options.rebaseMerges ? ["--rebase-merges"] : []),
+      ...(options.onto ? ["--onto", options.onto] : []),
+      ref,
+    ], { cwd: this.info.rootPath }));
+  }
+
+  /**
+   * IDEA's Fixup…: commits whatever is staged as a `fixup!` of `target`, the
+   * commit the caller then folds it into. Returns the new commit's id.
+   */
+  public async commitFixup(target: string, noVerify = false): Promise<string> {
+    return this.serial(async () => {
+      const revision = await this.resolveCommit(target);
+      await this.runner.run(["commit", `--fixup=${revision}`, ...(noVerify ? ["--no-verify"] : [])], { cwd: this.info.rootPath });
+      return (await this.currentRevision()) ?? "";
+    });
+  }
+
+  /** Folds the staged changes into HEAD, keeping its message: Fixup… aimed at the last commit. */
+  public async amendStaged(expectedHead: string, noVerify = false): Promise<string> {
+    return this.serial(async () => {
+      const head = await this.currentRevision();
+      if (!head || head.toLowerCase() !== expectedHead.toLowerCase()) {
+        throw new Error("HEAD moved since the commit was selected; refresh the Log and try again.");
+      }
+      await this.runner.run(["commit", "--amend", "--no-edit", ...(noVerify ? ["--no-verify"] : [])], { cwd: this.info.rootPath });
+      return (await this.currentRevision()) ?? "";
+    });
+  }
+
+  /** HEAD's reflog subjects, newest first: the raw material of IDEA's Recent branches. */
+  public async reflogSubjects(limit = 200): Promise<string[]> {
+    try {
+      const output = await this.runner.text(["reflog", "show", `--max-count=${Math.max(1, Math.min(limit, 5_000))}`, "--format=%gs", "HEAD"], { cwd: this.info.rootPath });
+      return trimOutput(output).split(/\r?\n/).filter(Boolean);
+    } catch (error) {
+      // An unborn branch has no reflog; that is no recent history, not a failure.
+      if (error instanceof GitCommandError) return [];
+      throw error;
+    }
+  }
+
+  /**
+   * IDEA's Update on a local branch that is not checked out: fetches its
+   * configured upstream straight into the branch, fast-forward only — Git
+   * refuses a non-fast-forward refspec without a `+`, which is the point.
+   * The checked-out branch is refused here because Git refuses to move it
+   * from a fetch; that case is a pull.
+   */
+  public async updateBranch(name: string): Promise<void> {
+    await this.serial(async () => {
+      const current = trimOutput(await this.runner.text(["branch", "--show-current"], { cwd: this.info.rootPath }));
+      if (current === name) throw new Error(`'${name}' is checked out; pull it instead.`);
+      const [remote, merge] = await Promise.all([
+        this.configValue(`branch.${name}.remote`),
+        this.configValue(`branch.${name}.merge`),
+      ]);
+      if (!remote || !merge) throw new Error(`'${name}' has no upstream to update from.`);
+      await this.runner.run(["fetch", remote, `${merge}:refs/heads/${name}`], { cwd: this.info.rootPath });
+    });
+  }
+
+  private async configValue(key: string): Promise<string | undefined> {
+    try {
+      return trimOutput(await this.runner.text(["config", "--get", key], { cwd: this.info.rootPath })) || undefined;
+    } catch (error) {
+      if (error instanceof GitCommandError) return undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * The authors of the recent history, most recent first and without
+   * repeats — the completions IDEA's Author field offers.
+   */
+  public async recentAuthors(limit = 100): Promise<string[]> {
+    const head = await this.currentRevision();
+    if (!head) return [];
+    const output = await this.runner.text(["log", `--max-count=${Math.max(1, Math.min(limit, 1_000))}`, "--format=%an%x00%ae", head], { cwd: this.info.rootPath });
+    const seen = new Set<string>();
+    const authors: string[] = [];
+    for (const line of output.split(/\r?\n/)) {
+      const [name, email] = line.split("\0");
+      if (!name) continue;
+      const author = email ? `${name} <${email}>` : name;
+      if (seen.has(author)) continue;
+      seen.add(author);
+      authors.push(author);
+    }
+    return authors;
+  }
+
+  /**
+   * The text of the configured `commit.template`, or undefined when there is
+   * none. A path starting with `~` is the user's home, as Git reads it; a
+   * relative one is relative to the working tree.
+   */
+  public async commitTemplate(): Promise<string | undefined> {
+    let configured: string;
+    try {
+      configured = trimOutput(await this.runner.text(["config", "--get", "--path", "commit.template"], { cwd: this.info.rootPath }));
+    } catch (error) {
+      if (error instanceof GitCommandError) return undefined;
+      throw error;
+    }
+    if (!configured) return undefined;
+    const file = path.isAbsolute(configured) ? configured : path.resolve(this.info.rootPath, configured);
+    try {
+      return await readFile(file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   }
 
   /** Upper bound on a plan the sequence editor will build, keeping the todo reviewable and the panel responsive. */
@@ -856,22 +1033,32 @@ export class GitRepository {
    */
   public async interactiveRebaseCandidates(base: string): Promise<GitCommit[]> {
     const revision = await this.resolveCommit(base);
-    if (!(await this.isAncestor(revision, "HEAD"))) {
-      throw new Error("Interactive rebase needs a starting commit that is an ancestor of the current branch.");
-    }
-    const count = Number(trimOutput(await this.runner.text(["rev-list", "--count", `${revision}..HEAD`], { cwd: this.info.rootPath })));
+    const count = Number(trimOutput(await this.runner.text(["rev-list", "--count", ...GitRepository.REBASE_RANGE_FLAGS, `${revision}...HEAD`], { cwd: this.info.rootPath })));
     if (!Number.isSafeInteger(count)) throw new Error("Git could not count the commits to rebase.");
     if (count > GitRepository.INTERACTIVE_REBASE_LIMIT) {
       // Truncating instead would produce a todo missing commits Git expects,
       // which rewrites history differently from the reviewed plan.
       throw new Error(`${count} commits is beyond the ${GitRepository.INTERACTIVE_REBASE_LIMIT}-commit interactive rebase limit. Start from a later commit.`);
     }
-    const commits = await this.logRange(revision, "HEAD", GitRepository.INTERACTIVE_REBASE_LIMIT);
+    const commits = await this.rebaseRange(revision, GitRepository.INTERACTIVE_REBASE_LIMIT);
     const merges = commits.filter((commit) => commit.parents.length > 1);
     if (merges.length > 0) {
       throw new Error(`This range contains ${merges.length} merge commit(s), which an interactive rebase would flatten. Start from a commit after the last merge.`);
     }
     return commits.reverse();
+  }
+
+  /**
+   * How `git rebase` itself chooses what to replay onto `upstream`: the commits
+   * reachable from HEAD and not from upstream, minus those whose patch is
+   * already upstream. For an upstream that is an ancestor of HEAD this is
+   * simply `upstream..HEAD`; for a diverged branch it is the plan Git would
+   * have generated, so the reviewed todo matches what Git would have done.
+   */
+  private static readonly REBASE_RANGE_FLAGS = ["--right-only", "--cherry-pick"] as const;
+
+  private async rebaseRange(upstream: string, limit: number): Promise<GitCommit[]> {
+    return this.readLog([...GitRepository.REBASE_RANGE_FLAGS, `${upstream}...HEAD`], limit);
   }
 
   /**
@@ -883,13 +1070,21 @@ export class GitRepository {
    * conflict suspends the sequence for as long as the user needs, and `exec`
    * lines must still find their message files on `--continue`.
    */
-  public async interactiveRebase(base: string, steps: readonly RebaseStep[]): Promise<void> {
+  public async interactiveRebase(
+    base: string,
+    steps: readonly RebaseStep[],
+    expectation?: InteractiveRebaseExpectation,
+  ): Promise<void> {
     await this.serial(async () => {
       const operation = await this.operationState();
       if (operation.kind !== "none") {
         throw new Error(`A ${operation.kind} is already in progress. Finish or abort it before rebasing.`);
       }
       const status = await this.status();
+      const revision = await this.resolveCommit(base);
+      const planProblem = validateRebasePlan(steps);
+      if (planProblem) throw new Error(planProblem);
+      if (expectation) await this.verifyRebaseExpectation(revision, steps, expectation, status);
       // Only a tracked change blocks a rebase. Git itself replays happily over
       // untracked files and only complains about one it would actually
       // overwrite, so counting them here refused a rebase Git would have run.
@@ -900,33 +1095,49 @@ export class GitRepository {
         // stash instead, and a failed restore there leaves a recoverable entry.
         throw new Error(`${blocking.length} local change(s) would block the rebase. Commit, shelve, or stash them first.`);
       }
-      const revision = await this.resolveCommit(base);
       const scratch = path.join(this.info.gitDir, "jb-git-rebase");
       // A previous plan's files are dead once a new one starts, and cleanup
       // cannot run at the end of a rebase that paused on a conflict.
       await rm(scratch, { recursive: true, force: true });
-      await mkdir(scratch, { recursive: true });
-      const plan = buildRebaseTodo(steps, scratch, this.runner.gitPath);
-      const todoPath = path.join(scratch, "todo");
-      await writeFile(todoPath, plan.todo, "utf8");
-      for (const message of plan.messages) {
-        await writeFile(path.join(scratch, message.name), message.content, "utf8");
+      let keepScratch = false;
+      let rebaseInvoked = false;
+      try {
+        await mkdir(scratch, { recursive: true });
+        const plan = buildRebaseTodo(steps, scratch, this.runner.gitPath);
+        const todoPath = path.join(scratch, "todo");
+        await writeFile(todoPath, plan.todo, "utf8");
+        for (const message of plan.messages) {
+          await writeFile(path.join(scratch, message.name), message.content, "utf8");
+        }
+        // Writing the todo can take long enough for another worktree to move
+        // HEAD. Verify once more immediately before handing control to Git.
+        if (expectation) await this.verifyRebaseExpectation(revision, steps, expectation);
+        rebaseInvoked = true;
+        await this.runner.run([
+          // Config that rewrites the todo is pinned off so the plan Git runs is
+          // the plan that was reviewed, whatever the user has configured.
+          "-c", "rebase.autoSquash=false",
+          "-c", "rebase.autoStash=false",
+          "-c", "rebase.updateRefs=false",
+          "-c", "rebase.rebaseMerges=false",
+          "rebase", "--interactive", revision,
+        ], {
+          cwd: this.info.rootPath,
+          // An inherited GIT_SEQUENCE_EDITOR outranks `sequence.editor`, so the
+          // user's real editor would open and block while holding the mutex.
+          // Git runs this through its own shell, which `cp` is always part of.
+          env: { GIT_SEQUENCE_EDITOR: `cp ${shellQuote(posixPath(todoPath))}` },
+        });
+        keepScratch = (await this.operationState()).kind === "rebase";
+      } finally {
+        // A conflict or an `edit` stop needs the message files for Continue;
+        // every other exit (including a preflight/write failure) must not leave
+        // stale sensitive commit messages under .git forever.
+        if (!keepScratch) {
+          const paused = await this.operationState().then((state) => state.kind === "rebase").catch(() => rebaseInvoked);
+          if (!paused) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+        }
       }
-      await this.runner.run([
-        // Config that rewrites the todo is pinned off so the plan Git runs is
-        // the plan that was reviewed, whatever the user has configured.
-        "-c", "rebase.autoSquash=false",
-        "-c", "rebase.autoStash=false",
-        "-c", "rebase.updateRefs=false",
-        "-c", "rebase.rebaseMerges=false",
-        "rebase", "--interactive", revision,
-      ], {
-        cwd: this.info.rootPath,
-        // An inherited GIT_SEQUENCE_EDITOR outranks `sequence.editor`, so the
-        // user's real editor would open and block while holding the mutex.
-        // Git runs this through its own shell, which `cp` is always part of.
-        env: { GIT_SEQUENCE_EDITOR: `cp ${shellQuote(posixPath(todoPath))}` },
-      });
     });
   }
 
@@ -942,6 +1153,29 @@ export class GitRepository {
     });
   }
 
+  /** Applies a reviewed sequence while holding one repository lock and refreshes only once upstream. */
+  public async cherryPickMany(hashes: readonly string[], signal?: AbortSignal, onApplied?: (count: number) => void): Promise<void> {
+    if (hashes.length === 0) throw new Error("Batch cherry-pick needs at least one commit.");
+    await this.serial(async () => {
+      let applied = 0;
+      for (const hash of hashes) {
+        if (signal?.aborted) throw new GitAbortError();
+        try {
+          // The log already supplied complete object IDs.  Avoid a second
+          // rev-parse per commit while retaining the same safe argument shape.
+          if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(hash)) {
+            throw new Error("Batch cherry-pick received an invalid commit ID.");
+          }
+          await this.runner.run(["cherry-pick", hash], { cwd: this.info.rootPath, signal });
+          applied += 1;
+          try { onApplied?.(applied); } catch { /* progress reporting must not change Git's outcome */ }
+        } catch (error) {
+          throw new GitBatchError(applied, hash, error);
+        }
+      }
+    });
+  }
+
   public async revert(hash: string): Promise<void> {
     await this.serial(async () => {
       const revision = await this.resolveCommit(hash);
@@ -949,11 +1183,104 @@ export class GitRepository {
     });
   }
 
-  public async reset(ref: string, mode: "soft" | "mixed" | "hard"): Promise<void> {
+  public async reset(ref: string, mode: GitResetMode): Promise<void> {
     await this.serial(async () => {
       const revision = await this.resolveCommit(ref);
       await this.runner.run(["reset", `--${mode}`, revision], { cwd: this.info.rootPath });
     });
+  }
+
+  /**
+   * IDEA's Undo Commit: moves the branch back to the commit's parent and
+   * leaves everything the commit contained staged, so it can be recommitted.
+   *
+   * `expectedHead` is the commit the user looked at. It is compared with HEAD
+   * inside the mutex, because a commit that landed in between would otherwise
+   * be the one silently undone; a merge is refused, since undoing it to one
+   * parent would stage the other side's whole history as local changes.
+   */
+  public async undoCommit(expectedHead: string): Promise<void> {
+    await this.serial(async () => {
+      const head = await this.currentRevision();
+      if (!head || head.toLowerCase() !== expectedHead.toLowerCase()) {
+        throw new Error("HEAD moved since the commit was selected; refresh the Log and try again.");
+      }
+      const parents = trimOutput(await this.runner.text(["show", "-s", "--format=%P", head], { cwd: this.info.rootPath })).split(/\s+/).filter(Boolean);
+      if (parents.length === 0) throw new Error("The root commit has no parent to move the branch back to.");
+      if (parents.length > 1) throw new Error("A merge commit cannot be undone from the Log; use Reset instead.");
+      await this.runner.run(["reset", "--soft", parents[0]], { cwd: this.info.rootPath });
+    });
+  }
+
+  /**
+   * IDEA's Edit Commit Message on the last commit: replaces HEAD's message
+   * without touching its tree. `--only` with no paths is Git's way of saying
+   * "amend the message alone", so whatever is staged stays staged for the next
+   * commit instead of being swept into this one.
+   */
+  public async rewordHead(expectedHead: string, message: string): Promise<string> {
+    return this.serial(async () => {
+      const head = await this.currentRevision();
+      if (!head || head.toLowerCase() !== expectedHead.toLowerCase()) {
+        throw new Error("HEAD moved since the commit was selected; refresh the Log and try again.");
+      }
+      await this.runner.run(["commit", "--amend", "--only", "--allow-empty", "--file=-"], { cwd: this.info.rootPath, input: message });
+      return (await this.currentRevision()) ?? "";
+    });
+  }
+
+  /** True when `revision` is already contained in some remote-tracking branch, i.e. it has been pushed. */
+  public async isPushed(revision: string): Promise<boolean> {
+    const output = await this.runner.text(
+      ["branch", "--remotes", "--contains", revision, "--format=%(refname)"],
+      { cwd: this.info.rootPath },
+    );
+    return trimOutput(output).length > 0;
+  }
+
+  /**
+   * Resolves a conflict by taking one side whole, the way IDEA's Accept Yours
+   * / Accept Theirs do. A side that deleted the file is honoured by deleting
+   * it, since there is no content to check out; the path leaves the index as
+   * resolved either way.
+   */
+  public async acceptConflictSide(pathSpec: string, side: "ours" | "theirs"): Promise<void> {
+    await this.serial(async () => {
+      await this.assertConflictedPath(pathSpec);
+      const stage = side === "ours" ? "2" : "3";
+      const entries = trimOutput(await this.runner.text(["ls-files", "--unmerged", "-z", "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath }));
+      const hasSide = entries.split("\0").some((entry) => /^\d+ [0-9a-f]+ (\d)\t/.exec(entry)?.[1] === stage);
+      if (hasSide) {
+        await this.runner.run(["checkout", `--${side}`, "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
+        await this.runner.run(["add", "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
+      } else {
+        await this.runner.run(["rm", "--quiet", "--force", "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
+      }
+    });
+  }
+
+  /**
+   * Appends one ignore rule: to the repository's top-level `.gitignore`, or to
+   * `info/exclude`, which is private to this clone. The exclude file lives in
+   * the common Git directory, so a linked worktree shares it with the others.
+   */
+  public async addIgnoreRule(target: GitIgnoreTarget, line: string): Promise<string> {
+    const file = target === "exclude"
+      ? path.join(this.info.commonGitDir, "info", "exclude")
+      : path.join(this.info.rootPath, ".gitignore");
+    await this.serial(async () => {
+      let existing = "";
+      try {
+        existing = await readFile(file, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const updated = appendIgnoreLine(existing, line);
+      if (updated === existing) return;
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, updated, "utf8");
+    });
+    return file;
   }
 
   public async checkoutRevision(ref: string): Promise<void> {
@@ -972,12 +1299,24 @@ export class GitRepository {
 
   public async continueOperation(kind: Exclude<import("./types").GitOperationKind, "none" | "bisect" | "sequencer">): Promise<void> {
     const command = kind === "merge" ? "merge" : kind === "rebase" ? "rebase" : kind === "cherry-pick" ? "cherry-pick" : "revert";
-    await this.serial(() => this.runner.run([command, "--continue"], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      try {
+        await this.runner.run([command, "--continue"], { cwd: this.info.rootPath });
+      } finally {
+        await this.cleanupRebaseScratchIfFinished();
+      }
+    });
   }
 
   public async abortOperation(kind: Exclude<import("./types").GitOperationKind, "none" | "bisect" | "sequencer">): Promise<void> {
     const command = kind === "merge" ? "merge" : kind === "rebase" ? "rebase" : kind === "cherry-pick" ? "cherry-pick" : "revert";
-    await this.serial(() => this.runner.run([command, "--abort"], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      try {
+        await this.runner.run([command, "--abort"], { cwd: this.info.rootPath });
+      } finally {
+        await this.cleanupRebaseScratchIfFinished();
+      }
+    });
   }
 
   public async bisectStart(bad: string, good: string): Promise<void> {
@@ -1012,15 +1351,18 @@ export class GitRepository {
   }
 
   public async skipOperation(kind: "rebase" | "cherry-pick"): Promise<void> {
-    await this.serial(() => this.runner.run([kind, "--skip"], { cwd: this.info.rootPath }));
+    await this.serial(async () => {
+      try {
+        await this.runner.run([kind, "--skip"], { cwd: this.info.rootPath });
+      } finally {
+        await this.cleanupRebaseScratchIfFinished();
+      }
+    });
   }
 
   public async commit(message: string, options: GitCommitOptions = {}): Promise<string> {
     return this.serial(async () => {
-      const args = ["commit", "--file=-"];
-      if (options.amend) args.push("--amend");
-      if (options.signoff) args.push("--signoff");
-      if (options.noVerify) args.push("--no-verify");
+      const args = ["commit", "--file=-", ...commitOptionArguments(options)];
       await this.runner.run(args, { cwd: this.info.rootPath, input: message });
       return (await this.currentRevision()) ?? "";
     });
@@ -1119,10 +1461,7 @@ export class GitRepository {
             input: patchForHunks(output, chosen),
           });
         }
-        const args = ["commit", "--file=-"];
-        if (options.amend) args.push("--amend");
-        if (options.signoff) args.push("--signoff");
-        if (options.noVerify) args.push("--no-verify");
+        const args = ["commit", "--file=-", ...commitOptionArguments(options)];
         await this.runner.run(args, { cwd: this.info.rootPath, env: environment, input: message });
 
         // The selected working-tree content is now HEAD. Align the real index
@@ -1193,6 +1532,14 @@ export class GitRepository {
     });
   }
 
+  /** True when `pathSpec` is a file in HEAD's tree — the precondition for a line-range history. */
+  public async isTrackedAtHead(pathSpec: string): Promise<boolean> {
+    const head = await this.currentRevision();
+    if (!head) return false;
+    const output = await this.runner.text(["ls-tree", "-z", "--name-only", head, "--", literalPathspec(pathSpec)], { cwd: this.info.rootPath });
+    return output.split("\0").includes(pathSpec.replaceAll("\\", "/"));
+  }
+
   public async fileContent(pathSpec: string, revision?: string, signal?: AbortSignal): Promise<Buffer> {
     if (!revision) {
       try {
@@ -1246,10 +1593,11 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["init"], { cwd: this.info.rootPath }));
   }
 
-  public async currentRevision(): Promise<string | null> {
+  public async currentRevision(signal?: AbortSignal): Promise<string | null> {
     try {
-      return trimOutput(await this.runner.text(["rev-parse", "HEAD"], { cwd: this.info.rootPath }));
+      return trimOutput(await this.runner.text(["rev-parse", "HEAD"], { cwd: this.info.rootPath, signal }));
     } catch (error) {
+      if (isGitAbort(error)) throw error;
       if (error instanceof GitCommandError) return null;
       throw error;
     }
@@ -1383,16 +1731,6 @@ export class GitRepository {
   }
 
   /** True when `ancestor` is reachable from `descendant`, distinguishing Git's "no" (exit 1) from a real failure. */
-  private async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
-    try {
-      await this.runner.run(["merge-base", "--is-ancestor", ancestor, descendant], { cwd: this.info.rootPath });
-      return true;
-    } catch (error) {
-      if (error instanceof GitCommandError && error.exitCode === 1) return false;
-      throw error;
-    }
-  }
-
   private async hasRef(ref: string): Promise<boolean> {
     try {
       await this.runner.run(["show-ref", "--verify", "--quiet", ref], { cwd: this.info.rootPath });
@@ -1403,15 +1741,50 @@ export class GitRepository {
     }
   }
 
-  private async resolveCommit(ref: string): Promise<string> {
+  private async resolveCommit(ref: string, signal?: AbortSignal): Promise<string> {
     return trimOutput(await this.runner.text(
       ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`],
-      { cwd: this.info.rootPath },
+      { cwd: this.info.rootPath, signal },
     ));
   }
 
   private async emptyTree(): Promise<string> {
     return trimOutput(await this.runner.text(["mktree"], { cwd: this.info.rootPath, input: "" }));
+  }
+
+  private async cleanupRebaseScratchIfFinished(): Promise<void> {
+    try {
+      if ((await this.operationState()).kind !== "rebase") {
+        await rm(path.join(this.info.gitDir, "jb-git-rebase"), { recursive: true, force: true });
+      }
+    } catch {
+      // Cleanup is best effort and must not replace the Git command's result.
+    }
+  }
+
+  private async verifyRebaseExpectation(
+    revision: string,
+    steps: readonly RebaseStep[],
+    expectation: InteractiveRebaseExpectation,
+    knownStatus?: GitStatusSnapshot,
+  ): Promise<void> {
+    const status = knownStatus ?? await this.status();
+    // The plan was reviewed outside this mutex. Re-read the branch and the
+    // complete range before writing the replacement todo; otherwise a commit
+    // created in another worktree during confirmation would be silently
+    // omitted by Git and disappear from the branch.
+    if (status.branch.oid !== expectation.head
+      || (expectation.branch !== undefined && status.branch.head !== expectation.branch)) {
+      throw new Error("The branch changed while the rebase plan was being reviewed. Reload the history and try again.");
+    }
+    const current = (await this.rebaseRange(revision, Math.max(1, expectation.commits.length + 1))).reverse();
+    if (!sameObjectIdSequence(current.map((commit) => commit.hash), expectation.commits)) {
+      throw new Error("The commit history changed while the rebase plan was being reviewed. Reload the history and try again.");
+    }
+    const planned = steps.map((step) => step.oid);
+    if (!sameObjectIdSet(planned, expectation.commits)) {
+      throw new Error("The rebase plan no longer covers the reviewed commits. Close the editor and start again.");
+    }
   }
 
 
@@ -1431,6 +1804,63 @@ export function logPathspec(value: string): string {
   if (value.includes("/") || value.includes("\\")) return `:(literal)${value.replaceAll("\\", "/")}`;
   const escaped = value.replace(/([*?\[\\])/g, "\\$1");
   return `:(glob)**/${escaped}`;
+}
+
+/** The flags shared by every commit path: amend, sign-off, hooks, author and comment handling. */
+export function commitOptionArguments(options: GitCommitOptions): string[] {
+  const author = options.author?.trim();
+  if (author && /[\r\n\0]/.test(author)) throw new Error("The author must be a single line.");
+  return [
+    ...(options.amend ? ["--amend"] : []),
+    ...(options.signoff ? ["--signoff"] : []),
+    ...(options.noVerify ? ["--no-verify"] : []),
+    ...(author ? [`--author=${author}`] : []),
+    ...(options.stripComments ? ["--cleanup=strip"] : []),
+  ];
+}
+
+/**
+ * The flags for IDEA's merge options. Combinations Git itself rejects are
+ * refused here with a sentence instead of Git's terse "cannot combine".
+ */
+export function mergeArguments(options: GitMergeOptions): string[] {
+  if (options.squash && options.noFastForward) throw new Error("A squash merge never creates a merge commit, so it cannot also be --no-ff.");
+  if (options.squash && options.fastForwardOnly) throw new Error("A squash merge cannot be fast-forward only.");
+  if (options.noFastForward && options.fastForwardOnly) throw new Error("--no-ff and --ff-only contradict each other.");
+  return [
+    ...(options.noFastForward ? ["--no-ff"] : []),
+    ...(options.fastForwardOnly ? ["--ff-only"] : []),
+    ...(options.squash ? ["--squash"] : []),
+    ...(options.noCommit && !options.squash ? ["--no-commit"] : []),
+    ...(options.allowUnrelatedHistories ? ["--allow-unrelated-histories"] : []),
+  ];
+}
+
+/**
+ * Git's `-L<start>,<end>:<file>` argument. The range is 1-based and inclusive;
+ * the file is read literally after the first colon, so a colon inside the
+ * path is fine. A range Git could not honour is refused here, before it
+ * becomes a confusing "file has only N lines" error from the log.
+ */
+export function lineRangeArgument(range: { path: string; start: number; end: number }): string {
+  const { start, end } = range;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
+    throw new Error(`Invalid line range ${start}-${end}.`);
+  }
+  const file = range.path.replaceAll("\\", "/");
+  if (!file || file.includes("\0") || /[\r\n]/.test(file)) throw new Error("Invalid file path for a line range.");
+  return `-L${start},${end}:${file}`;
+}
+
+function sameObjectIdSequence(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value.toLowerCase() === right[index].toLowerCase());
+}
+
+function sameObjectIdSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const expected = new Set(right.map((value) => value.toLowerCase()));
+  return new Set(left.map((value) => value.toLowerCase())).size === expected.size
+    && left.every((value) => expected.has(value.toLowerCase()));
 }
 
 export async function discoverRepository(

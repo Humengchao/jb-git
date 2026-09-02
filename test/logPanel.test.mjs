@@ -107,7 +107,7 @@ test("virtualizes large commit lists and stops offering history past the hard ca
   assert.ok(scriptMatch);
   assert.match(scriptMatch[1], /virtualThreshold = 500/);
   assert.match(scriptMatch[1], /renderCommitWindow/);
-  assert.match(source, /this\.logLimit < 5_000 && commits\.length >= this\.logLimit/);
+  assert.match(source, /this\.logLimit < 5_000 && !this\.logCache\?\.exhausted && commits\.length >= this\.logLimit/);
 });
 
 test("provides safe local-change commits and repository-scoped drafts", () => {
@@ -284,7 +284,8 @@ test("treats a cancelled Git command as a cancellation rather than an error", ()
   assert.match(runnerSource, /export function isGitAbort/);
   assert.match(runnerSource, /terminate\(new GitAbortError\(\)\)/);
   const extensionSource = readSource("../src/extension.ts", import.meta.url);
-  assert.equal(extensionSource.match(/if \(isGitAbort\(error\)\)/g)?.length, 2);
+  // The two notification wrappers and the cancellable Update Project.
+  assert.equal(extensionSource.match(/if \(isGitAbort\(error\)\)/g)?.length, 3);
   assert.match(source, /if \(isGitAbort\(error\)\) return;/);
 });
 
@@ -296,7 +297,7 @@ test("targets refs unambiguously and guards branch operations by kind", () => {
     /diffAgainstWorkingTree\(branch\.fullName\)/,
     /createBranch\(root, name\.trim\(\), branch\.fullName\)/,
     /createTag\(root, name\.trim\(\), branch\.fullName\)/,
-    /rebase\(root, branch\.fullName\)/,
+    /rebaseWithLocalChanges\(this\.manager, root, branch\.fullName, branch\.name\)/,
     /merge\(root, branch\.fullName\)/,
     /compareRefHistory\(left\.fullName, right\.fullName\)/,
     /checkoutWithLocalChanges\(this\.manager, root, branch\)/,

@@ -171,7 +171,7 @@ test("reads ownership against HEAD, which is not the staged/unstaged split", () 
   assert.match(method.slice(0, 1400), /partitionHunks\(keys, this\.changelists\.claims\(root, filePath\), home\)/);
   // A file appears under every list that owns part of it, or the claiming list
   // looks empty while its commit would take those hunks.
-  assert.match(panel, /home === list\.id \|\| this\.changelists\.claims\(root, change\.path\)\.has\(list\.id\)/);
+  assert.match(panel, /homeByPath\.get\(change\.path\)/);
   // "Complete contents" must say when it is about to take another list's work.
   assert.match(panel, /const split = this\.changelists\.splitPaths\(root, paths\);/);
   assert.match(panel, /"Commit Everything"/);

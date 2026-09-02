@@ -13,6 +13,8 @@ import {
 import { canonicalPath, deepestContaining } from "../pathRouting";
 import { compileIssueRules, linkifyIssues } from "../issueNavigation";
 
+let issueRuleCache: { key: string; rules: ReturnType<typeof compileIssueRules> } = { key: "", rules: [] };
+
 /** What a document's annotations are reading: a path in a repository, optionally at a revision. */
 export interface BlameTarget {
   repositoryRoot: string;
@@ -39,6 +41,8 @@ const RECOMPUTE_DEBOUNCE_MS = 400;
 export class BlameAnnotationController implements vscode.Disposable {
   private readonly targets = new Map<string, BlameTarget>();
   private readonly entries = new Map<string, GitBlameEntry[]>();
+  /** IDEA's Hide Revision, per annotated document: commits blamed through as if they never happened. */
+  private readonly hidden = new Map<string, Set<string>>();
   private readonly pending = new Map<string, NodeJS.Timeout>();
   private readonly registrations: vscode.Disposable[] = [];
   private disposed = false;
@@ -192,6 +196,40 @@ export class BlameAnnotationController implements vscode.Disposable {
     await this.show(document, target);
   }
 
+  /**
+   * IDEA's Hide Revision: the commit that owns `line` stops being credited,
+   * and its lines fall back to the change before it. Cumulative until the
+   * annotation is turned off or the hidden set is shown again.
+   */
+  public async hideRevision(uri: vscode.Uri, line: number): Promise<void> {
+    const entry = this.entryAt(uri, line);
+    const key = uri.toString();
+    if (!entry || !this.targets.has(key)) return;
+    if (entry.uncommitted) {
+      await vscode.window.showInformationMessage("This line is not committed yet, so there is no revision to hide.");
+      return;
+    }
+    const set = this.hidden.get(key) ?? new Set<string>();
+    set.add(entry.hash);
+    this.hidden.set(key, set);
+    const document = vscode.workspace.textDocuments.find((candidate) => candidate.uri.toString() === key);
+    if (document) await this.recompute(document);
+  }
+
+  /** Credits every hidden revision again. Returns false when nothing was hidden. */
+  public async showHiddenRevisions(uri: vscode.Uri): Promise<boolean> {
+    const key = uri.toString();
+    if (!this.hidden.get(key)?.size) return false;
+    this.hidden.delete(key);
+    const document = vscode.workspace.textDocuments.find((candidate) => candidate.uri.toString() === key);
+    if (document) await this.recompute(document);
+    return true;
+  }
+
+  public hiddenRevisions(uri: vscode.Uri): readonly string[] {
+    return [...(this.hidden.get(uri.toString()) ?? [])];
+  }
+
   private forget(uri: vscode.Uri): void {
     const key = uri.toString();
     const timer = this.pending.get(key);
@@ -199,6 +237,7 @@ export class BlameAnnotationController implements vscode.Disposable {
     this.pending.delete(key);
     this.targets.delete(key);
     this.entries.delete(key);
+    this.hidden.delete(key);
   }
 
   private schedule(document: vscode.TextDocument): void {
@@ -213,11 +252,14 @@ export class BlameAnnotationController implements vscode.Disposable {
 
   private async resolveTarget(uri: vscode.Uri): Promise<BlameTarget | undefined> {
     if (uri.scheme !== "file") return undefined;
-    const snapshot = deepestContaining(this.manager.all, await canonicalPath(uri.fsPath), (item) => item.repository.info.rootPath);
+    // The root is canonical; relative to it, a path reached through a symlink
+    // would climb out of the repository instead of naming the file.
+    const canonical = await canonicalPath(uri.fsPath);
+    const snapshot = deepestContaining(this.manager.all, canonical, (item) => item.repository.info.rootPath);
     if (!snapshot) return undefined;
     return {
       repositoryRoot: snapshot.repository.info.rootPath,
-      relativePath: path.relative(snapshot.repository.info.rootPath, uri.fsPath),
+      relativePath: path.relative(snapshot.repository.info.rootPath, canonical),
     };
   }
 
@@ -230,7 +272,8 @@ export class BlameAnnotationController implements vscode.Disposable {
       // against the buffer, which is both what an unsaved edit needs and what
       // lets a read-only revision document be annotated at all.
       const contents = target.revision || document.isDirty ? document.getText() : undefined;
-      const entries = await this.manager.blame(target.repositoryRoot, target.relativePath, target.revision, contents, readBlameOptions());
+      const ignoreRevisions = this.hiddenRevisions(document.uri);
+      const entries = await this.manager.blame(target.repositoryRoot, target.relativePath, target.revision, contents, { ...readBlameOptions(), ignoreRevisions });
       // The document may have been closed, or the annotation turned off, while Git ran.
       if (this.disposed || !this.targets.has(key)) return;
       this.entries.set(key, entries);
@@ -261,6 +304,7 @@ export class BlameAnnotationController implements vscode.Disposable {
     // The revision being annotated, so its own lines can be marked the way IDEA
     // marks them. A working-tree annotation has no such revision.
     const annotated = this.targets.get(editor.document.uri.toString())?.revision;
+    const hiddenCount = this.hidden.get(editor.document.uri.toString())?.size ?? 0;
     const lines = layoutBlameAnnotations(entries, options);
     const decorations: vscode.DecorationOptions[] = [];
     // The layout keeps the order of `entries`, so the entry a line came from is
@@ -272,7 +316,7 @@ export class BlameAnnotationController implements vscode.Disposable {
       const own = annotated !== undefined && entry.hash === annotated;
       decorations.push({
         range: new vscode.Range(line.line, 0, line.line, 0),
-        hoverMessage: hover(entry, editor.document.uri, line.line),
+        hoverMessage: hover(entry, editor.document.uri, line.line, hiddenCount),
         renderOptions: {
           before: {
             contentText: nonBreaking(line.text),
@@ -375,10 +419,15 @@ function markdownEscape(value: string): string {
   return value.replace(/[\\`*_{}[\]()#+\-.!|<>]/g, (character) => `\\${character}`);
 }
 
-function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number): vscode.MarkdownString {
+function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number, hiddenCount = 0): vscode.MarkdownString {
   const message = new vscode.MarkdownString(undefined, true);
   // The command links below are ours, so the hover has to be allowed to run them.
-  message.isTrusted = true;
+  // Only the extension commands listed here may be invoked from this hover.
+  // HTTP(S) issue links remain ordinary external links; arbitrary command URIs
+  // from workspace settings are never trusted.
+  message.isTrusted = {
+    enabledCommands: ["jbGit.blameShowCommit", "jbGit.copyRevisionNumber", "jbGit.annotatePreviousRevision", "jbGit.blameHideRevision", "jbGit.blameShowHiddenRevisions"],
+  };
   if (entry.uncommitted) {
     message.appendMarkdown("$(git-commit) **Not committed yet**\n\nThis line is not in any commit.");
     return message;
@@ -391,15 +440,30 @@ function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number): vscode.Mark
   message.appendMarkdown(`[Show Commit](command:jbGit.blameShowCommit?${argument})`);
   message.appendMarkdown(` · [Copy Revision](command:jbGit.copyRevisionNumber?${argument})`);
   message.appendMarkdown(` · [Annotate Previous Revision](command:jbGit.annotatePreviousRevision?${argument})`);
+  // IDEA's Hide Revision: look through this commit to the change before it.
+  message.appendMarkdown(` · [Hide Revision](command:jbGit.blameHideRevision?${argument})`);
+  if (hiddenCount > 0) {
+    message.appendMarkdown(`\n\n${hiddenCount === 1 ? "1 revision hidden" : `${hiddenCount} revisions hidden`} · [Show Hidden Revisions](command:jbGit.blameShowHiddenRevisions?${argument})`);
+  }
   return message;
 }
 
 /** The commit subject with configured issue ids linked, IDEA's Issue Navigation in the hover. */
 function issueLinkedMarkdown(summary: string): string {
-  const rules = compileIssueRules(vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []));
+  const raw = vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []);
+  const key = JSON.stringify(raw);
+  if (issueRuleCache.key !== key) issueRuleCache = { key, rules: compileIssueRules(raw) };
+  const rules = issueRuleCache.rules;
   return linkifyIssues(summary, rules)
-    .map((segment) => (segment.url ? `[${markdownEscape(segment.text)}](${segment.url})` : markdownEscape(segment.text)))
+    .map((segment) => (segment.url
+      ? `[${markdownEscape(segment.text)}](${markdownUrl(segment.url)})`
+      : markdownEscape(segment.text)))
     .join("");
+}
+
+/** Escape URL delimiter characters before placing an external URL in Markdown. */
+function markdownUrl(value: string): string {
+  return value.replace(/[\\()<>]/g, (character) => encodeURIComponent(character));
 }
 
 function describe(error: unknown): string {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { compileIssueRules, linkifyIssues } from "../dist/issueNavigation.js";
+import { compileIssueRules, linkifyIssues, safeIssueUrl } from "../dist/issueNavigation.js";
 import { readSource } from "./sourceText.mjs";
 
 const JIRA = { pattern: "[A-Z][A-Z0-9]+-\\d+", url: "https://tracker.example.com/browse/$0" };
@@ -54,6 +54,38 @@ test("an earlier rule wins overlapping text, so ordering is predictable", () => 
   ]);
 });
 
+test("zero-width patterns never hang or manufacture empty links", () => {
+  const rules = compileIssueRules([
+    { pattern: "(?=ABC)", url: "https://lookahead/$0" },
+    { pattern: "(?<=ABC)", url: "https://lookbehind/$0" },
+    { pattern: "\\b", url: "https://boundary/$0" },
+  ]);
+  const started = Date.now();
+  assert.deepEqual(linkifyIssues("ABC", rules), [{ text: "ABC" }]);
+  assert.ok(Date.now() - started < 250, "zero-width matching must be bounded");
+});
+
+test("issue targets are restricted to external HTTP(S) URLs", () => {
+  assert.equal(safeIssueUrl("command:jbGit.refresh"), undefined);
+  assert.equal(safeIssueUrl("javascript:alert(1)"), undefined);
+  assert.equal(safeIssueUrl("data:text/plain,hello"), undefined);
+  assert.equal(safeIssueUrl("https://user:secret@example.com/issues/1"), undefined);
+  assert.equal(compileIssueRules([{ pattern: "ABC-\\d+", url: "command:jbGit.refresh" }]).length, 0);
+  const rules = compileIssueRules([{ pattern: "ABC-\\d+", url: "https://tracker.example/issue/$0)" }]);
+  assert.equal(linkifyIssues("ABC-1", rules)[0].url, "https://tracker.example/issue/ABC-1)");
+});
+
+test("rejects the common nested-quantifier ReDoS shape", () => {
+  assert.equal(compileIssueRules([{ pattern: "(a+)+$", url: "https://x/$0" }]).length, 0);
+});
+
+test("caps the text scanned by user-configured rules", () => {
+  const rules = compileIssueRules([{ pattern: "A+", url: "https://x/$0" }]);
+  const text = "A".repeat(100_005);
+  const segments = linkifyIssues(text, rules);
+  assert.equal(segments.map((segment) => segment.text).join(""), text);
+});
+
 test("the Webview runs the same compiled module, not a copy", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
   assert.match(panel, /require\.resolve\("\.\.\/issueNavigation"\)/);
@@ -76,7 +108,8 @@ test("the Webview runs the same compiled module, not a copy", () => {
 test("the Blame hover links the summary through the same rules", () => {
   const controller = readSource("../src/views/blameDecorations.ts", import.meta.url);
   assert.match(controller, /issueLinkedMarkdown\(entry\.summary \|\| "\(no commit message\)"\)/);
-  assert.match(controller, /compileIssueRules\(vscode\.workspace\.getConfiguration\("jbGit"\)\.get<unknown\[\]>\("issueNavigation", \[\]\)\)/);
+  assert.match(controller, /const raw = vscode\.workspace\.getConfiguration\("jbGit"\)\.get<unknown\[\]>\("issueNavigation", \[\]\)/);
   // Unmatched text still goes through the Markdown escaper; a link label does too.
-  assert.match(controller, /segment\.url \? `\[\$\{markdownEscape\(segment\.text\)\}\]\(\$\{segment\.url\}\)` : markdownEscape\(segment\.text\)/);
+  assert.match(controller, /markdownUrl\(segment\.url\)/);
+  assert.match(controller, /enabledCommands: \["jbGit\.blameShowCommit", "jbGit\.copyRevisionNumber", "jbGit\.annotatePreviousRevision", "jbGit\.blameHideRevision", "jbGit\.blameShowHiddenRevisions"\]/);
 });

@@ -26,6 +26,40 @@ export function dropPlan(candidates: readonly HistoryEditCommit[], selected: Rea
 }
 
 /**
+ * IDEA's Edit Commit Message on a commit that is not HEAD, as a rebase plan:
+ * the chosen commit becomes a `reword` row carrying the new message and
+ * everything else replays unchanged. HEAD itself never needs this — an amend
+ * of the message alone is cheaper and touches no other commit — so the caller
+ * routes that case elsewhere.
+ */
+export function rewordPlan(candidates: readonly HistoryEditCommit[], hash: string, message: string): RebaseStep[] {
+  if (!candidates.some((commit) => commit.hash === hash)) throw new Error("The commit to reword is not in the rewrite range.");
+  if (!message.trim()) throw new Error("A commit message cannot be empty.");
+  return candidates.map((commit) => (commit.hash === hash
+    ? { oid: commit.hash, subject: commit.subject, action: "reword", message }
+    : { oid: commit.hash, subject: commit.subject, action: "pick" }));
+}
+
+/**
+ * IDEA's Fixup…, as a rebase plan: the freshly made `fixup!` commit — the last
+ * candidate, since it was just committed on top of HEAD — moves to directly
+ * after the commit it fixes and folds into it, keeping that commit's message.
+ * Everything in between replays after the fixed commit, unchanged.
+ */
+export function fixupPlan(candidates: readonly HistoryEditCommit[], target: string, fixup: string): RebaseStep[] {
+  const last = candidates[candidates.length - 1];
+  if (!last || last.hash !== fixup) throw new Error("The fixup commit must be the newest commit in the rewrite range.");
+  if (target === fixup || !candidates.some((commit) => commit.hash === target)) throw new Error("The commit to fix up is not in the rewrite range.");
+  const steps: RebaseStep[] = [];
+  for (const commit of candidates) {
+    if (commit.hash === fixup) continue;
+    steps.push({ oid: commit.hash, subject: commit.subject, action: "pick" });
+    if (commit.hash === target) steps.push({ oid: last.hash, subject: last.subject, action: "fixup" });
+  }
+  return steps;
+}
+
+/**
  * IDEA's Squash Commits, as a rebase plan: the selected commits gather at the
  * oldest one's position and squash into it, keeping every message.
  *

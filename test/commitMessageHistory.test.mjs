@@ -16,14 +16,14 @@ test("checking Amend fills the box with the commit being amended, like IDEA", ()
   // the box is left alone.
   assert.match(panel, /const \[head\] = await snapshot\.repository\.logRef\("HEAD", 1\);/);
   assert.match(panel, /if \(head\) full = originalMessage\(head\);/);
-  assert.match(panel, /postMessage\(\{ type: "headMessage", message: full \}\)/);
+  assert.match(panel, /postMessage\(\{ type: "headMessage", root, requestId, message: full \}\)/);
   // The sandbox remembers what was typed and restores it on uncheck.
-  assert.match(script, /preAmendDrafts\[root\] = message\.value;\s*\n\s*post\('requestHeadMessage'\);/);
+  assert.match(script, /preAmendDrafts\[root\] = message\.value;\s*\n\s*pendingHeadRequestId = nextRequestId\(\);\s*\n\s*post\('requestHeadMessage', \{ requestId: pendingHeadRequestId \}\);/);
   assert.match(script, /message\.value = preAmendDrafts\[root\];/);
   assert.match(script, /delete preAmendDrafts\[root\];/);
   // The reply may arrive after the user unchecked again, and must not fill then.
   assert.match(script, /const amendBox = document\.getElementById\('amend-toggle'\);/);
-  assert.match(script, /if \(amendBox && amendBox\.checked\) fillCommitMessage\(event\.data\.message\);/);
+  assert.match(script, /event\.data\.requestId === pendingHeadRequestId/);
   // Filling goes through the box's own input listener so the draft is saved
   // and the Commit buttons re-enable; a bare .value assignment does neither.
   assert.match(script, /box\.dispatchEvent\(new Event\('input'\)\)/);

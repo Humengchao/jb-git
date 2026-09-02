@@ -92,6 +92,12 @@ test("bounds captured process output", async () => {
   );
 });
 
+test("bounds decoded output retained on a large command error", () => {
+  const error = new GitCommandError(["test"], { stderr: Buffer.alloc(2 * 1024 * 1024, "x") });
+  assert.ok(error.stderr.length < 70 * 1024, "error text should not duplicate multi-megabyte process output");
+  assert.match(error.stderr, /output truncated/);
+});
+
 test("waits for an aborted child to close and emits one trace", async () => {
   const runner = new GitRunner(process.execPath);
   const controller = new AbortController();

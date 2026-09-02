@@ -14,8 +14,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { discoverRepositories, discoverRepository, logPathspec } from "../dist/git/repository.js";
+import { commitOptionArguments, discoverRepositories, discoverRepository, GitBatchError, logPathspec, mergeArguments } from "../dist/git/repository.js";
 import { GitRunner, isGitAbort } from "../dist/git/runner.js";
+import { dropPlan } from "../dist/logHistoryEdit.js";
+import { originalMessage } from "../dist/webviews/rebaseEditorProtocol.js";
 
 function git(cwd, ...args) {
   const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -134,6 +136,128 @@ test("applies IntelliJ-style Git log graph options in Git", async () => {
   const byAuthor = await repository.logRef("HEAD", 20, undefined, { order: "date", firstParent: false, noMerges: false, author: "JB Git Test", since: "2000-01-01T00:00:00.000Z" });
   assert.ok(byAuthor.length > 0);
   assert.ok(byAuthor.every((commit) => commit.author === "JB Git Test"));
+});
+
+test("extends a log with pages without duplicating the already loaded window", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-log-pages-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "history.txt"), "base\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "base");
+  for (let index = 1; index <= 7; index += 1) {
+    writeFileSync(join(root, "history.txt"), `${index}\n`);
+    git(root, "add", "."); git(root, "commit", "-qm", `change ${index}`);
+  }
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const first = await repository.log(3);
+  const second = await repository.logPage(3, first.length);
+  const all = await repository.log(6);
+  assert.deepEqual([...first, ...second].map((commit) => commit.hash), all.map((commit) => commit.hash));
+  assert.equal((await repository.log(1, undefined, { includeBody: false }))[0].body, "");
+  assert.match(await repository.commitMessage("HEAD"), /change 7/);
+});
+
+test("rejects a stale reviewed rebase before writing history or scratch files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-rebase-stale-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "history.txt"), "base\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "base");
+  for (const subject of ["one", "two"]) {
+    writeFileSync(join(root, "history.txt"), `${subject}\n`);
+    git(root, "add", "."); git(root, "commit", "-qm", subject);
+  }
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+  const status = await repository.status();
+  const expectation = {
+    head: candidates.at(-1).hash,
+    branch: status.branch.head,
+    commits: candidates.map((commit) => commit.hash),
+  };
+  const history = candidates.map((commit) => ({ hash: commit.hash, subject: commit.subject, message: originalMessage(commit) }));
+  const oldHead = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "history.txt"), "late\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "late arrival");
+  await assert.rejects(
+    repository.interactiveRebase("HEAD~2", dropPlan(history, new Set([history[0].hash])), expectation),
+    /branch changed|history changed/i,
+  );
+  assert.notEqual(git(root, "rev-parse", "HEAD"), oldHead);
+  assert.equal(git(root, "log", "-1", "--format=%s"), "late arrival");
+  assert.equal(existsSync(join(root, ".git", "jb-git-rebase")), false);
+});
+
+test("allows an approved rebase to reorder the reviewed commits", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-rebase-expectation-reorder-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "base.txt"), "base\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "base");
+  for (const name of ["one", "two"]) {
+    writeFileSync(join(root, `${name}.txt`), `${name}\n`);
+    git(root, "add", "."); git(root, "commit", "-qm", name);
+  }
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+  const status = await repository.status();
+  const expectation = { head: candidates.at(-1).hash, branch: status.branch.head, commits: candidates.map((commit) => commit.hash) };
+  await repository.interactiveRebase("HEAD~2", candidates.slice().reverse().map((commit) => ({ oid: commit.hash, subject: commit.subject, action: "pick" })), expectation);
+  assert.deepEqual(git(root, "log", "-2", "--format=%s").split("\n"), ["one", "two"]);
+});
+
+test("cherry-picks a batch under one operation and reports partial progress", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-cherry-batch-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "base.txt"), "base\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "base");
+  const main = git(root, "branch", "--show-current");
+  git(root, "switch", "-q", "-c", "source");
+  for (const name of ["one", "two"]) {
+    writeFileSync(join(root, `${name}.txt`), `${name}\n`);
+    git(root, "add", "."); git(root, "commit", "-qm", name);
+  }
+  const sourceCommits = (await (await discoverRepository(root, new GitRunner())).logRef("source", 2)).reverse();
+  git(root, "switch", "-q", main);
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  await repository.cherryPickMany(sourceCommits.map((commit) => commit.hash));
+  assert.deepEqual(git(root, "log", "-2", "--format=%s").split("\n"), ["two", "one"]);
+  assert.equal((await repository.operationState()).kind, "none");
+});
+
+test("reports how far a batch cherry-pick got when the next commit conflicts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-cherry-batch-conflict-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "shared.txt"), "base\n");
+  git(root, "add", "."); git(root, "commit", "-qm", "base");
+  const main = git(root, "branch", "--show-current");
+  git(root, "switch", "-q", "-c", "source");
+  writeFileSync(join(root, "one.txt"), "one\n"); git(root, "add", "."); git(root, "commit", "-qm", "one");
+  writeFileSync(join(root, "shared.txt"), "two\n"); git(root, "add", "."); git(root, "commit", "-qm", "two");
+  const source = await discoverRepository(root, new GitRunner());
+  const commits = (await source.logRef("source", 2)).reverse();
+  git(root, "switch", "-q", main);
+  // The first pick adds an independent file; the second one collides with a
+  // target-side edit to shared.txt.
+  const target = await discoverRepository(root, new GitRunner());
+  writeFileSync(join(root, "shared.txt"), "target\n"); git(root, "add", "."); git(root, "commit", "-qm", "target edit");
+  await assert.rejects(
+    target.cherryPickMany(commits.map((commit) => commit.hash)),
+    (error) => error instanceof GitBatchError && error.applied === 1 && error.currentHash === commits[1].hash,
+  );
+  assert.equal((await target.operationState()).kind, "cherry-pick");
+  git(root, "cherry-pick", "--abort");
 });
 
 test("runs commit, branch, and stash operations through Git Core", async () => {
@@ -1098,4 +1222,257 @@ test("never follows conflict symlinks and routes mode 120000 through whole-side 
   assert.equal(readlinkSync(join(root, "link")), "feature-target");
   assert.equal((await repository.status()).changes.find((change) => change.path === "link")?.conflicted ?? false, false);
   assert.equal(readText(victim), "valuable outside content\n");
+});
+
+function seededRepository(prefix = "jb-git-idea-") {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  git(root, "init", "-q", "-b", "main");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "a.txt"), "one\n");
+  git(root, "add", "a.txt");
+  git(root, "commit", "-qm", "first");
+  writeFileSync(join(root, "b.txt"), "two\n");
+  git(root, "add", "b.txt");
+  git(root, "commit", "-qm", "second");
+  return root;
+}
+
+test("Undo Commit moves the branch back one commit and leaves its changes staged", async () => {
+  const root = seededRepository();
+  const repository = await discoverRepository(root, new GitRunner());
+  const head = git(root, "rev-parse", "HEAD");
+  const parent = git(root, "rev-parse", "HEAD~1");
+
+  await repository.undoCommit(head);
+
+  assert.equal(git(root, "rev-parse", "HEAD"), parent);
+  assert.equal(git(root, "diff", "--cached", "--name-only"), "b.txt", "the undone commit's file is staged for the next commit");
+  assert.equal(git(root, "branch", "--show-current"), "main");
+
+  // The commit the user looked at must still be HEAD when the reset runs.
+  await assert.rejects(repository.undoCommit(head), /HEAD moved/);
+  // The root commit has nothing to move back to.
+  await assert.rejects(repository.undoCommit(parent), /root commit/);
+  assert.equal(git(root, "rev-parse", "HEAD"), parent, "a refused undo changes nothing");
+});
+
+test("Undo Commit refuses a merge rather than staging the other branch as local changes", async () => {
+  const root = seededRepository();
+  git(root, "checkout", "-qb", "feature");
+  writeFileSync(join(root, "c.txt"), "three\n");
+  git(root, "add", "c.txt");
+  git(root, "commit", "-qm", "feature work");
+  git(root, "checkout", "-q", "main");
+  writeFileSync(join(root, "d.txt"), "four\n");
+  git(root, "add", "d.txt");
+  git(root, "commit", "-qm", "main work");
+  git(root, "merge", "-q", "--no-ff", "--no-edit", "feature");
+  const repository = await discoverRepository(root, new GitRunner());
+  const merge = git(root, "rev-parse", "HEAD");
+
+  await assert.rejects(repository.undoCommit(merge), /merge commit/);
+  assert.equal(git(root, "rev-parse", "HEAD"), merge);
+});
+
+test("Edit Commit Message on HEAD amends the message alone and keeps staged work staged", async () => {
+  const root = seededRepository();
+  const repository = await discoverRepository(root, new GitRunner());
+  const head = git(root, "rev-parse", "HEAD");
+  const tree = git(root, "rev-parse", "HEAD^{tree}");
+  writeFileSync(join(root, "staged.txt"), "not part of this\n");
+  git(root, "add", "staged.txt");
+
+  const rewritten = await repository.rewordHead(head, "second, explained\n\nWhy it was done.\n");
+
+  assert.notEqual(rewritten, head);
+  assert.equal(git(root, "rev-parse", "HEAD"), rewritten);
+  assert.equal(git(root, "log", "-1", "--format=%B"), "second, explained\n\nWhy it was done.");
+  assert.equal(git(root, "rev-parse", "HEAD^{tree}"), tree, "the commit's content is untouched");
+  assert.equal(git(root, "diff", "--cached", "--name-only"), "staged.txt", "the staged file was not swept into the amend");
+  await assert.rejects(repository.rewordHead(head, "stale"), /HEAD moved/);
+});
+
+test("knows whether a commit has reached a remote-tracking branch", async () => {
+  const root = seededRepository();
+  const remote = mkdtempSync(join(tmpdir(), "jb-git-idea-remote-"));
+  git(remote, "init", "-q", "--bare");
+  git(root, "remote", "add", "origin", remote);
+  git(root, "push", "-q", "-u", "origin", "main");
+  writeFileSync(join(root, "local.txt"), "unpushed\n");
+  git(root, "add", "local.txt");
+  git(root, "commit", "-qm", "unpushed");
+  const repository = await discoverRepository(root, new GitRunner());
+
+  assert.equal(await repository.isPushed(git(root, "rev-parse", "HEAD~1")), true);
+  assert.equal(await repository.isPushed(git(root, "rev-parse", "HEAD")), false);
+});
+
+test("Accept Yours / Accept Theirs take one side whole, honouring a side that deleted the file", async () => {
+  const root = seededRepository();
+  git(root, "checkout", "-qb", "feature");
+  writeFileSync(join(root, "a.txt"), "feature\n");
+  git(root, "rm", "-q", "b.txt");
+  git(root, "commit", "-qam", "feature changes a, deletes b");
+  git(root, "checkout", "-q", "main");
+  writeFileSync(join(root, "a.txt"), "main\n");
+  writeFileSync(join(root, "b.txt"), "main keeps b\n");
+  git(root, "commit", "-qam", "main changes a and b");
+  assert.throws(() => git(root, "merge", "feature"), "the merge must conflict");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.deepEqual((await repository.status()).changes.filter((change) => change.conflicted).map((change) => change.path).sort(), ["a.txt", "b.txt"]);
+
+  await repository.acceptConflictSide("a.txt", "theirs");
+  assert.equal(readText(join(root, "a.txt")), "feature\n");
+  // "Theirs" deleted b.txt, so accepting theirs deletes it here as well.
+  await repository.acceptConflictSide("b.txt", "theirs");
+  assert.equal(existsSync(join(root, "b.txt")), false);
+  const remaining = (await repository.status()).changes.filter((change) => change.conflicted);
+  assert.deepEqual(remaining, [], "both paths left the index as resolved");
+  assert.equal(git(root, "ls-files", "--", "b.txt"), "", "the deletion is staged");
+  await assert.rejects(repository.acceptConflictSide("a.txt", "ours"), /no longer an unresolved conflict/);
+});
+
+test("Reset supports IDEA's Keep mode", async () => {
+  const root = seededRepository();
+  const repository = await discoverRepository(root, new GitRunner());
+  writeFileSync(join(root, "a.txt"), "local edit\n");
+  const parent = git(root, "rev-parse", "HEAD~1");
+
+  // a.txt is identical in both commits, so --keep carries the local edit along.
+  await repository.reset(parent, "keep");
+  assert.equal(git(root, "rev-parse", "HEAD"), parent);
+  assert.equal(readText(join(root, "a.txt")), "local edit\n");
+  assert.equal(existsSync(join(root, "b.txt")), false, "b.txt was added by the reset-away commit");
+});
+
+test("merge options become Git flags, and contradictory ones are refused with a sentence", async () => {
+  assert.deepEqual(mergeArguments({}), []);
+  assert.deepEqual(mergeArguments({ noFastForward: true, noCommit: true }), ["--no-ff", "--no-commit"]);
+  assert.deepEqual(mergeArguments({ squash: true, noCommit: true }), ["--squash"], "squash never commits, so --no-commit is redundant");
+  assert.deepEqual(mergeArguments({ fastForwardOnly: true, allowUnrelatedHistories: true }), ["--ff-only", "--allow-unrelated-histories"]);
+  assert.throws(() => mergeArguments({ squash: true, noFastForward: true }), /squash/);
+  assert.throws(() => mergeArguments({ noFastForward: true, fastForwardOnly: true }), /contradict/);
+
+  const root = seededRepository();
+  git(root, "checkout", "-qb", "feature");
+  writeFileSync(join(root, "c.txt"), "three\n");
+  git(root, "add", "c.txt");
+  git(root, "commit", "-qm", "feature work");
+  git(root, "checkout", "-q", "main");
+  const repository = await discoverRepository(root, new GitRunner());
+  const before = git(root, "rev-parse", "HEAD");
+
+  await repository.merge("feature", { squash: true });
+  assert.equal(git(root, "rev-parse", "HEAD"), before, "a squash merge commits nothing by itself");
+  assert.equal(git(root, "diff", "--cached", "--name-only"), "c.txt", "the branch's change is staged as one change");
+  git(root, "reset", "-q", "--hard");
+
+  await repository.merge("feature", { noFastForward: true });
+  assert.equal(git(root, "show", "-s", "--format=%P", "HEAD").split(" ").length, 2, "--no-ff records a merge commit even though a fast-forward was possible");
+});
+
+test("the rebase dialog's From turns the rebase into --onto, and Preserve merges keeps a merge", async () => {
+  const root = seededRepository();
+  // main: first, second, M(merge of side), tip; side: s1
+  git(root, "checkout", "-qb", "side");
+  writeFileSync(join(root, "s1.txt"), "s1\n");
+  git(root, "add", "s1.txt");
+  git(root, "commit", "-qm", "s1");
+  git(root, "checkout", "-q", "main");
+  git(root, "merge", "-q", "--no-ff", "--no-edit", "side");
+  writeFileSync(join(root, "tip.txt"), "tip\n");
+  git(root, "add", "tip.txt");
+  git(root, "commit", "-qm", "tip");
+  // target: a branch from `first` with its own commit
+  git(root, "checkout", "-qb", "target", "main~3");
+  writeFileSync(join(root, "t.txt"), "t\n");
+  git(root, "add", "t.txt");
+  git(root, "commit", "-qm", "target work");
+  git(root, "checkout", "-q", "main");
+  const repository = await discoverRepository(root, new GitRunner());
+
+  // Replay only `tip` (the commits after the merge) onto target: --onto target <merge>.
+  const merge = git(root, "rev-parse", "main~1");
+  await repository.rebase(merge, { onto: "target" });
+  assert.deepEqual(git(root, "log", "--format=%s", "-3").split("\n"), ["tip", "target work", "first"]);
+  assert.equal(existsSync(join(root, "s1.txt")), false, "the merge and everything before the From point stayed behind");
+
+  // A plain rebase of a history with a merge flattens it; --rebase-merges keeps the merge commit.
+  git(root, "checkout", "-q", "-B", "main", "main@{1}");
+  await repository.rebase("target", { rebaseMerges: true });
+  const merges = git(root, "log", "--merges", "--format=%s", "target..HEAD");
+  assert.ok(merges.length > 0, "the merge commit survived the rebase");
+  assert.equal(git(root, "merge-base", "--is-ancestor", "target", "HEAD"), "");
+});
+
+test("commit options become Git flags; the author must be one line", () => {
+  assert.deepEqual(commitOptionArguments({}), []);
+  assert.deepEqual(commitOptionArguments({ amend: true, signoff: true, noVerify: true }), ["--amend", "--signoff", "--no-verify"]);
+  assert.deepEqual(commitOptionArguments({ author: "  Ada Lovelace <ada@example.invalid> " }), ["--author=Ada Lovelace <ada@example.invalid>"]);
+  assert.deepEqual(commitOptionArguments({ author: "   " }), [], "a blank author means the configured identity");
+  assert.deepEqual(commitOptionArguments({ stripComments: true }), ["--cleanup=strip"]);
+  assert.throws(() => commitOptionArguments({ author: "a\nb" }), /single line/);
+});
+
+test("commits as another author, and strips template comments only when asked", async () => {
+  const root = seededRepository();
+  const repository = await discoverRepository(root, new GitRunner());
+  writeFileSync(join(root, "c.txt"), "c\n");
+  git(root, "add", "c.txt");
+  await repository.commit("by ada", { author: "Ada Lovelace <ada@example.invalid>" });
+  assert.equal(git(root, "log", "-1", "--format=%an <%ae>"), "Ada Lovelace <ada@example.invalid>");
+  assert.equal(git(root, "log", "-1", "--format=%cn"), "JB Git Test", "the committer stays the configured identity");
+  // A bare name is a pattern Git matches against existing authors.
+  writeFileSync(join(root, "d.txt"), "d\n");
+  git(root, "add", "d.txt");
+  await repository.commit("by ada again", { author: "Ada" });
+  assert.equal(git(root, "log", "-1", "--format=%ae"), "ada@example.invalid");
+
+  writeFileSync(join(root, "e.txt"), "e\n");
+  git(root, "add", "e.txt");
+  await repository.commit("#42 keep this line\n\n# a comment-looking line", {});
+  assert.equal(git(root, "log", "-1", "--format=%B").trim(), "#42 keep this line\n\n# a comment-looking line", "without a template, # lines are content");
+  writeFileSync(join(root, "f.txt"), "f\n");
+  git(root, "add", "f.txt");
+  await repository.commit("subject\n# Please enter the commit message\n\nbody", { stripComments: true });
+  assert.equal(git(root, "log", "-1", "--format=%B").trim(), "subject\n\nbody");
+});
+
+test("reads the commit template Git would use, and lists recent authors newest first without repeats", async () => {
+  const root = seededRepository();
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.equal(await repository.commitTemplate(), undefined);
+  writeFileSync(join(root, ".gitmessage"), "type(scope): subject\n\n# Why:\n");
+  git(root, "config", "commit.template", ".gitmessage");
+  assert.equal(await repository.commitTemplate(), "type(scope): subject\n\n# Why:\n", "a relative path is relative to the working tree");
+  git(root, "config", "commit.template", join(root, "missing.txt"));
+  assert.equal(await repository.commitTemplate(), undefined, "a configured file that does not exist is no template");
+
+  writeFileSync(join(root, "c.txt"), "c\n");
+  git(root, "add", "c.txt");
+  await repository.commit("by ada", { author: "Ada Lovelace <ada@example.invalid>" });
+  writeFileSync(join(root, "d.txt"), "d\n");
+  git(root, "add", "d.txt");
+  await repository.commit("by me again", {});
+  assert.deepEqual(await repository.recentAuthors(), ["JB Git Test <jb-git-test@example.invalid>", "Ada Lovelace <ada@example.invalid>"]);
+});
+
+test("Hide Revision blames a commit's lines on the change before it", async () => {
+  const root = seededRepository();
+  writeFileSync(join(root, "a.txt"), "one\ntwo\n");
+  git(root, "commit", "-qam", "add two");
+  writeFileSync(join(root, "a.txt"), "one\ntwo!\n");
+  git(root, "commit", "-qam", "punctuate two");
+  const repository = await discoverRepository(root, new GitRunner());
+  const punctuate = git(root, "rev-parse", "HEAD");
+  const addTwo = git(root, "rev-parse", "HEAD~1");
+
+  const plain = await repository.blame("a.txt");
+  assert.equal(plain.find((entry) => entry.finalLine === 2).hash, punctuate);
+  const hidden = await repository.blame("a.txt", undefined, undefined, { ignoreRevisions: [punctuate] });
+  assert.equal(hidden.find((entry) => entry.finalLine === 2).hash, addTwo, "the hidden revision's line falls back to the commit that added it");
+  // Only object ids reach Git; anything else would be parsed as a revision or an option.
+  const guarded = await repository.blame("a.txt", undefined, undefined, { ignoreRevisions: ["--reverse", "HEAD~1"] });
+  assert.equal(guarded.find((entry) => entry.finalLine === 2).hash, punctuate);
 });

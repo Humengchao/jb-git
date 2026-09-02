@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { dropPlan, squashPlan } from "../dist/logHistoryEdit.js";
+import { dropPlan, fixupPlan, rewordPlan, squashPlan } from "../dist/logHistoryEdit.js";
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
 import { originalMessage } from "../dist/webviews/rebaseEditorProtocol.js";
@@ -78,6 +78,7 @@ test("drops a commit from the log through a real rebase", async () => {
   assert.deepEqual(subjects(root), ["three", "one", "base"]);
   assert.equal(existsSync(join(root, "two.txt")), false, "the dropped commit's file is gone");
   assert.equal(existsSync(join(root, "three.txt")), true, "the commits after the drop replayed");
+  assert.equal(existsSync(join(root, ".git", "jb-git-rebase")), false, "completed rebases must remove scratch message files");
   assert.equal((await repository.operationState()).kind, "none");
 });
 
@@ -95,6 +96,7 @@ test("squashes a non-adjacent selection through a real rebase, reordering the mi
   assert.ok(combined.includes("one") && combined.includes("three"), `both messages survive: ${combined}`);
   for (const name of ["one.txt", "two.txt", "three.txt"]) assert.equal(existsSync(join(root, name)), true, name);
   assert.equal(git(root, "rev-list", "--count", "HEAD"), "3");
+  assert.equal(existsSync(join(root, ".git", "jb-git-rebase")), false, "completed rebases must remove scratch message files");
   assert.equal((await repository.operationState()).kind, "none");
 });
 
@@ -113,8 +115,137 @@ test("the Log offers the rewrite actions and runs them with the stash choreograp
   // Parked changes are kept, not restored, when the rewrite stops on a conflict.
   const rewrite = host.slice(host.indexOf("private async runHistoryRewrite"));
   const keptAt = rewrite.indexOf("Your local changes are kept in {0}");
-  const restoredAt = rewrite.indexOf("restoreTemporaryStash(this.manager, root, parked)");
+  const restoredAt = rewrite.indexOf("restoreTemporaryStash(this.manager, root, parked, lease)");
   assert.ok(keptAt >= 0 && restoredAt >= 0 && keptAt < restoredAt, "conflict path keeps the stash before the success path restores it");
   // A non-adjacent squash names the reorder in the confirmation.
   assert.match(host, /squash && !adjacent/);
+});
+
+test("a reword plan changes one commit's message and replays the rest untouched", () => {
+  const steps = rewordPlan([A, B, C], B.hash, "two, explained\n\nwith a body");
+  assert.deepEqual(steps.map((step) => [step.oid, step.action, step.message]), [
+    [A.hash, "pick", undefined],
+    [B.hash, "reword", "two, explained\n\nwith a body"],
+    [C.hash, "pick", undefined],
+  ]);
+  assert.throws(() => rewordPlan([A, B, C], "d".repeat(40), "x"), /not in the rewrite range/);
+  assert.throws(() => rewordPlan([A, B, C], B.hash, "  \n"), /cannot be empty/);
+});
+
+test("edits the message of an older commit through a real rebase, keeping its tree", async () => {
+  const root = repositoryWithCommits(["one", "two", "three"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const before = git(root, "rev-parse", "HEAD:./");
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~3");
+  const history = candidates.map((commit) => ({ hash: commit.hash, subject: commit.subject, message: originalMessage(commit) }));
+
+  await repository.interactiveRebase("HEAD~3", rewordPlan(history, history[1].hash, "two, explained\n\nBody line."));
+
+  assert.deepEqual(subjects(root), ["three", "two, explained", "one", "base"]);
+  assert.equal(git(root, "log", "-1", "--format=%B", "HEAD~1"), "two, explained\n\nBody line.");
+  assert.equal(git(root, "rev-parse", "HEAD:./"), before, "a reword changes no file");
+  assert.equal(existsSync(join(root, ".git", "jb-git-rebase")), false);
+  assert.equal((await repository.operationState()).kind, "none");
+});
+
+test("the Log offers Edit Commit Message and Undo Commit the way IDEA does", () => {
+  const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  assert.match(script, /label: 'Edit Commit Message…', run: \(\) => beginRewordEditing\(commit\.hash\)/);
+  // Undo is only for the checked-out commit, and never for a merge.
+  assert.match(script, /label: 'Undo Commit…', disabled: !isHead \|\| \(commit\.parents \|\| \[\]\)\.length !== 1/);
+  assert.match(script, /const isHead = \(commit\.refs \|\| \[\]\)\.some\(ref => ref === 'HEAD' \|\| ref\.startsWith\('HEAD -> '\)\)/);
+  // The editor is inline in the details pane: it survives a re-render with the
+  // draft intact, saves on Ctrl/Cmd+Enter and cancels on Escape.
+  assert.match(script, /box\.value = rewordDraft !== undefined \? rewordDraft : /);
+  assert.match(script, /box\.addEventListener\('input', \(\) => \{ rewordDraft = box\.value; \}\)/);
+  assert.match(script, /event\.key === 'Enter' && \(event\.ctrlKey \|\| event\.metaKey\)/);
+  assert.match(script, /post\('rewordCommit', \{ hash: commit\.hash, message: box\.value \}\)/);
+
+  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  // HEAD is amended in place; anything older goes through the same rebase plan
+  // machinery as Drop and Squash, so it shares the refusals and the stash offer.
+  const reword = host.slice(host.indexOf('message.type === "rewordCommit"'), host.indexOf('message.type === "reset"'));
+  assert.match(reword, /await this\.manager\.rewordHead\(root, message\.hash, text\)/);
+  assert.match(reword, /rewordPlan\(history, commit\.hash, text\)/);
+  assert.match(reword, /await this\.runHistoryRewrite\(root, base, steps, expectation/);
+  // A pushed commit is named before the branch is rewritten.
+  assert.match(reword, /await this\.manager\.isPushed\(root, message\.hash\)/);
+  const undo = host.slice(host.indexOf('message.type === "undoCommit"'), host.indexOf('message.type === "rewordCommit"'));
+  assert.match(undo, /Only the last commit can be undone/);
+  assert.match(undo, /snapshot\.operation\.kind !== "none"/);
+  assert.match(undo, /await this\.manager\.undoCommit\(root, message\.hash\)/);
+});
+
+test("a fixup plan moves the newest commit to right after its target and folds it in", () => {
+  const F = { hash: "f".repeat(40), subject: "fixup! one", message: "fixup! one" };
+  const steps = fixupPlan([A, B, C, F], A.hash, F.hash);
+  assert.deepEqual(steps.map((step) => [step.oid, step.action]), [
+    [A.hash, "pick"],
+    [F.hash, "fixup"],
+    [B.hash, "pick"],
+    [C.hash, "pick"],
+  ]);
+  // The fixup commit has to be the one just made on top of HEAD.
+  assert.throws(() => fixupPlan([A, B, C, F], A.hash, C.hash), /newest commit/);
+  assert.throws(() => fixupPlan([A, B, C, F], "d".repeat(40), F.hash), /not in the rewrite range/);
+  assert.throws(() => fixupPlan([A, B, C, F], F.hash, F.hash), /not in the rewrite range/);
+});
+
+test("Fixup… folds the staged changes into an older commit through a real rebase", async () => {
+  const root = repositoryWithCommits(["one", "two", "three"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const target = git(root, "rev-parse", "HEAD~2");
+  writeFileSync(join(root, "one.txt"), "one\nand a fix\n");
+  git(root, "add", "one.txt");
+  writeFileSync(join(root, "unrelated.txt"), "not staged\n");
+
+  const fixup = await repository.commitFixup(target);
+  assert.equal(git(root, "log", "-1", "--format=%s", fixup), "fixup! one");
+  const candidates = await repository.interactiveRebaseCandidates(`${target}^`);
+  const history = candidates.map((commit) => ({ hash: commit.hash, subject: commit.subject, message: originalMessage(commit) }));
+  await repository.interactiveRebase(`${target}^`, fixupPlan(history, target, fixup), {
+    head: fixup,
+    branch: git(root, "branch", "--show-current"),
+    commits: candidates.map((commit) => commit.hash),
+  });
+
+  assert.deepEqual(subjects(root), ["three", "two", "one", "base"], "the fixup commit is gone and every message is kept");
+  assert.equal(git(root, "show", "HEAD~2:one.txt"), "one\nand a fix", "the staged change now lives in the fixed commit");
+  assert.equal(git(root, "show", "HEAD:one.txt"), "one\nand a fix");
+  assert.equal(existsSync(join(root, "unrelated.txt")), true, "an untracked file rides along untouched");
+  assert.equal((await repository.operationState()).kind, "none");
+});
+
+test("Fixup… aimed at HEAD is an amend that keeps the message", async () => {
+  const root = repositoryWithCommits(["one"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const head = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "one.txt"), "one\nmore\n");
+  git(root, "add", "one.txt");
+
+  const amended = await repository.amendStaged(head);
+  assert.notEqual(amended, head);
+  assert.equal(git(root, "log", "-1", "--format=%s"), "one");
+  assert.equal(git(root, "show", "HEAD:one.txt"), "one\nmore");
+  assert.equal(git(root, "rev-list", "--count", "HEAD"), "2");
+  await assert.rejects(repository.amendStaged(head), /HEAD moved/);
+});
+
+test("the Log's Fixup… checks the target before committing and says so when the fold did not run", () => {
+  const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  assert.match(script, /label: 'Fixup…', run: \(\) => post\('fixupCommit', \{ hash: commit\.hash \}\)/);
+  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const fixup = host.slice(host.indexOf('message.type === "fixupCommit"'), host.indexOf('message.type === "rewordCommit"'));
+  // Nothing staged means nothing to fix up with; the Index is the source.
+  assert.match(fixup, /Stage the changes that belong in \{0\} first/);
+  // The linear-history check runs before the fixup commit exists, so a refusal
+  // leaves the staged changes exactly as they were.
+  const preflightAt = fixup.indexOf("Only commits on the current branch's linear history");
+  const commitAt = fixup.indexOf("await this.manager.commitFixup(root, commit.hash)");
+  assert.ok(preflightAt >= 0 && commitAt >= 0 && preflightAt < commitAt);
+  assert.match(fixup, /await this\.manager\.amendStaged\(root, message\.hash\)/);
+  assert.match(fixup, /const folded = await this\.runHistoryRewrite\(/);
+  assert.match(fixup, /was created but not folded in/);
 });

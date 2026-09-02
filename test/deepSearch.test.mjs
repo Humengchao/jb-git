@@ -69,11 +69,23 @@ test("routes Enter to Git and keeps hash input as a jump", () => {
   // The host treats a hex-looking entry as IDEA's go-to-hash: re-root the log
   // at that commit so one outside the loaded window is still reachable.
   assert.match(panel, /if \(\/\^\[0-9a-f\]\{4,64\}\$\/i\.test\(text\)\)/);
-  assert.match(panel, /this\.selectedRef = commit\.hash;\s*\n\s*this\.selectedHash = commit\.hash;/);
+  assert.match(panel, /this\.selectedRef = commit\.hash;\s*\n\s*this\.lineRange = undefined;\s*\n\s*this\.selectedHash = commit\.hash;/);
   // Search text feeds the same read path the log always uses, so the graph,
   // selection and virtualization stay one implementation.
-  assert.match(panel, /const readOptions = \{ \.\.\.this\.logOptions, \.\.\.\(this\.logSearch \? \{ grep: this\.logSearch \} : \{\}\) \};/);
+  const readOptions = panel.slice(panel.indexOf("const readOptions: Partial<GitLogOptions> = {"), panel.indexOf("const fingerprint = JSON.stringify(["));
+  assert.match(readOptions, /\.\.\.this\.logOptions,/);
+  assert.match(readOptions, /includeBody: false,/);
+  assert.match(readOptions, /\.\.\.\(this\.logSearch \? \{ grep: this\.logSearch \} : \{\}\),/);
   // Revealing a commit clears the search that could exclude it.
   const reveal = panel.slice(panel.indexOf("public async revealCommit("));
   assert.match(reveal.slice(0, 700), /this\.logSearch = undefined;/);
+});
+
+test("grows the log with an incremental page and cancels stale walks", () => {
+  assert.match(panel, /logRefPage\(root, this\.selectedRef, additional, cache\.limit/);
+  assert.match(panel, /logPage\(root, additional, cache\.limit/);
+  assert.match(panel, /this\.logRequestController\?\.abort\(\)/);
+  assert.match(panel, /stateVersion: version/);
+  assert.match(panel, /includeBody: false/);
+  assert.match(panel, /readCommitMessage\(root, commit\.hash/);
 });

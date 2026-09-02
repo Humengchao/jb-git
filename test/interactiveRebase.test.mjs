@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -387,17 +387,37 @@ test("rebases over an untracked file, which Git itself does not mind", async () 
   assert.equal(readFileSync(join(root, "scratch-note.txt"), "utf8"), "not committed, not staged\n");
 });
 
-test("refuses a starting commit that is not an ancestor of the branch", async () => {
-  const root = repositoryWithCommits(["one"]);
+test("rebases interactively onto a diverged branch, skipping commits whose patch is already there", async () => {
+  // main: base, one, two, picked-later; side: base, side commit, plus a cherry-pick of `two`.
+  const root = repositoryWithCommits(["one", "two"]);
   const repository = await discoverRepository(root, new GitRunner());
-  git(root, "checkout", "-q", "-b", "side", "HEAD~1");
+  const two = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "three.txt"), "three\n");
+  git(root, "add", "three.txt");
+  git(root, "commit", "-qm", "three");
+  git(root, "checkout", "-q", "-b", "side", "HEAD~3");
   writeFileSync(join(root, "side.txt"), "side\n");
   git(root, "add", "side.txt");
   git(root, "commit", "-qm", "side commit");
+  git(root, "cherry-pick", two);
   const sideTip = git(root, "rev-parse", "HEAD");
   git(root, "checkout", "-q", "-");
 
-  await assert.rejects(repository.interactiveRebaseCandidates(sideTip), /ancestor of the current branch/);
+  // What `git rebase side` would replay: one and three; `two` is already on
+  // side as a different commit with the same patch, so it is left out.
+  const candidates = await repository.interactiveRebaseCandidates(sideTip);
+  assert.deepEqual(candidates.map((commit) => commit.subject), ["one", "three"]);
+
+  const head = git(root, "rev-parse", "HEAD");
+  await repository.interactiveRebase(sideTip, [
+    { oid: candidates[0].hash, subject: "one", action: "pick" },
+    { oid: candidates[1].hash, subject: "three", action: "reword", message: "three, now on side" },
+  ], { head, branch: git(root, "branch", "--show-current"), commits: candidates.map((commit) => commit.hash) });
+
+  assert.deepEqual(subjects(root), ["three, now on side", "one", "two", "side commit", "base"]);
+  assert.equal(git(root, "merge-base", "--is-ancestor", sideTip, "HEAD"), "", "the branch now sits on top of side");
+  for (const name of ["one.txt", "two.txt", "three.txt", "side.txt"]) assert.equal(existsSync(join(root, name)), true, name);
+  assert.equal((await repository.operationState()).kind, "none");
 });
 
 test("refuses a range whose history contains a merge", async () => {
@@ -453,6 +473,7 @@ test("pauses on a conflict and can still finish from the persisted plan", async 
   }
 
   assert.equal((await repository.operationState()).kind, "none");
+  assert.equal(existsSync(join(root, ".git", "jb-git-rebase")), false, "continuing a paused rebase must clean its scratch files");
   // The exec line's message file survived the pause, so the reword still applied.
   assert.deepEqual(subjects(root), ["one, reworded", "two", "base"]);
 });

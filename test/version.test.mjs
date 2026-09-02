@@ -92,6 +92,23 @@ test("bumps a CRLF checkout, which is what Windows gets from git", () => {
   assert.match(readFileSync(join(workspace, "README.zh-CN.md"), "utf8"), new RegExp(`jb-git-${bumped.replace(/\./g, "\\.")}\\.vsix`));
 });
 
+test("does not partially bump files when a later release precondition fails", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const workspace = mkdtempSync(join(tmpdir(), "jb-git-bump-atomic-"));
+  for (const name of ["package.json", "package-lock.json", "CHANGELOG.md", "README.md", "README.zh-CN.md"]) {
+    cpSync(join(root, name), join(workspace, name));
+  }
+  mkdirSync(join(workspace, "scripts"));
+  cpSync(join(root, "scripts", "bump-version.mjs"), join(workspace, "scripts", "bump-version.mjs"));
+  const before = Object.fromEntries(["package.json", "package-lock.json", "CHANGELOG.md", "README.md", "README.zh-CN.md"]
+    .map((name) => [name, readFileSync(join(workspace, name), "utf8")]));
+  writeFileSync(join(workspace, "CHANGELOG.md"), "not a changelog\n");
+  assert.throws(() => execFileSync("node", ["scripts/bump-version.mjs", "patch"], { cwd: workspace, encoding: "utf8" }), /CHANGELOG/);
+  for (const name of ["package.json", "package-lock.json", "README.md", "README.zh-CN.md"]) {
+    assert.equal(readFileSync(join(workspace, name), "utf8"), before[name], `${name} must remain unchanged on failure`);
+  }
+});
+
 test("ships a marketplace icon the manifest can actually use", () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const manifest = readJson("../package.json");
@@ -120,4 +137,10 @@ test("offers a status bar entry that reopens the tool window", () => {
   assert.match(source, /if \(\(vscode\.workspace\.workspaceFolders \?\? \[\]\)\.length\) toolWindowStatus\.show\(\);/);
   const declared = readJson("../package.json").contributes.commands.map((entry) => entry.command);
   assert.ok(declared.includes("jbGit.openGitToolWindow"));
+});
+
+test("keeps the Node type surface within the oldest supported extension runtime", () => {
+  const manifest = readJson("../package.json");
+  const nodeTypes = manifest.devDependencies["@types/node"];
+  assert.match(nodeTypes, /(?:\^|~)?20\./, "VS Code 1.95 ships a Node 20 extension host");
 });

@@ -1,6 +1,8 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GitCommandError, GitRunner, isGitAbort, redactGitText } from "./git/runner";
+import { type GitRepository, mergeArguments } from "./git/repository";
+import type { GitMergeOptions, GitRebaseOptions } from "./git/types";
 import { DiffContentProvider, diffSide, openChangeDiff } from "./views/diffProvider";
 import { BlameAnnotationController } from "./views/blameDecorations";
 import {
@@ -9,16 +11,18 @@ import {
 } from "./views/nodes";
 import { ChangelistStore } from "./changelists/store";
 import { ShelfStore } from "./shelves/store";
-import { RepositoryManager } from "./repositoryManager";
+import { RepositoryManager, type RepositorySnapshot } from "./repositoryManager";
 import { IntelliJGitToolWindowProvider } from "./webviews/logPanel";
 import { conflictSideLabels, MergeConflictEditor } from "./webviews/mergeEditor";
-import { openRebaseEditor } from "./webviews/rebaseEditor";
 import { validateGitRefName, validatePathInput, validateRemoteName, validateSingleLine } from "./inputValidation";
 import { canonicalPath, deepestContaining } from "./pathRouting";
+import { mapLineRangeToHead, selectedLineRange } from "./lineHistory";
 import { moveUntrackedToTrash } from "./discardSafety";
 import { previewAndPush } from "./pushPreview";
 import { checkoutWithLocalChanges } from "./smartCheckout";
-import { restoreTemporaryStash, stashLocalChanges } from "./temporaryStash";
+import { pullWithLocalChanges, rebaseWithLocalChanges } from "./smartRebase";
+import { runInteractiveRebase } from "./interactiveRebaseFlow";
+import { FavoriteBranches, recentBranchesFromReflog } from "./branchPopup";
 
 function workspacePaths(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
@@ -168,6 +172,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const diffProvider = new DiffContentProvider();
   const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore, diffProvider, context.workspaceState);
   const mergeEditor = new MergeConflictEditor(manager, context.workspaceState, diffProvider);
+  const favoriteBranches = new FavoriteBranches(context.workspaceState);
   const blameAnnotations = new BlameAnnotationController(manager, async (target, content) => diffSide(
     diffProvider,
     target.repositoryRoot,
@@ -510,32 +515,87 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.branchesPopup", async (rootPath?: string) => {
       const snapshot = await pickRepository(rootPath);
       if (!snapshot) return void vscode.window.showInformationMessage(vscode.l10n.t("No Git repository was found in this workspace."));
-      type BranchAction = vscode.QuickPickItem & { action?: "new" | "fetch" | "pull" | "push" | "log"; branch?: typeof snapshot.branches[number] };
+      type Branch = typeof snapshot.branches[number];
+      type BranchAction = vscode.QuickPickItem & { action?: "new" | "fetch" | "pull" | "push" | "log" | "update"; branch?: Branch };
+      const root = snapshot.repository.info.rootPath;
       const current = snapshot.status?.branch.head;
-      const items: BranchAction[] = [
-        { label: `$(add) ${vscode.l10n.t("New Branch")}`, description: vscode.l10n.t("from {0}", current ?? "HEAD"), action: "new" },
-        { label: `$(git-pull-request-go-to-changes) ${vscode.l10n.t("Fetch")}`, action: "fetch" },
-        { label: `$(cloud-download) ${vscode.l10n.t("Pull…")}`, action: "pull" },
-        { label: `$(cloud-upload) ${vscode.l10n.t("Push…")}`, action: "push" },
-        { label: `$(git-commit) ${vscode.l10n.t("Show Git Log")}`, action: "log" },
-        { label: vscode.l10n.t("Local Branches"), kind: vscode.QuickPickItemKind.Separator },
-        ...snapshot.branches.filter((branch) => branch.kind === "local").map((branch) => ({
-          label: `${branch.name === current ? "$(check)" : "$(git-branch)"} ${branch.name}`,
-          description: branch.upstream ? `${branch.upstream}${branch.tracking ? ` · ${branch.tracking}` : ""}` : undefined,
+      // IDEA's popup groups: Recent (from the reflog) and Favorites (starred
+      // here, kept per workspace) above the plain lists. Favorites are keyed by
+      // kind as well as name, since `origin/x` can be both a remote-tracking
+      // and, in principle, a local branch.
+      const favoriteKey = (branch: Branch) => `${branch.kind}:${branch.name}`;
+      const existing = new Set(snapshot.branches.filter((branch) => branch.kind !== "tag").map(favoriteKey));
+      await favoriteBranches.prune(root, existing);
+      const localNames = new Set(snapshot.branches.filter((branch) => branch.kind === "local").map((branch) => branch.name));
+      const recent = recentBranchesFromReflog(await manager.reflogSubjects(root).catch(() => []), localNames, current);
+      const starButton = (starred: boolean): vscode.QuickInputButton => ({
+        iconPath: new vscode.ThemeIcon(starred ? "star-full" : "star-empty"),
+        tooltip: starred ? vscode.l10n.t("Remove from Favorites") : vscode.l10n.t("Add to Favorites"),
+      });
+      const updateButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon("sync"), tooltip: vscode.l10n.t("Update from upstream") };
+      const branchItem = (branch: Branch, icon?: string): BranchAction => {
+        const starred = favoriteBranches.has(root, favoriteKey(branch));
+        const buttons: vscode.QuickInputButton[] = [];
+        if (branch.kind === "local" && branch.upstream && !branch.upstreamGone) buttons.push(updateButton);
+        if (branch.kind !== "tag") buttons.push(starButton(starred));
+        const glyph = icon ?? (branch.kind === "tag" ? "$(tag)" : branch.kind === "remote" ? "$(cloud)" : branch.name === current ? "$(check)" : "$(git-branch)");
+        return {
+          label: `${glyph} ${branch.name}`,
+          description: branch.kind === "local" && branch.upstream ? `${branch.upstream}${branch.tracking ? ` · ${branch.tracking}` : ""}` : undefined,
           branch,
-        })),
-        { label: vscode.l10n.t("Remote Branches"), kind: vscode.QuickPickItemKind.Separator },
-        ...snapshot.branches.filter((branch) => branch.kind === "remote").map((branch) => ({ label: `$(cloud) ${branch.name}`, branch })),
-        { label: vscode.l10n.t("Tags"), kind: vscode.QuickPickItemKind.Separator },
-        ...snapshot.branches.filter((branch) => branch.kind === "tag").map((branch) => ({ label: `$(tag) ${branch.name}`, branch })),
-      ];
-      const selected = await vscode.window.showQuickPick(items, {
-        title: `${path.basename(snapshot.repository.info.rootPath)} · ${current ?? "detached HEAD"}`,
-        placeHolder: vscode.l10n.t("Git branches and common operations"),
-        matchOnDescription: true,
+          buttons,
+        };
+      };
+      const build = (): BranchAction[] => {
+        const favorites = snapshot.branches.filter((branch) => branch.kind !== "tag" && favoriteBranches.has(root, favoriteKey(branch)));
+        const recentBranches = recent.map((name) => snapshot.branches.find((branch) => branch.kind === "local" && branch.name === name)).filter((branch): branch is Branch => Boolean(branch));
+        return [
+          { label: `$(add) ${vscode.l10n.t("New Branch")}`, description: vscode.l10n.t("from {0}", current ?? "HEAD"), action: "new" },
+          { label: `$(git-pull-request-go-to-changes) ${vscode.l10n.t("Fetch")}`, action: "fetch" },
+          { label: `$(cloud-download) ${vscode.l10n.t("Pull…")}`, action: "pull" },
+          { label: `$(cloud-upload) ${vscode.l10n.t("Push…")}`, action: "push" },
+          { label: `$(git-commit) ${vscode.l10n.t("Show Git Log")}`, action: "log" },
+          ...(recentBranches.length ? [{ label: vscode.l10n.t("Recent"), kind: vscode.QuickPickItemKind.Separator }, ...recentBranches.map((branch) => branchItem(branch, "$(history)"))] : []),
+          ...(favorites.length ? [{ label: vscode.l10n.t("Favorites"), kind: vscode.QuickPickItemKind.Separator }, ...favorites.map((branch) => branchItem(branch))] : []),
+          { label: vscode.l10n.t("Local Branches"), kind: vscode.QuickPickItemKind.Separator },
+          ...snapshot.branches.filter((branch) => branch.kind === "local").map((branch) => branchItem(branch)),
+          { label: vscode.l10n.t("Remote Branches"), kind: vscode.QuickPickItemKind.Separator },
+          ...snapshot.branches.filter((branch) => branch.kind === "remote").map((branch) => branchItem(branch)),
+          { label: vscode.l10n.t("Tags"), kind: vscode.QuickPickItemKind.Separator },
+          ...snapshot.branches.filter((branch) => branch.kind === "tag").map((branch) => branchItem(branch)),
+        ];
+      };
+      const picker = vscode.window.createQuickPick<BranchAction>();
+      picker.title = `${path.basename(root)} · ${current ?? "detached HEAD"}`;
+      picker.placeholder = vscode.l10n.t("Git branches and common operations");
+      picker.matchOnDescription = true;
+      picker.items = build();
+      const selected = await new Promise<BranchAction | undefined>((resolve) => {
+        picker.onDidTriggerItemButton(async (event) => {
+          if (!event.item.branch) return;
+          if (event.button === updateButton) {
+            resolve({ ...event.item, action: "update" });
+            picker.hide();
+            return;
+          }
+          // Starring keeps the popup open, like IDEA's star.
+          await favoriteBranches.toggle(root, favoriteKey(event.item.branch));
+          picker.items = build();
+        });
+        picker.onDidAccept(() => { resolve(picker.selectedItems[0]); picker.hide(); });
+        picker.onDidHide(() => { resolve(undefined); picker.dispose(); });
+        picker.show();
       });
       if (!selected) return;
-      const root = snapshot.repository.info.rootPath;
+      if (selected.action === "update" && selected.branch) {
+        if (!(await requireTrustedWorkspace())) return;
+        if (selected.branch.name === current) {
+          await vscode.commands.executeCommand("jbGit.pull", root);
+          return;
+        }
+        await runWithNotification(vscode.l10n.t("Updating {0} from {1}", selected.branch.name, selected.branch.upstream ?? "upstream"), () => manager.updateBranch(root, selected.branch!.name));
+        return;
+      }
       if (selected.branch) {
         if (selected.branch.kind === "local" && selected.branch.name === current) return;
         await runWithNotification(vscode.l10n.t("Checking out {0}", selected.branch.name), () => checkoutWithLocalChanges(manager, root, selected.branch!));
@@ -591,11 +651,77 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("jbGit.fileHistory", async (resource?: vscode.Uri) => {
       const uri = resource?.scheme === "file" ? resource : vscode.window.activeTextEditor?.document.uri;
       if (!uri || uri.scheme !== "file") return void vscode.window.showInformationMessage(vscode.l10n.t("Open or select a file before showing its Git history."));
-      const filePath = uri.fsPath;
-      const snapshot = deepestContaining(manager.all, await canonicalPath(filePath), (item) => item.repository.info.rootPath);
+      // The repository root is canonical, so the file must be too: through a
+      // symlinked directory the editor's path would otherwise leave the root.
+      const filePath = await canonicalPath(uri.fsPath);
+      const snapshot = deepestContaining(manager.all, filePath, (item) => item.repository.info.rootPath);
       if (!snapshot) return void vscode.window.showInformationMessage(vscode.l10n.t("The active file is not inside a discovered Git repository."));
       const relativePath = path.relative(snapshot.repository.info.rootPath, filePath);
       await gitToolWindow.open(snapshot.repository.info.rootPath, relativePath);
+    }),
+    vscode.commands.registerCommand("jbGit.compareWithBranch", async (resource?: vscode.Uri) => {
+      // IDEA's Compare with Branch…: the file as it is on another branch (or
+      // tag) against the working copy, in the native diff.
+      const located = await locateFile(manager, resource, vscode.l10n.t("Open or select a file before comparing it with a branch."));
+      if (!located) return;
+      const { snapshot, root, relativePath } = located;
+      const current = snapshot.status?.branch.head;
+      const branch = await vscode.window.showQuickPick(
+        snapshot.branches.filter((candidate) => !(candidate.kind === "local" && candidate.name === current)).map((candidate) => ({
+          label: `${candidate.kind === "tag" ? "$(tag)" : candidate.kind === "remote" ? "$(cloud)" : "$(git-branch)"} ${candidate.name}`,
+          candidate,
+        })),
+        { title: vscode.l10n.t("Compare {0} with branch", relativePath), placeHolder: vscode.l10n.t("Branch or tag to compare the working copy with") },
+      );
+      if (!branch) return;
+      await compareFileWithRef(diffProvider, snapshot.repository, root, relativePath, branch.candidate.fullName, branch.candidate.name);
+    }),
+    vscode.commands.registerCommand("jbGit.compareWithRevision", async (resource?: vscode.Uri) => {
+      // IDEA's Compare with Revision…: pick a commit from the file's own
+      // history — followed through renames — and diff that version with the
+      // working copy.
+      const located = await locateFile(manager, resource, vscode.l10n.t("Open or select a file before comparing it with a revision."));
+      if (!located) return;
+      const { snapshot, root, relativePath } = located;
+      const history = await snapshot.repository.logRef("HEAD", 100, relativePath, { exactPath: true, follow: true }).catch(() => []);
+      if (!history.length) return void vscode.window.showInformationMessage(vscode.l10n.t("{0} has not been committed yet, so its lines have no history.", relativePath));
+      const picked = await vscode.window.showQuickPick(
+        history.map((commit) => ({
+          label: `${commit.hash.slice(0, 8)} ${commit.subject}`,
+          description: `${commit.author} · ${new Date(commit.authoredAt).toLocaleDateString()}`,
+          commit,
+        })),
+        { title: vscode.l10n.t("Compare {0} with revision", relativePath), placeHolder: vscode.l10n.t("Revision to compare the working copy with"), matchOnDescription: true },
+      );
+      if (!picked) return;
+      await compareFileWithRef(diffProvider, snapshot.repository, root, relativePath, picked.commit.hash, picked.commit.hash.slice(0, 8));
+    }),
+    vscode.commands.registerCommand("jbGit.historyForSelection", async () => {
+      // IDEA's Show History for Selection: the Log narrowed to the commits
+      // that touched the selected lines, followed through renames by Git.
+      const editor = vscode.window.activeTextEditor;
+      const uri = editor?.document.uri;
+      if (!editor || !uri || uri.scheme !== "file") return void vscode.window.showInformationMessage(vscode.l10n.t("Select lines in a file before showing their history."));
+      const filePath = await canonicalPath(uri.fsPath);
+      const snapshot = deepestContaining(manager.all, filePath, (item) => item.repository.info.rootPath);
+      if (!snapshot) return void vscode.window.showInformationMessage(vscode.l10n.t("The active file is not inside a discovered Git repository."));
+      const root = snapshot.repository.info.rootPath;
+      const relativePath = path.relative(root, filePath);
+      if (editor.document.isDirty) {
+        // The selection is matched to the committed file through the on-disk
+        // diff, which cannot see unsaved text.
+        const save = vscode.l10n.t("Save and Show");
+        const answer = await vscode.window.showInformationMessage(vscode.l10n.t("Save {0} so the selected lines can be matched to the committed file?", path.basename(filePath)), save);
+        if (answer !== save || !(await editor.document.save())) return;
+      }
+      if (!(await manager.isTrackedAtHead(root, relativePath))) {
+        return void vscode.window.showInformationMessage(vscode.l10n.t("{0} has not been committed yet, so its lines have no history.", relativePath));
+      }
+      const { hunks } = await manager.diffAgainstHead(root, relativePath);
+      const selection = selectedLineRange(editor.selection.start.line, editor.selection.end.line, editor.selection.end.character);
+      const committed = mapLineRangeToHead(hunks, selection);
+      if (!committed) return void vscode.window.showInformationMessage(vscode.l10n.t("The selected lines have not been committed yet, so they have no history."));
+      await gitToolWindow.open(root, relativePath, "log", { path: relativePath, ...committed });
     }),
     vscode.commands.registerCommand("jbGit.blame", async (resource?: vscode.Uri) => {
       const uri = resource?.scheme === "file" ? resource : vscode.window.activeTextEditor?.document.uri;
@@ -603,8 +729,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.window.showInformationMessage(vscode.l10n.t("Open or select a file before running JB Git Blame."));
         return;
       }
-      const filePath = uri.fsPath;
-      const snapshot = deepestContaining(manager.all, await canonicalPath(filePath), (item) => item.repository.info.rootPath);
+      const filePath = await canonicalPath(uri.fsPath);
+      const snapshot = deepestContaining(manager.all, filePath, (item) => item.repository.info.rootPath);
       if (!snapshot) {
         await vscode.window.showInformationMessage(vscode.l10n.t("The active file is not inside a discovered Git repository."));
         return;
@@ -628,6 +754,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!location) return;
       await blameAnnotations.annotatePrevious(location.uri, location.line);
     }),
+    vscode.commands.registerCommand("jbGit.blameHideRevision", async (argument?: BlameLineArgument) => {
+      const found = await requireAnnotatedLine(argument);
+      if (!found) return;
+      const location = blameLocation(argument)!;
+      await blameAnnotations.hideRevision(location.uri, location.line);
+    }),
+    vscode.commands.registerCommand("jbGit.blameShowHiddenRevisions", async (argument?: BlameLineArgument | vscode.Uri) => {
+      const uri = argument instanceof vscode.Uri ? argument : blameLocation(argument)?.uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (!uri) return;
+      const shown = await blameAnnotations.showHiddenRevisions(uri);
+      if (!shown) await vscode.window.showInformationMessage(vscode.l10n.t("No revision is hidden in this annotation."));
+    }),
     vscode.commands.registerCommand("jbGit.annotateRevision", async (resource?: vscode.Uri) => {
       const document = await blameDocument(resource);
       if (!document) {
@@ -638,10 +776,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // path it had back then; anything else is resolved from the workspace.
       const known = blameAnnotations.targetFor(document.uri);
       const file = known ?? (document.uri.scheme === "file" ? await (async () => {
-        const snapshot = deepestContaining(manager.all, await canonicalPath(document.uri.fsPath), (item) => item.repository.info.rootPath);
+        const canonical = await canonicalPath(document.uri.fsPath);
+        const snapshot = deepestContaining(manager.all, canonical, (item) => item.repository.info.rootPath);
         return snapshot && {
           repositoryRoot: snapshot.repository.info.rootPath,
-          relativePath: path.relative(snapshot.repository.info.rootPath, document.uri.fsPath),
+          relativePath: path.relative(snapshot.repository.info.rootPath, canonical),
         };
       })() : undefined);
       if (!file) {
@@ -802,7 +941,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { placeHolder: vscode.l10n.t("Choose pull strategy") },
       );
       if (!strategy) return;
-      await runWithNotification(vscode.l10n.t("Pulling with {0}", strategy.label), (signal) => manager.pull(first.repository.info.rootPath, strategy.value, signal), true);
+      // IDEA's Update Project: local changes can be parked around the update
+      // and come back afterwards, or stay parked if the update stops on a conflict.
+      const root = first.repository.info.rootPath;
+      try {
+        await pullWithLocalChanges(manager, root, strategy.value, strategy.label);
+      } catch (error) {
+        if (isGitAbort(error)) return;
+        const kind = manager.snapshot(root)?.operation.kind;
+        if (kind === "rebase" || kind === "merge") {
+          await vscode.window.showWarningMessage(vscode.l10n.t("The update stopped on a conflict. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back."));
+        } else {
+          await vscode.window.showErrorMessage(formatGitError(error));
+        }
+      }
     }),
     vscode.commands.registerCommand("jbGit.push", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -819,7 +971,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!mergeCandidates.length) return void vscode.window.showInformationMessage(vscode.l10n.t("There is no other branch to merge."));
       const ref = await vscode.window.showQuickPick(mergeCandidates, { placeHolder: vscode.l10n.t("Select a branch or ref to merge") });
       if (!ref) return;
-      await runWithNotification(vscode.l10n.t("Merging {0}", ref), () => manager.merge(first.repository.info.rootPath, ref));
+      // IDEA's merge dialog options. Multi-select; an empty pick is a plain merge.
+      const picked = await vscode.window.showQuickPick<vscode.QuickPickItem & { key: keyof GitMergeOptions }>(
+        [
+          { label: vscode.l10n.t("No fast-forward"), description: "--no-ff", detail: vscode.l10n.t("Always record a merge commit, even when the branch could be fast-forwarded."), key: "noFastForward" },
+          { label: vscode.l10n.t("Fast-forward only"), description: "--ff-only", detail: vscode.l10n.t("Refuse the merge unless the current branch can simply move forward."), key: "fastForwardOnly" },
+          { label: vscode.l10n.t("Squash"), description: "--squash", detail: vscode.l10n.t("Stage the branch's changes as one uncommitted change; its commits are not merged."), key: "squash" },
+          { label: vscode.l10n.t("No commit"), description: "--no-commit", detail: vscode.l10n.t("Stop before committing so the result can be reviewed."), key: "noCommit" },
+          { label: vscode.l10n.t("Allow unrelated histories"), description: "--allow-unrelated-histories", detail: vscode.l10n.t("Merge a branch that shares no common ancestor with the current one."), key: "allowUnrelatedHistories" },
+        ],
+        { canPickMany: true, title: vscode.l10n.t("Merge {0} into {1}", ref, current ?? "HEAD"), placeHolder: vscode.l10n.t("Options (Enter for a plain merge)") },
+      );
+      if (!picked) return;
+      const options: GitMergeOptions = Object.fromEntries(picked.map((item) => [item.key, true]));
+      let problem: string | undefined;
+      try {
+        mergeArguments(options);
+      } catch (error) {
+        problem = error instanceof Error ? error.message : String(error);
+      }
+      if (problem) return void vscode.window.showWarningMessage(problem);
+      await runWithNotification(vscode.l10n.t("Merging {0}", ref), () => manager.merge(first.repository.info.rootPath, ref, options));
     }),
     vscode.commands.registerCommand("jbGit.rebase", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -833,7 +1005,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         { placeHolder: vscode.l10n.t("Select a branch or ref to rebase onto") },
       );
       if (!ref) return;
-      await runWithNotification(vscode.l10n.t("Rebasing onto {0}", ref), () => manager.rebase(first.repository.info.rootPath, ref));
+      // IDEA's Rebase dialog: Onto is the branch just picked; From is optional
+      // and turns the rebase into `--onto <Onto> <From>`, replaying only the
+      // commits after From; the options are its "Modify options".
+      const picked = await vscode.window.showQuickPick<vscode.QuickPickItem & { key: "interactive" | "rebaseMerges" | "from" }>(
+        [
+          { label: vscode.l10n.t("Interactive"), description: "--interactive", detail: vscode.l10n.t("Review and edit the commits to replay in the sequence editor first."), key: "interactive" },
+          { label: vscode.l10n.t("Preserve merges"), description: "--rebase-merges", detail: vscode.l10n.t("Keep merge commits in the replayed history instead of flattening them."), key: "rebaseMerges" },
+          { label: vscode.l10n.t("Replay from a chosen commit"), description: "--onto", detail: vscode.l10n.t("Pick where the replayed commits start; only the commits after it move onto {0}.", ref), key: "from" },
+        ],
+        { canPickMany: true, title: vscode.l10n.t("Rebase {0} onto {1}", current ?? "HEAD", ref), placeHolder: vscode.l10n.t("Options (Enter for a plain rebase)") },
+      );
+      if (!picked) return;
+      const root = first.repository.info.rootPath;
+      if (picked.some((item) => item.key === "interactive")) {
+        // The sequence editor plans exactly what Git would replay onto the
+        // branch; it flattens merges and replays from the merge base, so the
+        // other two options do not combine with it.
+        if (picked.length > 1) return void vscode.window.showWarningMessage(vscode.l10n.t("An interactive rebase plans its own replay, so it cannot be combined with Preserve merges or a chosen starting commit."));
+        const branch = first.branches.find((candidate) => candidate.name === ref && (candidate.kind === "local" || candidate.kind === "remote"));
+        await runInteractiveRebase(manager, root, branch?.fullName ?? ref, ref);
+        return;
+      }
+      let upstream = ref;
+      const options: GitRebaseOptions = { rebaseMerges: picked.some((item) => item.key === "rebaseMerges") };
+      if (picked.some((item) => item.key === "from")) {
+        const recent = await first.repository.logRef("HEAD", 50);
+        const from = await vscode.window.showQuickPick(
+          recent.filter((commit) => commit.parents.length > 0).map((commit) => ({
+            label: `${commit.hash.slice(0, 8)} ${commit.subject}`,
+            description: commit.author,
+            hash: commit.hash,
+          })),
+          { title: vscode.l10n.t("Replay the commits after…"), placeHolder: vscode.l10n.t("This commit stays where it is; the ones after it are replayed onto {0}", ref), matchOnDescription: true },
+        );
+        if (!from) return;
+        options.onto = ref;
+        upstream = from.hash;
+      }
+      try {
+        await rebaseWithLocalChanges(manager, root, upstream, ref, options);
+      } catch (error) {
+        if (manager.snapshot(root)?.operation.kind === "rebase") {
+          await vscode.window.showWarningMessage(vscode.l10n.t("The rebase stopped before the end of the plan. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back."));
+        } else {
+          await vscode.window.showErrorMessage(formatGitError(error));
+        }
+      }
     }),
     vscode.commands.registerCommand("jbGit.resolveSimpleConflicts", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -898,83 +1116,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (!picked) return;
         from = picked.hash;
       }
-
-      // Asked before the plan is composed, the way IDEA tells you up front,
-      // rather than letting the user build a rebase that cannot run. Untracked
-      // files are not counted because they do not block a rebase.
-      const blocking = (manager.snapshot(root)?.status?.changes ?? [])
-        .filter((change) => change.kind !== "untracked" && change.kind !== "ignored");
-      let stashFirst = false;
-      if (blocking.length > 0) {
-        const answer = await vscode.window.showWarningMessage(
-          `${blocking.length} local change(s) would block the interactive rebase.`,
-          {
-            modal: true,
-            detail: vscode.l10n.t("JB Git can stash them, run the rebase, and restore the working tree and Index afterwards. If the rebase stops on a conflict the stash is kept instead, so nothing is lost."),
-          },
-          vscode.l10n.t("Stash and Rebase"),
-        );
-        if (answer !== vscode.l10n.t("Stash and Rebase")) return;
-        stashFirst = true;
-      }
-
-      let stoppedForEdit = false;
-      try {
-        // The plan starts one commit earlier, so the chosen commit is itself editable.
-        const started = await openRebaseEditor(manager, root, `${from}^`, async (steps) => {
-          // Nothing is stashed until the user actually starts the rebase, so
-          // closing the sequence editor leaves the working tree alone.
-          const parked = stashFirst
-            ? await stashLocalChanges(manager, root, `JB Git interactive rebase from ${from!.slice(0, 8)}`, { includeUntracked: false })
-            : undefined;
-          try {
-            // withProgress directly, not runWithNotification: a rebase that stops
-            // on a conflict needs the conflict-aware message below, not a raw dialog.
-            await vscode.window.withProgress(
-              { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Rebasing {0} commit(s)", steps.length) },
-              () => manager.interactiveRebase(root, `${from}^`, steps),
-            );
-          } catch (error) {
-            // A rebase that stopped mid-plan owns the working tree. Restoring
-            // on top of it would mix the parked changes into a conflict the
-            // user has not resolved yet, so the stash keeps them instead.
-            if (parked) {
-              void vscode.window.showWarningMessage(vscode.l10n.t("Your local changes are kept in {0}. Apply it from Manage Stashes once the rebase is finished or aborted.", parked.ref));
-            }
-            throw error;
-          }
-          // An edit row stops the rebase with exit code 0, so success alone
-          // does not mean the plan finished: the sequencer may be parked on the
-          // commit the user asked to amend.
-          if (manager.snapshot(root)?.operation.kind === "rebase") {
-            stoppedForEdit = true;
-            if (parked) {
-              void vscode.window.showWarningMessage(vscode.l10n.t("Your local changes are kept in {0}. Apply it from Manage Stashes once the rebase is finished or aborted.", parked.ref));
-            }
-            return;
-          }
-          if (!parked) return;
-          const restore = await restoreTemporaryStash(manager, root, parked);
-          if (restore.outcome === "conflicted") {
-            void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes caused conflicts. {0} was kept; resolve the files in Local Changes.", parked.ref));
-          } else if (restore.outcome === "kept") {
-            void vscode.window.showWarningMessage(vscode.l10n.t("Restoring your local changes failed and {0} was kept: {1}", parked.ref, formatGitError(restore.error)));
-          }
-        });
-        if (started && stoppedForEdit) {
-          await vscode.window.showInformationMessage(vscode.l10n.t("Stopped at the commit marked 'edit'. Amend or test it, then run Continue Operation; the rest of the plan resumes from there."));
-        } else if (started) {
-          await vscode.window.showInformationMessage(vscode.l10n.t("The interactive rebase finished."));
-        }
-      } catch (error) {
-        if (manager.snapshot(root)?.operation.kind === "rebase") {
-          await vscode.window.showWarningMessage(
-            "The rebase stopped before the end of the plan. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back.",
-          );
-        } else {
-          await vscode.window.showErrorMessage(formatGitError(error));
-        }
-      }
+      // The plan starts one commit earlier, so the chosen commit is itself editable.
+      await runInteractiveRebase(manager, root, `${from}^`, from.slice(0, 8));
     }),
     vscode.commands.registerCommand("jbGit.cherryPick", async (rootPath?: string) => {
       if (!(await requireTrustedWorkspace())) return;
@@ -1580,6 +1723,35 @@ export function formatGitError(error: unknown): string {
     return error.stderr.trim() || error.stdout.trim() || error.message;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The active or given file as a repository-relative path, or undefined (after telling the user) when there is none. */
+async function locateFile(manager: RepositoryManager, resource: vscode.Uri | undefined, none: string): Promise<{ snapshot: RepositorySnapshot; root: string; relativePath: string } | undefined> {
+  const uri = resource?.scheme === "file" ? resource : vscode.window.activeTextEditor?.document.uri;
+  if (!uri || uri.scheme !== "file") {
+    await vscode.window.showInformationMessage(none);
+    return undefined;
+  }
+  const filePath = await canonicalPath(uri.fsPath);
+  const snapshot = deepestContaining(manager.all, filePath, (item) => item.repository.info.rootPath);
+  if (!snapshot) {
+    await vscode.window.showInformationMessage(vscode.l10n.t("The active file is not inside a discovered Git repository."));
+    return undefined;
+  }
+  const root = snapshot.repository.info.rootPath;
+  return { snapshot, root, relativePath: path.relative(root, filePath) };
+}
+
+/** Opens `ref`'s version of a file against the working copy in the native read-only-left diff. */
+async function compareFileWithRef(diffProvider: DiffContentProvider, repository: GitRepository, root: string, relativePath: string, ref: string, describe: string): Promise<void> {
+  const [left, right] = await Promise.all([
+    repository.fileContent(relativePath, ref),
+    repository.fileContent(relativePath),
+  ]);
+  const label = `${relativePath} (${describe} ↔ Local)`;
+  const leftUri = diffSide(diffProvider, root, `${label}:ref`, relativePath, left);
+  const rightUri = diffSide(diffProvider, root, `${label}:local`, relativePath, right);
+  await vscode.commands.executeCommand("vscode.diff", leftUri, rightUri, label, { preview: true });
 }
 
 async function openMergeConflictEditor(

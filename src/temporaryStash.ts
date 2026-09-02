@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { RepositoryManager } from "./repositoryManager";
+import { RepositoryManager, type RepositoryMutationLease } from "./repositoryManager";
 
 /** A stash this extension created to get the working tree out of an operation's way. */
 export interface TemporaryStash {
@@ -31,9 +31,13 @@ export async function stashLocalChanges(
   rootPath: string,
   message: string,
   options: TemporaryStashOptions,
+  lease?: RepositoryMutationLease,
 ): Promise<TemporaryStash> {
+  if (!lease) {
+    return manager.withExclusive(rootPath, (exclusiveLease) => stashLocalChanges(manager, rootPath, message, options, exclusiveLease));
+  }
   const before = new Set((await manager.stashes(rootPath)).map((entry) => entry.oid));
-  await manager.stash(rootPath, message, options.includeUntracked, false);
+  await manager.stash(rootPath, message, options.includeUntracked, false, lease);
   const created = (await manager.stashes(rootPath)).find((entry) => !before.has(entry.oid));
   if (!created) throw new Error(vscode.l10n.t("Git created no recoverable stash entry, so the operation was stopped."));
   return { ref: created.ref, oid: created.oid };
@@ -54,9 +58,13 @@ export async function restoreTemporaryStash(
   manager: RepositoryManager,
   rootPath: string,
   stash: TemporaryStash,
+  lease?: RepositoryMutationLease,
 ): Promise<{ outcome: StashRestoreOutcome; error?: unknown }> {
+  if (!lease) {
+    return manager.withExclusive(rootPath, (exclusiveLease) => restoreTemporaryStash(manager, rootPath, stash, exclusiveLease));
+  }
   try {
-    await manager.applyStash(rootPath, stash.ref, true, stash.oid, true);
+    await manager.applyStash(rootPath, stash.ref, true, stash.oid, true, lease);
     return { outcome: "restored" };
   } catch (error) {
     const conflicted = manager.snapshot(rootPath)?.status?.changes.some((change) => change.conflicted) ?? false;

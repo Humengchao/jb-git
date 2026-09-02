@@ -2,10 +2,10 @@ import * as vscode from "vscode";
 import { discoverRepositories, discoverRepository, GitRepository } from "./git/repository";
 import * as path from "node:path";
 import { GitRunner, isGitAbort } from "./git/runner";
-import { RebaseStep } from "./interactiveRebase";
-import { Diff3Labels, MergeBlock } from "./mergeAnalysis";
-import { HunkSelection } from "./changelists/hunkOwnership";
-import { GitBlameEntry, GitBlameOptions, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitOperationKind, GitOperationState, GitPullStrategy, GitRemote, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
+import { type InteractiveRebaseExpectation, type RebaseStep } from "./interactiveRebase";
+import { type Diff3Labels, type MergeBlock } from "./mergeAnalysis";
+import { type HunkSelection } from "./changelists/hunkOwnership";
+import { GitBlameEntry, GitBlameOptions, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitIgnoreTarget, GitMergeOptions, GitOperationKind, GitRebaseOptions, GitOperationState, GitPullStrategy, GitRemote, GitResetMode, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
 
 export interface RepositorySnapshot {
   repository: GitRepository;
@@ -15,9 +15,17 @@ export interface RepositorySnapshot {
   error?: string;
 }
 
+/** Lease held across a compound stash/rebase workflow. */
+export interface RepositoryMutationLease {
+  readonly rootPath: string;
+  readonly token: symbol;
+}
+
 export class RepositoryManager implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private readonly snapshots = new Map<string, RepositorySnapshot>();
+  private readonly mutationQueues = new Map<string, Promise<void>>();
+  private readonly activeLeases = new Map<string, RepositoryMutationLease>();
   private repositories: GitRepository[] = [];
   private disposed = false;
   private refreshQueue: Promise<void> = Promise.resolve();
@@ -123,8 +131,20 @@ export class RepositoryManager implements vscode.Disposable {
     return this.requireRepository(rootPath).blame(pathSpec, revision, contents, options);
   }
 
-  public async commitFiles(rootPath: string, hash: string): Promise<GitCommitFile[]> {
-    return this.requireRepository(rootPath).commitFiles(hash);
+  public async commitFiles(rootPath: string, hash: string, signal?: AbortSignal): Promise<GitCommitFile[]> {
+    return this.requireRepository(rootPath).commitFiles(hash, signal);
+  }
+
+  public async commitMessage(rootPath: string, hash: string, signal?: AbortSignal): Promise<string> {
+    return this.requireRepository(rootPath).commitMessage(hash, signal);
+  }
+
+  public async logPage(rootPath: string, limit: number, skip: number, filePath?: string, options?: Partial<import("./git/types").GitLogOptions>, signal?: AbortSignal): Promise<GitCommit[]> {
+    return this.requireRepository(rootPath).logPage(limit, skip, filePath, options, signal);
+  }
+
+  public async logRefPage(rootPath: string, ref: string, limit: number, skip: number, filePath?: string, options?: Partial<import("./git/types").GitLogOptions>, signal?: AbortSignal): Promise<GitCommit[]> {
+    return this.requireRepository(rootPath).logRefPage(ref, limit, skip, filePath, options, signal);
   }
 
   public async stageHunk(rootPath: string, pathSpec: string, hunk: GitDiffHunk): Promise<void> {
@@ -207,40 +227,94 @@ export class RepositoryManager implements vscode.Disposable {
     });
   }
 
-  public async pull(rootPath: string, strategy: GitPullStrategy, signal?: AbortSignal): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).pull(strategy, signal));
+  public async pull(rootPath: string, strategy: GitPullStrategy, signal?: AbortSignal, lease?: RepositoryMutationLease): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).pull(strategy, signal), lease);
   }
 
   public async push(rootPath: string, forceWithLease = false, signal?: AbortSignal): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).push(forceWithLease, signal));
   }
 
-  public async merge(rootPath: string, ref: string): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).merge(ref));
+  public async merge(rootPath: string, ref: string, options?: GitMergeOptions): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).merge(ref, options));
   }
 
-  public async rebase(rootPath: string, ref: string): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).rebase(ref));
+  public async rebase(rootPath: string, ref: string, lease?: RepositoryMutationLease, options?: GitRebaseOptions): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).rebase(ref, options), lease);
+  }
+
+  public async commitFixup(rootPath: string, target: string, noVerify = false): Promise<string> {
+    return this.mutate(rootPath, () => this.requireRepository(rootPath).commitFixup(target, noVerify));
+  }
+
+  public async amendStaged(rootPath: string, expectedHead: string, noVerify = false): Promise<string> {
+    return this.mutate(rootPath, () => this.requireRepository(rootPath).amendStaged(expectedHead, noVerify));
+  }
+
+  public async reflogSubjects(rootPath: string, limit?: number): Promise<string[]> {
+    return this.requireRepository(rootPath).reflogSubjects(limit);
+  }
+
+  public async updateBranch(rootPath: string, name: string): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).updateBranch(name));
+  }
+
+  public async recentAuthors(rootPath: string, limit?: number): Promise<string[]> {
+    return this.requireRepository(rootPath).recentAuthors(limit);
+  }
+
+  public async commitTemplate(rootPath: string): Promise<string | undefined> {
+    return this.requireRepository(rootPath).commitTemplate();
   }
 
   public async interactiveRebaseCandidates(rootPath: string, base: string): Promise<GitCommit[]> {
     return this.requireRepository(rootPath).interactiveRebaseCandidates(base);
   }
 
-  public async interactiveRebase(rootPath: string, base: string, steps: readonly RebaseStep[]): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).interactiveRebase(base, steps));
+  public async interactiveRebase(
+    rootPath: string,
+    base: string,
+    steps: readonly RebaseStep[],
+    expectation?: InteractiveRebaseExpectation,
+    lease?: RepositoryMutationLease,
+  ): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).interactiveRebase(base, steps, expectation), lease);
   }
 
   public async cherryPick(rootPath: string, hash: string): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).cherryPick(hash));
   }
 
+  public async cherryPickMany(rootPath: string, hashes: readonly string[], signal?: AbortSignal, onApplied?: (count: number) => void): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).cherryPickMany(hashes, signal, onApplied));
+  }
+
   public async revert(rootPath: string, hash: string): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).revert(hash));
   }
 
-  public async reset(rootPath: string, ref: string, mode: "soft" | "mixed" | "hard"): Promise<void> {
+  public async reset(rootPath: string, ref: string, mode: GitResetMode): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).reset(ref, mode));
+  }
+
+  public async undoCommit(rootPath: string, expectedHead: string): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).undoCommit(expectedHead));
+  }
+
+  public async rewordHead(rootPath: string, expectedHead: string, message: string): Promise<string> {
+    return this.mutate(rootPath, () => this.requireRepository(rootPath).rewordHead(expectedHead, message));
+  }
+
+  public async isPushed(rootPath: string, revision: string): Promise<boolean> {
+    return this.requireRepository(rootPath).isPushed(revision);
+  }
+
+  public async acceptConflictSide(rootPath: string, pathSpec: string, side: "ours" | "theirs"): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).acceptConflictSide(pathSpec, side));
+  }
+
+  public async addIgnoreRule(rootPath: string, target: GitIgnoreTarget, line: string): Promise<string> {
+    return this.mutate(rootPath, () => this.requireRepository(rootPath).addIgnoreRule(target, line));
   }
 
   public async checkoutRevision(rootPath: string, ref: string): Promise<void> {
@@ -298,6 +372,10 @@ export class RepositoryManager implements vscode.Disposable {
   }
 
   /** The whole HEAD-to-working-tree diff of one path, which is the unit Changelist ownership is expressed in. */
+  public async isTrackedAtHead(rootPath: string, pathSpec: string): Promise<boolean> {
+    return this.requireRepository(rootPath).isTrackedAtHead(pathSpec);
+  }
+
   public async diffAgainstHead(rootPath: string, pathSpec: string): Promise<{ output: string; hunks: GitDiffHunk[] }> {
     return this.requireRepository(rootPath).diffAgainstHead(pathSpec);
   }
@@ -379,36 +457,76 @@ export class RepositoryManager implements vscode.Disposable {
     }
   }
 
-  public async stash(rootPath: string, message?: string, includeUntracked = false, keepIndex = false): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).stash(message, includeUntracked, keepIndex));
+  public async stash(rootPath: string, message?: string, includeUntracked = false, keepIndex = false, lease?: RepositoryMutationLease): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).stash(message, includeUntracked, keepIndex), lease);
   }
 
   public async stashes(rootPath: string): Promise<GitStashEntry[]> {
     return this.requireRepository(rootPath).stashes();
   }
 
-  public async applyStash(rootPath: string, ref: string, pop = false, oid?: string, reinstateIndex = false): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).applyStash(ref, pop, oid, reinstateIndex));
+  public async applyStash(rootPath: string, ref: string, pop = false, oid?: string, reinstateIndex = false, lease?: RepositoryMutationLease): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).applyStash(ref, pop, oid, reinstateIndex), lease);
   }
 
   public async dropStash(rootPath: string, ref: string, oid?: string): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).dropStash(ref, oid));
   }
 
-  public async checkout(rootPath: string, branch: string, kind?: GitBranch["kind"], fullRef?: string): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).checkout(branch, kind, fullRef));
+  public async checkout(rootPath: string, branch: string, kind?: GitBranch["kind"], fullRef?: string, lease?: RepositoryMutationLease): Promise<void> {
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).checkout(branch, kind, fullRef), lease);
+  }
+
+  /** Runs several mutations without allowing another extension operation to interleave. */
+  public async withExclusive<T>(rootPath: string, operation: (lease: RepositoryMutationLease) => Promise<T>): Promise<T> {
+    return this.enqueueMutation(rootPath, async () => {
+      const lease: RepositoryMutationLease = { rootPath, token: Symbol("jb-git-mutation") };
+      this.activeLeases.set(rootPath, lease);
+      try {
+        return await operation(lease);
+      } finally {
+        if (this.activeLeases.get(rootPath) === lease) this.activeLeases.delete(rootPath);
+        await this.refresh(rootPath).catch(() => undefined);
+      }
+    });
   }
 
   /**
    * Runs a mutation and refreshes afterwards even when it fails: an
    * interrupted Git command may still have moved repository state.
    */
-  private async mutate<T>(rootPath: string | undefined, operation: () => Promise<T>): Promise<T> {
+  private async mutate<T>(rootPath: string | undefined, operation: () => Promise<T>, lease?: RepositoryMutationLease): Promise<T> {
+    if (rootPath && lease !== undefined && this.activeLeases.get(rootPath) === lease) {
+      try {
+        return await operation();
+      } finally {
+        // Keep snapshots truthful for the next step in the compound workflow
+        // while the lease still prevents another mutation from interleaving.
+        await this.refresh(rootPath).catch(() => undefined);
+      }
+    }
+    const key = rootPath ?? "<all>";
+    return this.enqueueMutation(key, async () => {
+      try {
+        return await operation();
+      } finally {
+        // Never let the follow-up refresh replace the operation's own outcome.
+        await this.refresh(rootPath).catch(() => undefined);
+      }
+    });
+  }
+
+  private async enqueueMutation<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this.mutationQueues.set(key, gate);
+    await previous;
     try {
       return await operation();
     } finally {
-      // Never let the follow-up refresh replace the operation's own outcome.
-      await this.refresh(rootPath).catch(() => undefined);
+      release();
+      if (this.mutationQueues.get(key) === gate) this.mutationQueues.delete(key);
     }
   }
 
