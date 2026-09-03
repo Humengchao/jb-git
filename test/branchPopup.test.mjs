@@ -117,3 +117,47 @@ test("the branches popup has IDEA's Recent and Favorites groups and a per-branch
   // Only a local branch with a live upstream offers Update.
   assert.match(popup, /if \(branch\.kind === "local" && branch\.upstream && !branch\.upstreamGone\) buttons\.push\(updateButton\);/);
 });
+
+test("one favorites store serves both surfaces and tells its owner to redraw", () => {
+  // A star toggled in the popup has to reach the Log's Branches pane, so the
+  // store is created once and handed to the panel; the module stays free of
+  // VS Code objects (the unit tests import it directly), so the notification
+  // is a plain callback rather than an event emitter.
+  const store = readSource("../src/branchPopup.ts", import.meta.url);
+  assert.doesNotMatch(store, /^import \* as vscode/m);
+  assert.match(store, /import type \{ Memento \} from "vscode";/);
+  assert.match(store, /private readonly onChange\?: \(\) => void/);
+  assert.equal(store.match(/this\.onChange\?\.\(\);/g)?.length, 2, "both toggle and prune notify");
+
+  const extension = readSource("../src/extension.ts", import.meta.url);
+  assert.match(extension, /const favoriteBranches = new FavoriteBranches\(context\.workspaceState, \(\) => gitToolWindow\.refreshView\(\)\);/);
+  assert.match(extension, /new IntelliJGitToolWindowProvider\(manager, changelistStore, shelfStore, diffProvider, context\.workspaceState, favoriteBranches\)/);
+});
+
+test("the Log's Branches pane has IDEA's Recent and Favorites groups, a star and Update", () => {
+  const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const pane = script.slice(script.indexOf("function branchPane()"), script.indexOf("function refreshBranchPane()"));
+  assert.match(pane, /appendSection\('Recent', recent, 'recent'\)/);
+  assert.match(pane, /appendSection\('Favorites', \(state\.branches \|\| \[\]\)\.filter\(item => item\.kind !== 'tag' && isFavorite\(item\)/);
+  // A row can appear in two groups, so its focus key has to distinguish them.
+  assert.match(pane, /row\.dataset\.focusKey = 'branch:' \+ group \+ ':' \+ key;/);
+  // The star is a span: a button inside a button would steal the row's click.
+  assert.match(pane, /const star = node\('span', 'branch-star'/);
+  assert.match(pane, /star\.addEventListener\('click', event => \{\s*\n\s*event\.stopPropagation\(\); event\.preventDefault\(\);/);
+  assert.match(pane, /post\('toggleFavoriteBranch', \{ name: branch\.name, kind: branch\.kind \}\)/);
+  // Only a branch with a live upstream can be updated; the current one is a pull.
+  const menu = script.slice(script.indexOf("function branchContextItems"), script.indexOf("function branchPane()"));
+  assert.match(menu, /if \(kind === 'local' && branch\.upstream && !branch\.upstreamGone\)/);
+  assert.match(menu, /label: isCurrent \? 'Update Project…' : "Update '" \+ branch\.name \+ "'", run: act\('updateRef'\)/);
+
+  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const update = host.slice(host.indexOf('message.action === "updateRef"'), host.indexOf('message.action === "checkoutAndRebase"'));
+  assert.match(update, /if \(branch\.kind !== "local" \|\| !branch\.upstream \|\| branch\.upstreamGone\) return;/);
+  assert.match(update, /executeCommand\("jbGit\.pull", root\)/);
+  assert.match(update, /this\.manager\.updateBranch\(root, branch\.name\)/);
+  // The reflog is only re-read when the refs moved, not on every refresh.
+  assert.match(host, /private async recentBranches\(root: string, snapshot: RepositorySnapshot, refsKey: string\)/);
+  assert.match(host, /if \(cached\?\.refsKey === refsKey\) return cached\.names;/);
+  assert.match(host, /favoriteBranches: this\.favorites\.list\(root\),/);
+});

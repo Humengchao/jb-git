@@ -170,9 +170,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await changelistStore.load();
   const shelfStore = new ShelfStore(context.globalStorageUri.fsPath);
   const diffProvider = new DiffContentProvider();
-  const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore, diffProvider, context.workspaceState);
+  // One store behind both surfaces: a branch starred in the popup shows up in
+  // the Log's Branches pane and the other way round.
+  const favoriteBranches = new FavoriteBranches(context.workspaceState, () => gitToolWindow.refreshView());
+  const gitToolWindow = new IntelliJGitToolWindowProvider(manager, changelistStore, shelfStore, diffProvider, context.workspaceState, favoriteBranches);
   const mergeEditor = new MergeConflictEditor(manager, context.workspaceState, diffProvider);
-  const favoriteBranches = new FavoriteBranches(context.workspaceState);
   const blameAnnotations = new BlameAnnotationController(manager, async (target, content) => diffSide(
     diffProvider,
     target.repositoryRoot,

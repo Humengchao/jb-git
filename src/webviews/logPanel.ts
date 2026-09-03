@@ -13,6 +13,7 @@ import { webviewDocument } from "./html";
 import { validateGitRefName, validatePathInput } from "../inputValidation";
 import { moveUntrackedToTrash } from "../discardSafety";
 import { DEFAULT_COMMENT_CHAR, effectiveCommitMessage } from "../commitMessage";
+import { FavoriteBranches, recentBranchesFromReflog } from "../branchPopup";
 import { ignorePatternsFor } from "../ignoreRules";
 import { conflictSideLabels } from "./mergeEditor";
 import { previewAndPush } from "../pushPreview";
@@ -112,6 +113,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private readonly authorsCache = new Map<string, { head: string | null; authors: string[] }>();
   /** The repository's `commit.template`, re-read at most every so often: it is configuration, not state. */
   private readonly templateCache = new Map<string, { readAt: number; template?: string; commentChar: string }>();
+  private readonly recentBranchCache = new Map<string, { refsKey: string; names: string[] }>();
   private readonly disposables: vscode.Disposable[] = [];
   private didRequestNestedDiscovery = false;
   private currentCommitsRoot?: string;
@@ -126,6 +128,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     private readonly shelves: ShelfStore,
     private readonly diffProvider: DiffContentProvider,
     private readonly workspaceState: vscode.Memento,
+    private readonly favorites: FavoriteBranches,
   ) {
     const persisted = workspaceState.get<PersistedSelectionState>(SELECTION_STORAGE_KEY);
     if (persisted?.version === 1) {
@@ -214,6 +217,29 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     await vscode.commands.executeCommand(`${IntelliJGitToolWindowProvider.viewType}.focus`);
     await this.view?.webview.postMessage({ type: "activateTab", tab });
     await this.update();
+  }
+
+  /**
+   * IDEA's Recent group in the Branches pane. The reflog only changes when
+   * HEAD moves, so it is read once per refs fingerprint rather than on every
+   * refresh of the panel.
+   */
+  private async recentBranches(root: string, snapshot: RepositorySnapshot, refsKey: string): Promise<string[]> {
+    const cached = this.recentBranchCache.get(root);
+    if (cached?.refsKey === refsKey) return cached.names;
+    const existing = new Set(snapshot.branches.filter((branch) => branch.kind === "local").map((branch) => branch.name));
+    const names = recentBranchesFromReflog(
+      await this.manager.reflogSubjects(root).catch(() => []),
+      existing,
+      snapshot.status?.branch.head,
+    );
+    this.recentBranchCache.set(root, { refsKey, names });
+    return names;
+  }
+
+  /** Redraws the panel after something it renders changed outside it, such as a favorite starred in the Branches popup. */
+  public refreshView(): void {
+    this.scheduleUpdate();
   }
 
   public async openChanges(root?: string): Promise<void> {
@@ -551,6 +577,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           lineRange: this.lineRange ? { start: this.lineRange.start, end: this.lineRange.end } : null,
           logOptions: this.logOptions,
           issueRules: vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []),
+          // Favorites are cheap and change on their own, so they always travel;
+          // the branch list itself is still gated by the refs fingerprint.
+          favoriteBranches: this.favorites.list(root),
+          recentBranches: await this.recentBranches(root, snapshot, refsKey),
           ...(this.lastSentBranchesKey === refsKey ? {} : { branches: snapshot.branches }),
           ...logState,
           operation: snapshot.operation,
@@ -716,6 +746,20 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             await vscode.window.withProgress(
               { location: vscode.ProgressLocation.Notification, title: `Merging ${branch.name}` },
               () => this.manager.merge(root, branch.fullName),
+            );
+            return;
+          }
+          if (message.action === "updateRef") {
+            // IDEA's Update on a branch row: the current branch is a pull, any
+            // other local branch is fast-forwarded from its upstream in place.
+            if (branch.kind !== "local" || !branch.upstream || branch.upstreamGone) return;
+            if (branch.name === snapshot.status?.branch.head) {
+              await vscode.commands.executeCommand("jbGit.pull", root);
+              return;
+            }
+            await vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Updating {0} from {1}", branch.name, branch.upstream) },
+              () => this.manager.updateBranch(root, branch.name),
             );
             return;
           }
@@ -1106,6 +1150,49 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         return;
       }
       if (!(await requireTrusted())) return;
+      if (message.type === "rollbackHunk") {
+        // IDEA's Rollback on a single change: the working-tree hunk goes back
+        // to what the Index holds. It throws work away, so it is confirmed and
+        // backed by the same recovery shelf a whole-file rollback keeps.
+        if (!(await requireTrusted())) return;
+        const change = changes.find((item) => item.path === message.path);
+        if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
+        const hunks = await this.readHunks(root, change);
+        const expected = hunks.unstaged[message.index];
+        if (!expected) return;
+        const rollback = vscode.l10n.t("Rollback");
+        if (vscode.workspace.getConfiguration("jbGit").get<boolean>("confirmDiscard", true)) {
+          const confirmed = await vscode.window.showWarningMessage(
+            vscode.l10n.t("Roll back this change in {0}?", change.path),
+            { modal: true, detail: `${expected.header}\n\n${vscode.l10n.t("The file's other changes and anything staged stay as they are. A recovery entry is kept in Shelf.")}` },
+            rollback,
+          );
+          if (confirmed !== rollback) return;
+        }
+        const recovery = await this.shelves.create(snapshot.repository, `Hunk rollback backup · ${change.path}`, [change.path]);
+        await this.manager.rollbackHunk(root, change.path, expected);
+        this.hunkCache.delete(`${root}\0${change.path}`);
+        void vscode.window.showInformationMessage(vscode.l10n.t("Rolled back one change in {0}. Recovery shelf '{1}' was kept.", change.path, recovery.name));
+        return;
+      }
+      if (message.type === "createLocalPatch") {
+        // IDEA's Create Patch from the local changes the user checked, which is
+        // the same selection Commit would take.
+        const eligible = changes.filter((change) => selected.has(change.path) && !change.conflicted && change.kind !== "ignored");
+        const paths = eligible.flatMap((change) => [change.path, ...(change.originalPath ? [change.originalPath] : [])]);
+        if (!paths.length) return void vscode.window.showInformationMessage(vscode.l10n.t("Select at least one change to create a patch from."));
+        const patch = await this.manager.localChangesPatch(root, [...new Set(paths)]);
+        if (!patch.trim()) return void vscode.window.showInformationMessage(vscode.l10n.t("The selected changes produced an empty patch."));
+        const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "");
+        await savePatch(root, `local-changes-${stamp}.patch`, patch);
+        return;
+      }
+      if (message.type === "toggleFavoriteBranch") {
+        const branch = snapshot.branches.find((item) => item.name === message.name && item.kind === message.kind);
+        if (!branch || branch.kind === "tag") return;
+        await this.favorites.toggle(root, `${branch.kind}:${branch.name}`);
+        return void this.update();
+      }
       if (message.type === "applyHunk") {
         const change = changes.find((item) => item.path === message.path);
         if (!change || change.conflicted || !Number.isInteger(message.index) || message.index < 0) return;
@@ -2006,6 +2093,9 @@ const logStyles = String.raw`
   .pane-action { width: 21px; height: 21px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 3px; color: var(--vscode-icon-foreground); font-size: 12px; font-weight: 400; }
   .pane-action:hover { background: var(--vscode-toolbar-hoverBackground); }
   .pane-action:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .branch-star { flex: none; margin-left: 4px; padding: 0 2px; color: var(--vscode-descriptionForeground); cursor: pointer; }
+  .branch-star.on { color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-charts-yellow, #d99b42)); }
+  .branch-row:not(:hover) .branch-star:not(.on) { visibility: hidden; }
   .branch-filter { width: calc(100% - 12px); height: 23px; margin: 5px 6px 3px; padding: 0 6px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 3px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font-size: 11px; }
   .section-title { height: 23px; display: flex; align-items: center; padding: 0 9px; color: var(--vscode-descriptionForeground); font-weight: 600; }
   .branch-row { height: 25px; width: 100%; display: flex; align-items: center; gap: 6px; padding: 0 9px 0 16px; text-align: left; white-space: nowrap; }
@@ -2338,6 +2428,8 @@ const logScript = String.raw`
     'User operations': '用户操作', 'Errors only': '仅错误', 'All commands': '全部命令',
     'Pause scroll': '暂停滚动', 'Resume scroll': '继续滚动', 'Clear': '清空',
     'Branches': '分支', 'All': '全部', 'Local': '本地', 'Remote': '远程', 'Tags': '标签',
+    'Recent': '最近', 'Favorites': '收藏', 'Add to Favorites': '添加到收藏', 'Remove from Favorites': '从收藏中移除',
+    'Update Project…': '更新项目…',
     'Refresh': '刷新', 'More…': '更多…', 'New Changelist': '新建更改列表', 'Shelve': '搁置',
     'No local changes': '没有本地更改', 'No changes to commit': '没有可提交的更改',
     'Commit Changes': '提交更改', 'Commit Message': '提交消息', 'Amend': '修正提交',
@@ -2350,6 +2442,8 @@ const logScript = String.raw`
     'No user Git operations yet. Background refresh commands are hidden.': '还没有用户 Git 操作。后台刷新命令已隐藏。',
     'No matching Git command output.': '没有匹配的 Git 命令输出。', 'background': '后台', 'Git root': 'Git 仓库根',
     'Shelve selected local changes': '搁置所选本地更改', 'Shelve selected changes': '搁置所选更改',
+    'Save the selected changes as a patch file': '将所选更改保存为补丁文件',
+    'Rollback this change': '回滚此改动', 'Rollback': '回滚',
     'Click a graph line to select or collapse its series': '点击图形线条以选择或折叠该系列',
     'Drag to resize commit message': '拖动以调整提交消息高度', 'More Git actions': '更多 Git 操作',
     'The Git tool window failed to render': 'Git 工具窗口渲染失败', 'Reset view state': '重置视图状态',
@@ -2715,6 +2809,7 @@ const logScript = String.raw`
       bar.append(
         button('+ Changelist', 'New Changelist', () => post('createChangelist'), 'action'),
         button('Shelve', 'Shelve selected changes', () => post('createShelf'), 'action'),
+        button('Create Patch…', 'Save the selected changes as a patch file', () => post('createLocalPatch'), 'action'),
       );
     }
     bar.append(node('span', 'spacer'), button('⋮', 'More Git actions', () => post('runCommand', { command: 'jbGit.operationsPopup' })));
@@ -2928,7 +3023,13 @@ const logScript = String.raw`
           const requestId = nextRequestId(); hunkRequestIds.set(hunkKey, requestId);
           post('applyHunk', { path: change.path, source, index, requestId });
         }, 'small-button');
-        header.append(node('code', '', hunk.header), node('span', 'spacer'), apply);
+        header.append(node('code', '', hunk.header), node('span', 'spacer'));
+        // Only a working-tree hunk can be rolled back: a staged one is the
+        // Index's content, and taking it back is Unstage, not Rollback.
+        if (source === 'unstaged') {
+          header.append(button('Rollback', 'Rollback this change', () => post('rollbackHunk', { path: change.path, index }), 'small-button'));
+        }
+        header.append(apply);
         const preview = node('pre', 'hunk-preview');
         const lines = (hunk.lines || []).slice(0, 120);
         for (const line of lines) {
@@ -3301,6 +3402,8 @@ const logScript = String.raw`
     if (allRow) allRow.classList.toggle('active', !selectedBranchKeys.size);
   }
 
+  const isFavoriteBranch = branch => new Set(state.favoriteBranches || []).has(branch.kind + ':' + branch.name);
+
   function branchContextItems(branch) {
     if (!selectedBranchKeys.has(branchKey(branch))) setBranchSelection([branch]);
     const selected = selectedBranches();
@@ -3325,6 +3428,14 @@ const logScript = String.raw`
       { separator: true },
     ];
     if (kind === 'local') items.push({ icon: '↑', label: isCurrent ? 'Push…' : "Push '" + branch.name + "'…", run: act('pushRef') });
+    // IDEA's per-branch Update: fast-forward it from its upstream without
+    // checking it out; on the current branch that is a pull.
+    if (kind === 'local' && branch.upstream && !branch.upstreamGone) {
+      items.push({ icon: '⟳', label: isCurrent ? 'Update Project…' : "Update '" + branch.name + "'", run: act('updateRef') });
+    }
+    if (kind !== 'tag') {
+      items.push({ icon: isFavoriteBranch(branch) ? '★' : '☆', label: isFavoriteBranch(branch) ? 'Remove from Favorites' : 'Add to Favorites', run: () => post('toggleFavoriteBranch', { name: branch.name, kind: branch.kind }) });
+    }
     if (kind === 'remote') items.push(
       { icon: '↓', label: 'Fetch', run: act('fetchRef') },
       { icon: '⇓', label: 'Pull into ' + into + ' using Merge', disabled: !current, run: act('pullRefMerge') },
@@ -3373,49 +3484,83 @@ const logScript = String.raw`
     const all = button('All', 'Show all branches', () => { setBranchSelection([]); post('selectRef', {}); }, 'branch-row' + (!state.selectedRef && !selectedBranchKeys.size ? ' active' : ''));
     all.dataset.branchAll = '1';
     pane.append(all);
+
+    const favorites = new Set(state.favoriteBranches || []);
+    const isFavorite = branch => favorites.has(branch.kind + ':' + branch.name);
+    // A row can appear in more than one group (Recent, Favorites, Local), so
+    // the roving-focus key has to say which group it is in, or the two copies
+    // would collide on the same data-branch-key.
+    const branchRow = (branch, group) => {
+      const key = branchKey(branch); const selected = selectedBranchKeys.has(key);
+      const row = button(branch.name, 'Filter by ' + branch.name + ' (Command/Ctrl-click to select multiple)', event => {
+        if (event.metaKey || event.ctrlKey) {
+          const next = new Set(selectedBranchKeys); if (next.has(key)) next.delete(key); else next.add(key);
+          selectedBranchKeys = next; setBranchSelection(selectedBranches()); return;
+        }
+        setBranchSelection([branch]); post('selectRef', { ref: branch.name });
+      }, 'branch-row' + (selected ? ' selected' : '') + (branch.kind === 'local' && branch.name === state.branch ? ' current' : ''));
+      row.dataset.branchKey = key; row.dataset.focusKey = 'branch:' + group + ':' + key;
+      row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
+      // IDEA's incoming/outgoing markers: what a fetch brought in (↓) and
+      // what a push would send (↑), right-aligned on the row.
+      if (branch.kind === 'local' && (branch.ahead || branch.behind || branch.upstreamGone)) {
+        const track = node('span', 'branch-track');
+        if (branch.upstreamGone) {
+          const gone = node('span', 'track-gone', 'gone');
+          gone.title = t('The upstream branch no longer exists');
+          track.append(gone);
+        } else {
+          if (branch.behind) {
+            const incoming = node('span', 'track-in', '↓' + branch.behind);
+            incoming.title = t('Incoming commits: fetched but not merged');
+            track.append(incoming);
+          }
+          if (branch.ahead) {
+            const outgoing = node('span', 'track-out', '↑' + branch.ahead);
+            outgoing.title = t('Outgoing commits: not pushed yet');
+            track.append(outgoing);
+          }
+        }
+        row.append(track);
+      }
+      if (branch.kind !== 'tag') {
+        // A span, not a button: a button inside a button is invalid markup and
+        // the browser would take the click away from the row entirely.
+        const starred = isFavorite(branch);
+        const star = node('span', 'branch-star' + (starred ? ' on' : ''), starred ? '★' : '☆');
+        star.title = t(starred ? 'Remove from Favorites' : 'Add to Favorites');
+        star.setAttribute('role', 'button');
+        star.setAttribute('aria-label', t(starred ? 'Remove from Favorites' : 'Add to Favorites'));
+        star.addEventListener('click', event => {
+          event.stopPropagation(); event.preventDefault();
+          post('toggleFavoriteBranch', { name: branch.name, kind: branch.kind });
+        });
+        row.append(star);
+      }
+      row.addEventListener('dblclick', () => post('checkout', { name: branch.name, kind: branch.kind }));
+      attachContextMenu(row, () => branchContextItems(branch));
+      return row;
+    };
+    const appendSection = (label, branches, group) => {
+      if (!branches.length) return;
+      const section = node('section', 'branch-section'); section.append(node('div', 'section-title', label));
+      for (const branch of branches) section.append(branchRow(branch, group));
+      pane.append(section);
+    };
+
+    // IDEA's groups: recently checked out, then starred, then everything.
+    const local = (state.branches || []).filter(item => item.kind === 'local');
+    const recent = (state.recentBranches || [])
+      .map(name => local.find(item => item.name === name))
+      .filter(item => item && matches(item));
+    appendSection('Recent', recent, 'recent');
+    appendSection('Favorites', (state.branches || []).filter(item => item.kind !== 'tag' && isFavorite(item) && matches(item)), 'favorite');
     let shown = 0;
-    for (const [kind, title] of [['local','Local'], ['remote','Remote'], ['tag','Tags']]) {
+    for (const [kind, label] of [['local','Local'], ['remote','Remote'], ['tag','Tags']]) {
       const visible = (state.branches || []).filter(item => item.kind === kind && matches(item));
       if (!visible.length) continue;
       shown += visible.length;
-      const section = node('section', 'branch-section'); section.append(node('div', 'section-title', title));
-      for (const branch of visible) {
-        const key = branchKey(branch); const selected = selectedBranchKeys.has(key);
-        const row = button(branch.name, 'Filter by ' + branch.name + ' (Command/Ctrl-click to select multiple)', event => {
-          if (event.metaKey || event.ctrlKey) {
-            const next = new Set(selectedBranchKeys); if (next.has(key)) next.delete(key); else next.add(key);
-            selectedBranchKeys = next; setBranchSelection(selectedBranches()); return;
-          }
-          setBranchSelection([branch]); post('selectRef', { ref: branch.name });
-        }, 'branch-row' + (selected ? ' selected' : '') + (kind === 'local' && branch.name === state.branch ? ' current' : ''));
-        row.dataset.branchKey = key; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
-        // IDEA's incoming/outgoing markers: what a fetch brought in (↓) and
-        // what a push would send (↑), right-aligned on the row.
-        if (kind === 'local' && (branch.ahead || branch.behind || branch.upstreamGone)) {
-          const track = node('span', 'branch-track');
-          if (branch.upstreamGone) {
-            const gone = node('span', 'track-gone', 'gone');
-            gone.title = t('The upstream branch no longer exists');
-            track.append(gone);
-          } else {
-            if (branch.behind) {
-              const incoming = node('span', 'track-in', '↓' + branch.behind);
-              incoming.title = t('Incoming commits: fetched but not merged');
-              track.append(incoming);
-            }
-            if (branch.ahead) {
-              const outgoing = node('span', 'track-out', '↑' + branch.ahead);
-              outgoing.title = t('Outgoing commits: not pushed yet');
-              track.append(outgoing);
-            }
-          }
-          row.append(track);
-        }
-        row.addEventListener('dblclick', () => post('checkout', { name: branch.name, kind: branch.kind }));
-        attachContextMenu(row, () => branchContextItems(branch));
-        section.append(row);
-      }
-      pane.append(section);
+      appendSection(label, visible, kind);
     }
     if (!shown && needle) pane.append(node('div', 'empty', 'No branch matches the filter'));
     requestAnimationFrame(() => setupRovingRows(pane, '.branch-row'));

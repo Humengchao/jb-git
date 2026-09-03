@@ -63,3 +63,17 @@ test("admits Fixup and the commit's Author field within their bounds", () => {
   assert.equal(isLogMessage({ type: "commit", message: "m", mode: "staged", author: "x".repeat(513) }), false);
   assert.equal(isLogMessage({ type: "commit", message: "m", mode: "staged", author: 7 }), false);
 });
+
+test("admits the Local Changes and Branches-pane messages with their bounds", () => {
+  assert.equal(isLogMessage({ type: "rollbackHunk", path: "a.txt", index: 0 }), true);
+  assert.equal(isLogMessage({ type: "rollbackHunk", path: "a.txt", index: -1 }), false);
+  assert.equal(isLogMessage({ type: "rollbackHunk", path: "a.txt" }), false);
+  assert.equal(isLogMessage({ type: "rollbackHunk", index: 2 }), false);
+  assert.equal(isLogMessage({ type: "createLocalPatch" }), true);
+  assert.equal(isLogMessage({ type: "toggleFavoriteBranch", name: "main", kind: "local" }), true);
+  assert.equal(isLogMessage({ type: "toggleFavoriteBranch", name: "origin/main", kind: "remote" }), true);
+  assert.equal(isLogMessage({ type: "toggleFavoriteBranch", name: "main", kind: "stash" }), false);
+  assert.equal(isLogMessage({ type: "toggleFavoriteBranch", kind: "local" }), false);
+  assert.equal(isLogMessage({ type: "contextAction", action: "updateRef", ref: "main", kind: "local" }), true);
+  assert.equal(isLogMessage({ type: "contextAction", action: "updateRef", ref: "main", kind: "banana" }), false);
+});

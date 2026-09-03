@@ -62,6 +62,21 @@ const SCENARIOS = {
     body: `await sleep(2000);
       await vscode.commands.executeCommand("jbGit.openGitToolWindow");`,
   },
+  branches: {
+    describe: "The Log's Branches pane with Recent, Favorites and the star",
+    build: (root) => {
+      buildHistory(root);
+      git(root, "branch", "release/2026.2");
+      git(root, "branch", "feature/annotate");
+      git(root, "checkout", "-q", "feature/annotate");
+      git(root, "checkout", "-q", "release/2026.2");
+      git(root, "checkout", "-q", "-");
+    },
+    body: `await sleep(2000);
+      await vscode.commands.executeCommand("workbench.action.closeSidebar");
+      await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+      await vscode.commands.executeCommand("jbGit.openGitToolWindow");`,
+  },
   selection: {
     describe: "History for Selection: the Log narrowed to the lines selected in the editor",
     build: buildHistory,

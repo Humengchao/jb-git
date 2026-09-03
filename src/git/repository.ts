@@ -428,7 +428,26 @@ export class GitRepository {
     await this.applyHunk(pathSpec, expectedHunk, true, true);
   }
 
-  private async applyHunk(pathSpec: string, expectedHunk: GitDiffHunk, staged: boolean, reverse: boolean): Promise<void> {
+  /**
+   * IDEA's per-change Rollback inside a file: one hunk of the working tree
+   * goes back to what the Index holds, leaving the file's other changes and
+   * everything staged alone.
+   *
+   * The patch is reverse-applied to the working tree only (no `--cached`), so
+   * a hunk the user also staged stays staged — rolling back the text they see
+   * is not the same as unstaging it.
+   */
+  public async rollbackHunk(pathSpec: string, expectedHunk: GitDiffHunk): Promise<void> {
+    await this.applyHunk(pathSpec, expectedHunk, false, true, "worktree");
+  }
+
+  private async applyHunk(
+    pathSpec: string,
+    expectedHunk: GitDiffHunk,
+    staged: boolean,
+    reverse: boolean,
+    target: "index" | "worktree" = "index",
+  ): Promise<void> {
     await this.serial(async () => {
       const output = await this.runner.text([
         "diff",
@@ -445,11 +464,40 @@ export class GitRepository {
         && candidate.lines.every((line, index) => line === expectedHunk.lines[index]));
       if (!hunk) throw new Error("This hunk changed since it was displayed; refresh the changes view and try again.");
       const patch = patchForHunk(output, hunk);
-      await this.runner.run(["apply", "--cached", ...(reverse ? ["--reverse"] : []), "--whitespace=nowarn", "-"], {
+      await this.runner.run([
+        "apply",
+        ...(target === "index" ? ["--cached"] : []),
+        ...(reverse ? ["--reverse"] : []),
+        "--whitespace=nowarn",
+        "-",
+      ], {
         cwd: this.info.rootPath,
         input: patch,
       });
     });
+  }
+
+  /**
+   * IDEA's Create Patch from local changes: a patch of the given paths as they
+   * differ from HEAD, including what is staged, in a form `git apply` and
+   * IDEA's own Apply Patch both accept.
+   *
+   * `--src-prefix`/`--dst-prefix` are left at Git's defaults (`a/`, `b/`) so
+   * the file keeps the `-p1` shape every patch tool expects, and `--binary`
+   * keeps a binary change appliable instead of a bare "differ" line.
+   */
+  public async localChangesPatch(paths: readonly string[]): Promise<string> {
+    if (!paths.length) throw new Error("Select at least one change to create a patch from.");
+    const base = (await this.currentRevision()) ?? await this.emptyTree();
+    return this.runner.text([
+      "diff",
+      "--binary",
+      "--no-ext-diff",
+      "--no-color",
+      base,
+      "--",
+      ...literalPathspecs(paths),
+    ], { cwd: this.info.rootPath });
   }
 
   public async applyPatchFile(patchFile: string): Promise<void> {

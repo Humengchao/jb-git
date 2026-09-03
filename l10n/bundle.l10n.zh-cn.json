@@ -511,5 +511,11 @@
   "Stash and Update": "贮藏并更新",
   "Update Anyway": "仍然更新",
   "The message is only the commit template's comments. Describe the change above them.": "消息中只有提交模板的注释内容。请在注释之上描述本次改动。",
-  "The {0} stopped on a conflict. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back.": "{0} 因冲突停止。请在“本地更改”中解决冲突文件后继续，或中止以恢复分支。"
+  "The {0} stopped on a conflict. Resolve the conflicted files in Local Changes and Continue, or Abort to put the branch back.": "{0} 因冲突停止。请在“本地更改”中解决冲突文件后继续，或中止以恢复分支。",
+  "Rollback": "回滚",
+  "Roll back this change in {0}?": "回滚 {0} 中的这处改动？",
+  "The file's other changes and anything staged stay as they are. A recovery entry is kept in Shelf.": "该文件的其他改动以及已暂存的内容保持不变。会在“搁置”中保留一份恢复条目。",
+  "Rolled back one change in {0}. Recovery shelf '{1}' was kept.": "已回滚 {0} 中的一处改动。已保留恢复搁置 '{1}'。",
+  "Select at least one change to create a patch from.": "请至少选择一处更改来创建补丁。",
+  "The selected changes produced an empty patch.": "所选更改生成的补丁为空。"
 }

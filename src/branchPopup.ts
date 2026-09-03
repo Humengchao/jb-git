@@ -34,9 +34,17 @@ type FavoriteMap = Record<string, string[]>;
 
 const FAVORITES_KEY = "jbGit.favoriteBranches";
 
-/** IDEA's Favorites group, remembered per workspace and repository. */
+/**
+ * IDEA's Favorites group, remembered per workspace and repository.
+ *
+ * The store deliberately holds no VS Code objects beyond the Memento it was
+ * given — the Branches popup and the Log's Branches pane share one instance,
+ * so a star toggled in either has to reach the other, and `onChange` is how
+ * the owner is told to redraw without this module importing an event emitter
+ * it could not be unit-tested without.
+ */
 export class FavoriteBranches {
-  public constructor(private readonly state: Memento) {}
+  public constructor(private readonly state: Memento, private readonly onChange?: () => void) {}
 
   public list(root: string): string[] {
     return [...(this.read()[root] ?? [])];
@@ -54,6 +62,7 @@ export class FavoriteBranches {
     if (next.length) all[root] = next;
     else delete all[root];
     await this.state.update(FAVORITES_KEY, all);
+    this.onChange?.();
     return favorite;
   }
 
@@ -65,6 +74,7 @@ export class FavoriteBranches {
     if (kept.length) all[root] = kept;
     else delete all[root];
     await this.state.update(FAVORITES_KEY, all);
+    this.onChange?.();
   }
 
   private read(): FavoriteMap {

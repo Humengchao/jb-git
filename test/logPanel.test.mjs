@@ -225,7 +225,7 @@ test("offers IntelliJ branch operations from the branch context menu", () => {
 test("marks each local branch with IDEA's incoming and outgoing arrows", () => {
   // ↓ what a fetch brought in, ↑ what a push would send, right-aligned; a
   // deleted upstream says 'gone' instead of showing meaningless zeros.
-  assert.match(scriptMatch[1], /if \(kind === 'local' && \(branch\.ahead \|\| branch\.behind \|\| branch\.upstreamGone\)\)/);
+  assert.match(scriptMatch[1], /if \(branch\.kind === 'local' && \(branch\.ahead \|\| branch\.behind \|\| branch\.upstreamGone\)\)/);
   assert.match(scriptMatch[1], /'↓' \+ branch\.behind/);
   assert.match(scriptMatch[1], /'↑' \+ branch\.ahead/);
   assert.match(scriptMatch[1], /node\('span', 'track-gone', 'gone'\)/);

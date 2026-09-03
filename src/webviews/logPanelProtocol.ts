@@ -21,6 +21,12 @@ type LogMessagePayload =
   | { type: "openDiff"; path: string; mode?: "staged" | "unstaged" }
   | { type: "requestHunks"; path: string }
   | { type: "applyHunk"; path: string; source: "staged" | "unstaged"; index: number }
+  // IDEA's Rollback on one change inside a file: only a working-tree hunk can
+  // be rolled back, because a staged one is the Index's content, not the text
+  // on screen.
+  | { type: "rollbackHunk"; path: string; index: number }
+  | { type: "createLocalPatch" }
+  | { type: "toggleFavoriteBranch"; name: string; kind: GitBranch["kind"] }
   | { type: "moveHunk"; path: string; key: string }
   | { type: "commit"; message: string; mode: "staged" | "files"; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean; author?: string }
   | { type: "editChangelist" | "deleteChangelist" | "setActiveChangelist" | "applyShelf" | "deleteShelf"; id: string }
@@ -28,7 +34,7 @@ type LogMessagePayload =
   | { type: "resolveWith"; path: string; side: "ours" | "theirs" }
   | { type: "runCommand"; command: string }
   | { type: "contextAction"; action: "copyRevision" | "createPatch" | "checkoutRevision" | "compareWithLocal" | "createTag"; hash: string }
-  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "checkoutAndRebase" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag"; ref: string; kind: GitBranch["kind"] }
+  | { type: "contextAction"; action: "copyBranch" | "newBranchFromRef" | "showRefDiff" | "createWorktreeFromRef" | "renameBranch" | "deleteBranch" | "mergeRef" | "rebaseOntoRef" | "checkoutAndRebase" | "pushRef" | "pullRefMerge" | "pullRefRebase" | "fetchRef" | "tagFromRef" | "deleteTag" | "updateRef"; ref: string; kind: GitBranch["kind"] }
   | { type: "contextAction"; action: "compareBranches" | "showBranchesDiff" | "deleteBranches"; branches: Array<{ name: string; kind: GitBranch["kind"] }> }
   | { type: "contextAction"; action: "copyPath" | "showFileDiff" | "compareFileWithLocal" | "openRepositoryFile" | "createFilePatch" | "restoreFile" | "fileHistory"; hash: string; path: string }
   | { type: "commitsAction"; action: "cherryPickCommits" | "compareCommits" | "dropCommits" | "squashCommits"; hashes: string[] };
@@ -39,13 +45,13 @@ export type LogMessage = LogMessagePayload & {
   readonly requestId?: number;
 };
 
-const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory", "clearLineRange"]);
+const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory", "clearLineRange", "createLocalPatch"]);
 const HASH_TYPES = new Set(["selectCommit", "newBranch", "cherryPick", "revert", "reset", "showPatch", "undoCommit", "fixupCommit"]);
 const PATH_TYPES = new Set(["requestHunks", "moveToChangelist", "stage", "unstage", "discard", "ignorePath"]);
 const ID_TYPES = new Set(["editChangelist", "deleteChangelist", "setActiveChangelist", "applyShelf", "deleteShelf"]);
 const BRANCH_KINDS = new Set(["local", "remote", "tag"]);
 const HASH_CONTEXT_ACTIONS = new Set(["copyRevision", "createPatch", "checkoutRevision", "compareWithLocal", "createTag"]);
-const REF_CONTEXT_ACTIONS = new Set(["copyBranch", "newBranchFromRef", "showRefDiff", "createWorktreeFromRef", "renameBranch", "deleteBranch", "mergeRef", "rebaseOntoRef", "checkoutAndRebase", "pushRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]);
+const REF_CONTEXT_ACTIONS = new Set(["copyBranch", "newBranchFromRef", "showRefDiff", "createWorktreeFromRef", "renameBranch", "deleteBranch", "mergeRef", "rebaseOntoRef", "checkoutAndRebase", "pushRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag", "updateRef"]);
 const BRANCH_CONTEXT_ACTIONS = new Set(["compareBranches", "showBranchesDiff", "deleteBranches"]);
 const FILE_CONTEXT_ACTIONS = new Set(["copyPath", "showFileDiff", "compareFileWithLocal", "openRepositoryFile", "createFilePatch", "restoreFile", "fileHistory"]);
 const COMMITS_ACTIONS = new Set(["cherryPickCommits", "compareCommits", "dropCommits", "squashCommits"]);
@@ -87,6 +93,8 @@ export function isLogMessage(value: unknown): value is LogMessage {
     case "toggleAll": return typeof value.checked === "boolean" && (value.listId === undefined || typeof value.listId === "string");
     case "openDiff": return typeof value.path === "string" && (value.mode === undefined || value.mode === "staged" || value.mode === "unstaged");
     case "applyHunk": return typeof value.path === "string" && (value.source === "staged" || value.source === "unstaged") && Number.isInteger(value.index);
+    case "rollbackHunk": return typeof value.path === "string" && Number.isInteger(value.index) && Number(value.index) >= 0;
+    case "toggleFavoriteBranch": return typeof value.name === "string" && BRANCH_KINDS.has(String(value.kind));
     case "commit": return typeof value.message === "string"
       && value.message.length <= 1_000_000
       && (value.mode === "staged" || value.mode === "files")
