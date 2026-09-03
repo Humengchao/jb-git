@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.28
+
+- feat: per-hunk Rollback, Create Patch from local changes, and Recent/Favorites in the Log's Branches pane
+
 ## 0.1.27
 
 - fix: stop claiming a paused history rewrite succeeded, and refuse a comment-only commit message
