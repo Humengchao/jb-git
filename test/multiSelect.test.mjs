@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { isLogMessage, oldestFirst } from "../dist/webviews/logPanelProtocol.js";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, readSource } from "./sourceText.mjs";
 
 const HASH = (letter) => letter.repeat(40);
 
@@ -28,7 +28,7 @@ test("the selection applies in the log's order, not the click order", () => {
 
 test("the Webview gathers the selection with the modifiers IDEA uses", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   // Ctrl/Cmd toggles, Shift ranges from the anchor, and a plain click resets.
   assert.match(script, /if \(event\.ctrlKey \|\| event\.metaKey\) return toggleCommitInSelection\(commit\.hash\);/);
   assert.match(script, /if \(event\.shiftKey\) return extendCommitSelection\(commit\.hash\);/);
@@ -50,7 +50,7 @@ test("the Webview gathers the selection with the modifiers IDEA uses", () => {
 
 test("the host reorders, confirms, and reports how far a stopped batch got", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   // The order the Webview sent is never trusted; the host's own log decides.
   assert.match(host, /const requestedHashes = \[\.\.\.new Set\(message\.hashes\)\];/);
   assert.match(host, /oldestFirst\(requestedHashes, this\.currentCommits\.map\(\(commit\) => commit\.hash\)\)/);

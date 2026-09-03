@@ -7,7 +7,7 @@ import test from "node:test";
 import { FavoriteBranches, recentBranchesFromReflog } from "../dist/branchPopup.js";
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, readSource } from "./sourceText.mjs";
 
 function git(cwd, ...args) {
   const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -136,7 +136,7 @@ test("one favorites store serves both surfaces and tells its owner to redraw", (
 
 test("the Log's Branches pane has IDEA's Recent and Favorites groups, a star and Update", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   const pane = script.slice(script.indexOf("function branchPane()"), script.indexOf("function refreshBranchPane()"));
   assert.match(pane, /appendSection\('Recent', recent, 'recent'\)/);
   assert.match(pane, /appendSection\('Favorites', \(state\.branches \|\| \[\]\)\.filter\(item => item\.kind !== 'tag' && isFavorite\(item\)/);
@@ -151,7 +151,7 @@ test("the Log's Branches pane has IDEA's Recent and Favorites groups, a star and
   assert.match(menu, /if \(kind === 'local' && branch\.upstream && !branch\.upstreamGone\)/);
   assert.match(menu, /label: isCurrent \? 'Update Project…' : "Update '" \+ branch\.name \+ "'", run: act\('updateRef'\)/);
 
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   const update = host.slice(host.indexOf('message.action === "updateRef"'), host.indexOf('message.action === "checkoutAndRebase"'));
   assert.match(update, /if \(branch\.kind !== "local" \|\| !branch\.upstream \|\| branch\.upstreamGone\) return;/);
   assert.match(update, /executeCommand\("jbGit\.pull", root\)/);

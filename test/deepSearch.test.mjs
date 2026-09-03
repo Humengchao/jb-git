@@ -7,10 +7,10 @@ import test from "node:test";
 import { isLogMessage } from "../dist/webviews/logPanelProtocol.js";
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
-import { readSource } from "./sourceText.mjs";
+import { panelScript, readSource } from "./sourceText.mjs";
 
 const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+const script = panelScript(import.meta.url);
 
 function git(cwd, ...args) {
   return execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();

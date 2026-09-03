@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { isLogMessage, isToolTab } from "../dist/webviews/logPanelProtocol.js";
+import { panelHost, readSource } from "./sourceText.mjs";
 
 test("validates Webview messages at the extension-host boundary", () => {
   assert.equal(isLogMessage({ type: "commit", message: "subject", mode: "staged", push: true }), true);
@@ -76,4 +77,48 @@ test("admits the Local Changes and Branches-pane messages with their bounds", ()
   assert.equal(isLogMessage({ type: "toggleFavoriteBranch", kind: "local" }), false);
   assert.equal(isLogMessage({ type: "contextAction", action: "updateRef", ref: "main", kind: "local" }), true);
   assert.equal(isLogMessage({ type: "contextAction", action: "updateRef", ref: "main", kind: "banana" }), false);
+});
+
+test("every message the protocol admits reaches exactly one handler group", () => {
+  // The tool window's message handling is split by subject, and the groups are
+  // called one after another because their type sets are disjoint. That only
+  // stays true if it is checked: a type handled twice would run twice, and one
+  // handled nowhere would be silently dropped after passing validation.
+  const protocol = readSource("../src/webviews/logPanelProtocol.ts", import.meta.url);
+  const host = panelHost(import.meta.url);
+
+  const declared = new Set();
+  for (const [, union] of protocol.matchAll(/\| \{ type: ((?:"[a-zA-Z]+"(?: \| )?)+)/g)) {
+    for (const [, name] of union.matchAll(/"([a-zA-Z]+)"/g)) declared.add(name);
+  }
+  // The sets the validator keeps for the repetitive families.
+  for (const [, list] of protocol.matchAll(/(?:SIMPLE_TYPES|HASH_TYPES|PATH_TYPES|ID_TYPES) = new Set\(\[([^\]]*)\]\)/g)) {
+    for (const [, name] of list.matchAll(/"([a-zA-Z]+)"/g)) declared.add(name);
+  }
+  assert.ok(declared.size > 40, `expected the protocol's message types, found ${declared.size}`);
+
+  const groups = [...host.matchAll(/private async (handle\w+Message)\(/g)].map((match) => match[1]);
+  assert.ok(groups.length >= 6, `expected the subject handlers, found ${groups.join(", ")}`);
+  // handleMessage must actually call each of them, or a whole subject is dead.
+  const dispatcher = host.slice(host.indexOf("private async handleMessage("), host.indexOf("private async handleContextActionMessage("));
+  for (const group of groups) assert.match(dispatcher, new RegExp(`await this\\.${group}\\(message`), `${group} must be dispatched`);
+
+  // Where each type is handled: the dispatcher's own branches count too.
+  const bodies = new Map();
+  for (const [index, group] of groups.entries()) {
+    const start = host.indexOf(`private async ${group}(`);
+    const end = index + 1 < groups.length ? host.indexOf(`private async ${groups[index + 1]}(`) : host.length;
+    bodies.set(group, host.slice(start, end));
+  }
+  bodies.set("handleMessage", dispatcher);
+
+  const missing = [];
+  const duplicated = [];
+  for (const type of [...declared].sort()) {
+    const owners = [...bodies].filter(([, body]) => new RegExp(`message\\.type === "${type}"`).test(body)).map(([name]) => name);
+    if (owners.length === 0) missing.push(type);
+    if (owners.length > 1) duplicated.push(`${type} in ${owners.join(" + ")}`);
+  }
+  assert.deepEqual(missing, [], "every admitted message type needs a handler");
+  assert.deepEqual(duplicated, [], "a type handled by two groups would run twice");
 });

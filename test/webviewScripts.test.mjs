@@ -11,7 +11,7 @@ import { readSource } from "./sourceText.mjs";
  * threw on every expanded file.
  */
 const SCRIPTS = [
-  ["../src/webviews/logPanel.ts", /const logScript = String\.raw`([\s\S]*?)`;\n/],
+  ["../src/webviews/logPanelScript.ts", /export const logScript = String\.raw`([\s\S]*?)`;\n/],
   ["../src/webviews/mergeEditor.ts", /const mergeScript = String\.raw`([\s\S]*?)`;\n/],
   ["../src/webviews/branchComparison.ts", /const comparisonScript = String\.raw`([\s\S]*?)`;\n/],
   ["../src/webviews/rebaseEditor.ts", /function script\(\): string \{[\s\S]*?\n  return String\.raw`([\s\S]*?)`;\n\}/],

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, readSource } from "./sourceText.mjs";
 
 function git(cwd, ...args) {
   const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -112,13 +112,13 @@ test("creates an applicable patch from the local changes, including what is stag
 
 test("Local Changes offers per-hunk Rollback and Create Patch, with the destructive one confirmed and backed up", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   // Only a working-tree hunk: taking a staged one back is Unstage, not Rollback.
   assert.match(script, /if \(source === 'unstaged'\) \{\s*\n\s*header\.append\(button\('Rollback', 'Rollback this change'/);
   assert.match(script, /post\('rollbackHunk', \{ path: change\.path, index \}\)/);
   assert.match(script, /button\('Create Patch…', 'Save the selected changes as a patch file', \(\) => post\('createLocalPatch'\)/);
 
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   const rollback = host.slice(host.indexOf('message.type === "rollbackHunk"'), host.indexOf('message.type === "createLocalPatch"'));
   assert.match(rollback, /change\.conflicted \|\| change\.kind === "untracked"/);
   assert.match(rollback, /confirmDiscard/, "the same setting that gates a file rollback gates this one");

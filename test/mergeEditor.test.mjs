@@ -168,7 +168,8 @@ test("shows every change on a marker strip that jumps to it", () => {
 test("every webview declares the colour scheme it is painted in", () => {
   // Without this Chromium paints light scrollbars and form controls over a dark
   // theme; the merge and rebase editors were the two that had not said so.
-  for (const name of ["mergeEditor", "rebaseEditor", "logPanel", "branchComparison"]) {
+  // The tool window's stylesheet is its own file now.
+  for (const name of ["mergeEditor", "rebaseEditor", "logPanelStyles", "branchComparison"]) {
     assert.match(
       readSource(`../src/webviews/${name}.ts`, import.meta.url),
       /color-scheme: light dark;/,

@@ -7,7 +7,7 @@ import test from "node:test";
 import { DEFAULT_COMMENT_CHAR, effectiveCommitMessage, stripCommentLines } from "../dist/commitMessage.js";
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, readSource } from "./sourceText.mjs";
 
 function git(cwd, ...args) {
   const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -72,7 +72,7 @@ test("a commit that Git would strip to nothing is refused with a sentence, not G
   );
 
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   const commit = host.slice(host.indexOf('message.type === "commit"'), host.indexOf('message.type === "createChangelist"'));
   assert.match(commit, /const \{ commitTemplate, commentChar \} = await this\.commitFormExtras\(root, snapshot\);/, "the cached read is reused instead of a second git config call");
   assert.match(commit, /const commitMessage = effectiveCommitMessage\(message\.message, stripComments, commentChar\);/);
@@ -82,7 +82,7 @@ test("a commit that Git would strip to nothing is refused with a sentence, not G
 
   // The Webview's button uses the same rule and the same comment character, so
   // the two cannot disagree about whether the box is empty.
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /const commentChar = typeof state\.commentChar === 'string' && state\.commentChar \? state\.commentChar : '#';/);
   assert.match(script, /line\.trimStart\(\)\.startsWith\(commentChar\)/);
 });

@@ -48,6 +48,24 @@ The implementation is clean-room TypeScript. Any future source reuse requires pe
 | Multi-root, nested repositories and Worktrees | Partial | Discovery, per-repository mutation serialization and linked-worktree metadata watching are present. External ordinary working-file changes now trigger debounced refreshes while `.git`, dependency and cache noise is ignored. Pending refreshes are retained by root/generation, and rediscovery reuses the same repository object and mutation lock when identity is unchanged. Cross-repository transactional rollback remains planned. |
 | JetBrains-native UI/assets and pixel parity | Out of scope | The extension uses VS Code Panel/Webview/Diff primitives. It does not copy JetBrains source, controls, UI assets or trademarks. |
 
+## Tool window layout
+
+The Git tool window is four files rather than one: `logPanel.ts` holds the host
+(the `WebviewViewProvider`, the Git reads, and the message handling),
+`logPanelStyles.ts` and `logPanelScript.ts` hold the two `String.raw` constants
+it injects, and `logPanelProtocol.ts` is the boundary type plus its validator.
+The script is not an IIFE — its `function` declarations hoist across the file
+and the last statements are the boot sequence — so it can be read top to bottom
+as one script.
+
+Message handling is one dispatcher plus seven `handle…Message` methods, one per
+subject (context actions, log view, Local Changes, commit form, Changelists,
+branches, history rewriting). They own disjoint message types and are called in
+turn, which is the same linear chain the 1,100-line method used to be;
+`test/logPanelProtocol.test.mjs` checks that every type `isLogMessage` admits is
+handled in exactly one of them, so neither a dropped nor a doubled handler can
+pass review.
+
 ## Milestone checkpoint
 
 | Milestone | Status | Delivered / boundary |
@@ -66,7 +84,7 @@ The implementation is clean-room TypeScript. Any future source reuse requires pe
 2. Add explicit multi-repository transaction planning, partial-failure reporting and compensating rollback where operations are reversible.
 3. Add persistent large-history indexing/search and benchmark graph behavior beyond the current 5,000-commit window.
 4. Widen interactive rebase towards IDEA: merge-preserving ranges and `exec`/`break` rows.
-5. Reduce `logPanel.ts` (now ~4,500 lines): the Webview script is one template literal, so a rendering fault is only visible through `scripts/screenshot.mjs`.
+5. Split what is left of `logPanel.ts` (~2,200 lines of host logic) if it grows again; the stylesheet and the Webview script now live in `logPanelStyles.ts` and `logPanelScript.ts`, and the message handling is seven subject methods guarded by a coverage test.
 6. Expand capability-based Git fallbacks, accessibility testing and SSH/WSL/Dev Container/remote Extension Host coverage.
 
 ## Release and signing status

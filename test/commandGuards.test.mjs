@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, readSource } from "./sourceText.mjs";
 
 const extension = readSource("../src/extension.ts", import.meta.url);
 
@@ -127,20 +127,20 @@ test("Checkout and Rebase onto Current rebases while the parked changes are stil
   assert.match(checkout, /await manager\.withExclusive\(rootPath, async \(lease\) => \{\s*\n\s*await manager\.checkout\(rootPath, branch\.name, branch\.kind, branch\.fullName, lease\);\s*\n\s*await options\.afterCheckout\?\.\(lease\);/);
 
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   const action = host.slice(host.indexOf('message.action === "checkoutAndRebase"'), host.indexOf('message.action === "fetchRef"'));
   assert.match(action, /modal: true/);
   assert.match(action, /afterCheckout: \(lease\) => this\.manager\.rebase\(root, onto, lease\)/);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /label: 'Checkout ' \+ branch\.name \+ ' and Rebase onto ' \+ into, disabled: !current, run: act\('checkoutAndRebase'\)/);
 });
 
 test("Accept Yours / Accept Theirs label the sides by the running operation and confirm first", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /label: 'Accept Yours', run: \(\) => post\('resolveWith', \{ path: change\.path, side: 'ours' \}\)/);
   assert.match(script, /label: 'Accept Theirs', run: \(\) => post\('resolveWith', \{ path: change\.path, side: 'theirs' \}\)/);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   const resolve = host.slice(host.indexOf('message.type === "resolveWith"'), host.indexOf('message.type === "ignorePath"'));
   assert.match(resolve, /if \(!change\?\.conflicted\) return;/);
   // During a rebase "yours" is the rebase target, not the replayed commit; the
@@ -212,7 +212,7 @@ test("Hide Revision is cumulative per document, guarded to object ids, and rever
 
 test("the commit form has IDEA's Author field and pre-fills from commit.template", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /authorInput\.setAttribute\('list', 'commit-authors'\)/);
   assert.match(script, /for \(const author of state\.recentAuthors \|\| \[\]\)/);
   assert.match(script, /author: authorInput\.value\.trim\(\) \|\| undefined/);
@@ -223,7 +223,7 @@ test("the commit form has IDEA's Author field and pre-fills from commit.template
   assert.match(script, /disabled = !available \|\| effectivelyEmpty\(message\.value\)/);
   // The author is for that one commit.
   assert.match(script, /const authors = \{ \.\.\.\(uiState\.commitAuthors \|\| \{\}\) \}; delete authors\[state\.selectedRoot \|\| ''\];/);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   // Comments are stripped exactly when a template is configured, as Git's own editor does.
   assert.match(host, /const stripComments = commitTemplate !== null;/);
   assert.match(host, /author: message\.author\?\.trim\(\) \|\| undefined, stripComments/);

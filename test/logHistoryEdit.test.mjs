@@ -9,7 +9,7 @@ import { dropPlan, fixupPlan, rewordPlan, squashPlan } from "../dist/logHistoryE
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
 import { originalMessage } from "../dist/webviews/rebaseEditorProtocol.js";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, readSource } from "./sourceText.mjs";
 
 const A = { hash: "a".repeat(40), subject: "one", message: "one" };
 const B = { hash: "b".repeat(40), subject: "two", message: "two" };
@@ -102,12 +102,12 @@ test("squashes a non-adjacent selection through a real rebase, reordering the mi
 
 test("the Log offers the rewrite actions and runs them with the stash choreography", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /label: 'Drop Commit…', run: \(\) => post\('commitsAction', \{ action: 'dropCommits', hashes: \[commit\.hash\] \}\)/);
   assert.match(script, /label: 'Squash Selected…', run: \(\) => post\('commitsAction', \{ action: 'squashCommits', hashes \}\)/);
   assert.match(script, /label: 'Drop Selected…', run: \(\) => post\('commitsAction', \{ action: 'dropCommits', hashes \}\)/);
 
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   // The same loader and refusals as the sequence editor, and a selection off
   // the linear history is refused before any history is touched.
   assert.match(host, /const candidates = await this\.manager\.interactiveRebaseCandidates\(root, base\);/);
@@ -150,7 +150,7 @@ test("edits the message of an older commit through a real rebase, keeping its tr
 
 test("the Log offers Edit Commit Message and Undo Commit the way IDEA does", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /label: 'Edit Commit Message…', run: \(\) => beginRewordEditing\(commit\.hash\)/);
   // Undo is only for the checked-out commit, and never for a merge.
   assert.match(script, /label: 'Undo Commit…', disabled: !isHead \|\| \(commit\.parents \|\| \[\]\)\.length !== 1/);
@@ -162,7 +162,7 @@ test("the Log offers Edit Commit Message and Undo Commit the way IDEA does", () 
   assert.match(script, /event\.key === 'Enter' && \(event\.ctrlKey \|\| event\.metaKey\)/);
   assert.match(script, /post\('rewordCommit', \{ hash: commit\.hash, message: box\.value \}\)/);
 
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   // HEAD is amended in place; anything older goes through the same rebase plan
   // machinery as Drop and Squash, so it shares the refusals and the stash offer.
   const reword = host.slice(host.indexOf('message.type === "rewordCommit"'), host.indexOf('message.type === "reset"'));
@@ -234,9 +234,9 @@ test("Fixup… aimed at HEAD is an amend that keeps the message", async () => {
 
 test("the Log's Fixup… checks the target before committing and says so when the fold did not run", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /label: 'Fixup…', run: \(\) => post\('fixupCommit', \{ hash: commit\.hash \}\)/);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   const fixup = host.slice(host.indexOf('message.type === "fixupCommit"'), host.indexOf('message.type === "rewordCommit"'));
   // Nothing staged means nothing to fix up with; the Index is the source.
   assert.match(fixup, /Stage the changes that belong in \{0\} first/);
@@ -277,7 +277,7 @@ test("a rewrite that stops on a conflict is not reported as done", async () => {
   // The panel must not claim the rewrite happened while that state is live:
   // the outcome is three-state, and only "completed" prints the message.
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   assert.match(host, /type HistoryRewriteOutcome = "completed" \| "declined" \| "paused";/);
   const rewrite = host.slice(host.indexOf("private async runHistoryRewrite"), host.indexOf("public dispose()"));
   assert.match(rewrite, /outcome = "paused";/);
@@ -292,7 +292,7 @@ test("a rewrite that stops on a conflict is not reported as done", async () => {
 
 test("a merge or rebase that pauses from the Log is explained rather than only reported as a Git error", () => {
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   const guard = host.slice(host.indexOf("const paused = this.currentSnapshot()?.operation;"));
   assert.match(guard.slice(0, 800), /if \(paused && paused\.kind !== "none" && paused\.canContinue\)/, "only an operation the user can continue is explained");
   assert.match(guard.slice(0, 800), /stopped on a conflict\. Resolve the conflicted files in Local Changes and Continue/);

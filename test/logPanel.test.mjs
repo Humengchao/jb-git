@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, panelStyles, readSource } from "./sourceText.mjs";
 
-const source = readSource("../src/webviews/logPanel.ts", import.meta.url);
+const source = panelHost(import.meta.url);
+const styles = panelStyles(import.meta.url);
 const protocolSource = readSource("../src/webviews/logPanelProtocol.ts", import.meta.url);
 const pushPreviewSource = readSource("../src/pushPreview.ts", import.meta.url);
-const scriptMatch = source.match(/const logScript = String\.raw`([\s\S]*?)`;\r?\n$/);
+const scriptMatch = panelScript(import.meta.url).match(/export const logScript = String\.raw`([\s\S]*?)`;\r?\n$/);
 
 function graphHarness(collapsed = []) {
   assert.ok(scriptMatch);
@@ -64,8 +65,8 @@ test("supports persistent horizontal resizing for all three Git log columns", ()
 test("collapses secondary panes instead of overflowing a narrow panel", () => {
   assert.ok(scriptMatch);
   assert.match(scriptMatch[1], /workspace\.classList\.toggle\('compact', compact\)/);
-  assert.match(source, /\.workspace\.compact > \.branches/);
-  assert.match(source, /\.workspace\.tiny/);
+  assert.match(styles, /\.workspace\.compact > \.branches/);
+  assert.match(styles, /\.workspace\.tiny/);
 });
 
 test("supports modifier-click branch selection and multi-branch actions", () => {
@@ -229,8 +230,9 @@ test("marks each local branch with IDEA's incoming and outgoing arrows", () => {
   assert.match(scriptMatch[1], /'↓' \+ branch\.behind/);
   assert.match(scriptMatch[1], /'↑' \+ branch\.ahead/);
   assert.match(scriptMatch[1], /node\('span', 'track-gone', 'gone'\)/);
-  const source = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  assert.match(source, /\.branch-track \{ margin-left: auto;/);
+  const source = panelHost(import.meta.url);
+const styles = panelStyles(import.meta.url);
+  assert.match(styles, /\.branch-track \{ margin-left: auto;/);
   // The fingerprint already covers %(upstream:track), so a fetch that changes
   // the counts repaints the column.
   assert.match(source, /\$\{branch\.tracking \?\? ""\}/);
@@ -439,7 +441,7 @@ test("navigates a non-virtual list without rebuilding it and keeps drags touch-s
   assert.match(navigate[0], /scrollIntoView\(\{ block: 'nearest' \}\)/);
   // Touch drags on the message splitter must not turn into native panning. The rule lives
   // in the style block, not the script.
-  assert.match(source, /\.detail-splitter \{[^}]*touch-action: none/);
+  assert.match(styles, /\.detail-splitter \{[^}]*touch-action: none/);
   // The `.splitter.active` guard matched nothing; only `.dragging` exists in this webview.
   assert.doesNotMatch(script, /\.dragging, \.splitter\.active/);
   // A resize moves everything under an open menu, so it closes like native menus do.
@@ -479,14 +481,14 @@ test("draws the dropdowns and checkboxes from the theme, not from the browser", 
   // A native select and native checkboxes were the only browser-default controls
   // left in the panel, which made the commit form read as a web form dropped
   // into the editor.
-  assert.match(source, /\.select-shell select \{[^}]*appearance: none/);
-  assert.match(source, /\.select-shell select \{[^}]*var\(--vscode-dropdown-background/);
-  assert.match(source, /input\[type="checkbox"\] \{[^}]*appearance: none/);
-  assert.match(source, /input\[type="checkbox"\]:checked::after \{/);
+  assert.match(styles, /\.select-shell select \{[^}]*appearance: none/);
+  assert.match(styles, /\.select-shell select \{[^}]*var\(--vscode-dropdown-background/);
+  assert.match(styles, /input\[type="checkbox"\] \{[^}]*appearance: none/);
+  assert.match(styles, /input\[type="checkbox"\]:checked::after \{/);
   // The chevron is drawn with borders: a CSP with no img-src cannot load a
   // background image, so a data URI arrow would silently not appear.
-  assert.match(source, /\.select-shell::after \{[^}]*transform: rotate\(45deg\)/);
-  assert.doesNotMatch(source, /\.select-shell[^}]*background-image/);
+  assert.match(styles, /\.select-shell::after \{[^}]*transform: rotate\(45deg\)/);
+  assert.doesNotMatch(styles, /\.select-shell[^}]*background-image/);
   // Every select goes through the shell, or the styled one would be the odd
   // control out instead of the plain ones.
   const created = scriptMatch[1].match(/node\('select'\)/g) ?? [];
@@ -518,14 +520,14 @@ test("colours file names by status in both trees, like IDEA", () => {
   // The name itself carries the colour, not only the status letter.
   assert.match(scriptMatch[1], /node\('div', 'change-file ' \+ statusClass\)/);
   assert.match(scriptMatch[1], /node\('span', 'file-path ' \+ statusClass/);
-  assert.match(source, /\.status-R, \.status-C \{ color: var\(--vscode-gitDecoration-renamedResourceForeground/);
-  assert.match(source, /\.status-A \{ color: var\(--vscode-gitDecoration-addedResourceForeground/);
+  assert.match(styles, /\.status-R, \.status-C \{ color: var\(--vscode-gitDecoration-renamedResourceForeground/);
+  assert.match(styles, /\.status-A \{ color: var\(--vscode-gitDecoration-addedResourceForeground/);
 });
 
 test("keeps every commit-form control readable in a narrow column", () => {
   // Beside the select, the mode help wrapped into a six-line sliver.
-  assert.match(source, /\.commit-mode-row \{ display: grid; gap: 4px;/);
-  assert.doesNotMatch(source, /\.commit-mode-row \{[^}]*minmax\(160px, auto\)/);
+  assert.match(styles, /\.commit-mode-row \{ display: grid; gap: 4px;/);
+  assert.doesNotMatch(styles, /\.commit-mode-row \{[^}]*minmax\(160px, auto\)/);
 });
 
 test("routes user-visible strings through the translator with no duplicate keys", () => {

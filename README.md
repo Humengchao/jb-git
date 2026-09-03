@@ -8,7 +8,7 @@ The implementation is intentionally layered:
 
 - Git Core executes the user's system `git` binary with safe argument arrays.
 - Repository state is parsed from machine-readable Git output and refreshed incrementally.
-- The extension host owns Git operations; the UI uses one IntelliJ-inspired Git Webview contributed to VS Code's bottom Panel plus native diff surfaces.
+- The extension host owns Git operations; the UI uses one IntelliJ-inspired Git Webview contributed to VS Code's bottom Panel plus native diff surfaces. That window is split by role: the host and its message handling, the stylesheet, the Webview script, and the protocol type that validates everything crossing between them.
 - Changelists, Shelf, hunk staging, history, conflict actions, Worktrees, Remotes, Stashes, and Submodules are implemented as independent layers.
 - CI validates core behavior on Windows, macOS, and Linux, plus Extension Host activation on VS Code 1.95 and stable.
 

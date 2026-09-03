@@ -8,7 +8,7 @@ import { mapLineRangeToHead, selectedLineRange } from "../dist/lineHistory.js";
 import { parseUnifiedDiff } from "../dist/git/patch.js";
 import { discoverRepository, lineRangeArgument } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
-import { readSource } from "./sourceText.mjs";
+import { panelHost, panelScript, readSource } from "./sourceText.mjs";
 
 function git(cwd, ...args) {
   const output = execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -122,12 +122,12 @@ test("Show History for Selection maps the editor lines to HEAD before asking Git
   assert.match(menu.when, /editorHasSelection/);
 
   const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
-  const host = panel.slice(0, panel.indexOf("const logScript = String.raw`"));
+  const host = panelHost(import.meta.url);
   // A typed path filter is a new question, so the old range is dropped, while
   // clearing the range alone keeps the whole file's history on screen.
   const setPath = host.slice(host.indexOf('message.type === "setPathFilter"'), host.indexOf('message.type === "clearLineRange"'));
   assert.match(setPath, /this\.filePathExact = false;\s*\n\s*this\.lineRange = undefined;/);
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /post\('clearLineRange'\)/);
   assert.match(script, /'Lines': '行'/);
 });

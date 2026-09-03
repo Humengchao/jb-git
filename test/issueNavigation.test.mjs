@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { compileIssueRules, linkifyIssues, safeIssueUrl } from "../dist/issueNavigation.js";
-import { readSource } from "./sourceText.mjs";
+import { panelScript, readSource } from "./sourceText.mjs";
 
 const JIRA = { pattern: "[A-Z][A-Z0-9]+-\\d+", url: "https://tracker.example.com/browse/$0" };
 
@@ -87,7 +87,7 @@ test("caps the text scanned by user-configured rules", () => {
 });
 
 test("the Webview runs the same compiled module, not a copy", () => {
-  const panel = readSource("../src/webviews/logPanel.ts", import.meta.url);
+  const panel = panelScript(import.meta.url);
   assert.match(panel, /require\.resolve\("\.\.\/issueNavigation"\)/);
   assert.match(panel, /const IssueNavigation = \(\(\) => \{ const exports = \{\};/);
   // The injected wrapper has to evaluate to a working global.
@@ -98,7 +98,7 @@ test("the Webview runs the same compiled module, not a copy", () => {
   assert.equal(segments[0].url, "https://tracker.example.com/browse/ABC-1");
   // Rendering builds anchors from segments; rules recompile only when the
   // configuration value changes.
-  const script = panel.slice(panel.indexOf("const logScript = String.raw`"));
+  const script = panelScript(import.meta.url);
   assert.match(script, /function appendIssueLinked\(parent, text\)/);
   assert.match(script, /IssueNavigation\.compileIssueRules\(raw\)/);
   assert.match(script, /issueRuleCache\.key !== key/);

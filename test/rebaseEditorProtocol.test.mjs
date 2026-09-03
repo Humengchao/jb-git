@@ -94,8 +94,8 @@ test("embeds every Webview's script and styles as raw templates", () => {
   const required = [
     ["branchComparison.ts", /const comparisonStyles = String\.raw`/],
     ["branchComparison.ts", /const comparisonScript = String\.raw`/],
-    ["logPanel.ts", /const logStyles = String\.raw`/],
-    ["logPanel.ts", /const logScript = String\.raw`/],
+    ["logPanelStyles.ts", /export const logStyles = String\.raw`/],
+    ["logPanelScript.ts", /export const logScript = String\.raw`/],
     ["mergeEditor.ts", /const mergeStyles = String\.raw`/],
     ["mergeEditor.ts", /const mergeScript = String\.raw`/],
     ["rebaseEditor.ts", /function styles\(\): string \{[\s\S]*?return String\.raw`/],
