@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.30
+
+- fix: stop a per-hunk Rollback from discarding the whole file, and cap the change rows drawn
+
 ## 0.1.29
 
 - refactor: split the tool window into host, styles and script, and its 1,100-line handler into seven
