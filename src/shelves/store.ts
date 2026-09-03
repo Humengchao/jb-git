@@ -14,6 +14,14 @@ export interface ShelfEntry {
   paths: string[];
 }
 
+/**
+ * The shape `writeEntry` generates. Metadata is read back off disk and then
+ * steers file operations — `apply` reads the patch it names and `remove`
+ * deletes it — so an entry whose id is not this cannot be trusted to stay
+ * inside the shelf directory.
+ */
+const SHELF_ID = /^[0-9]+-[a-z0-9]+$/;
+
 function repositoryKey(root: string): string {
   return createHash("sha256").update(root).digest("hex").slice(0, 20);
 }
@@ -36,7 +44,8 @@ export class ShelfStore implements vscode.Disposable {
       for (const name of names.filter((item) => item.endsWith(".json"))) {
         try {
           const content = await readFile(path.join(directory, name), "utf8");
-          entries.push(JSON.parse(content) as ShelfEntry);
+          const entry = JSON.parse(content) as ShelfEntry;
+          if (usableEntry(entry, name, directory)) entries.push(entry);
         } catch {
           // Ignore a partially written or manually removed shelf entry.
         }
@@ -90,9 +99,17 @@ export class ShelfStore implements vscode.Disposable {
   }
 
   /** The stored path is absolute and breaks when the storage location moves; fall back to the current storage directory. */
+  /**
+   * Where the entry's patch actually is.
+   *
+   * The stored path is preferred only while it is the one this directory would
+   * have written: metadata is read from disk, and a path pointing elsewhere
+   * would make `apply` read some other file and `remove` delete it.
+   */
   private patchPath(repositoryRoot: string, entry: ShelfEntry): string {
-    if (existsSync(entry.patchFile)) return entry.patchFile;
-    return path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.patch`);
+    const own = path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.patch`);
+    if (entry.patchFile === own && existsSync(entry.patchFile)) return entry.patchFile;
+    return own;
   }
 
   /**
@@ -104,7 +121,9 @@ export class ShelfStore implements vscode.Disposable {
    * not be deleted.
    */
   public async apply(repository: GitRepository, entry: ShelfEntry): Promise<"clean" | "conflicted"> {
-    const outcome = await repository.applyPatchFileWithFallback(this.patchPath(repository.info.rootPath, entry));
+    // The entry's own paths: a fallback that merged cleanly must not leave
+    // them staged, since a plain apply would not have.
+    const outcome = await repository.applyPatchFileWithFallback(this.patchPath(repository.info.rootPath, entry), entry.paths);
     this.changedEmitter.fire(repository.info.rootPath);
     return outcome;
   }
@@ -163,6 +182,19 @@ export class ShelfStore implements vscode.Disposable {
   public dispose(): void {
     this.changedEmitter.dispose();
   }
+}
+
+/**
+ * Whether a metadata file describes an entry this store can act on: its id is
+ * the generated shape, it names the file it was read from, and its fields are
+ * the types the rest of the code assumes.
+ */
+function usableEntry(entry: ShelfEntry, fileName: string, directory: string): boolean {
+  if (typeof entry?.id !== "string" || !SHELF_ID.test(entry.id) || `${entry.id}.json` !== fileName) return false;
+  if (typeof entry.name !== "string" || typeof entry.createdAt !== "string") return false;
+  if (!Array.isArray(entry.paths) || entry.paths.some((item) => typeof item !== "string")) return false;
+  // A patch outside this directory is not this store's to read or delete.
+  return typeof entry.patchFile === "string" && path.dirname(path.resolve(entry.patchFile)) === path.resolve(directory);
 }
 
 async function unlinkIfPresent(filePath: string): Promise<void> {

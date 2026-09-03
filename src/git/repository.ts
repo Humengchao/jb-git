@@ -534,10 +534,15 @@ export class GitRepository {
    * merge does, so the conflict editor can settle it. Git exits non-zero even
    * when that succeeds, so the index — not the exit code — says what happened.
    *
-   * The clean path stays unstaged on purpose; a three-way apply stages what it
-   * could merge, because that is how Git records the parts it settled.
+   * Restored changes stay out of the Index either way. `--3way` implies
+   * `--index`, so a fallback that merged cleanly would otherwise leave the
+   * shelf's content staged — and a Commit of the staging area would then take
+   * changes the user never staged. `keepUnstaged` names the paths to move back
+   * out of the Index, inside the same lock, once that has happened. A file
+   * that conflicted keeps its unmerged entries: those are what make it
+   * resolvable.
    */
-  public async applyPatchFileWithFallback(patchFile: string): Promise<"clean" | "conflicted"> {
+  public async applyPatchFileWithFallback(patchFile: string, keepUnstaged: readonly string[] = []): Promise<"clean" | "conflicted"> {
     return this.serial(async () => {
       try {
         await this.runner.run(["apply", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath });
@@ -549,6 +554,7 @@ export class GitRepository {
         const before = await this.unmergedPaths();
         try {
           await this.runner.run(["apply", "--3way", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath });
+          await this.unstagePaths(keepUnstaged);
           return "clean";
         } catch (fallbackError) {
           if (isGitAbort(fallbackError)) throw fallbackError;
@@ -558,6 +564,24 @@ export class GitRepository {
         }
       }
     });
+  }
+
+  /**
+   * Moves the Index for these paths back to HEAD, keeping the working tree.
+   *
+   * A path the patch introduced is not in HEAD, so it leaves the Index
+   * entirely and becomes untracked — which is where a plain apply would have
+   * left it too.
+   */
+  private async unstagePaths(paths: readonly string[]): Promise<void> {
+    if (!paths.length) return;
+    const specs = literalPathspecs(paths);
+    const head = await this.currentRevision();
+    if (!head) {
+      await this.runner.run(["rm", "--cached", "-r", "--quiet", "--ignore-unmatch", "--", ...specs], { cwd: this.info.rootPath });
+      return;
+    }
+    await this.runner.run(["reset", "--quiet", head, "--", ...specs], { cwd: this.info.rootPath });
   }
 
   private async unmergedPaths(): Promise<Set<string>> {

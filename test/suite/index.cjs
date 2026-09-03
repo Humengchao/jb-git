@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { readFile } = require("node:fs/promises");
-const { access, mkdir, mkdtemp } = require("node:fs/promises");
+const { access, mkdir, mkdtemp, unlink } = require("node:fs/promises");
 const { execFileSync } = require("node:child_process");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
@@ -217,14 +217,25 @@ async function run() {
   }
 
   const { ShelfStore } = require(path.join(extension.extensionPath, "dist", "shelves", "store.js"));
+  const { discoverRepository } = require(path.join(extension.extensionPath, "dist", "git", "repository.js"));
   const shelfRoot = await mkdtemp(path.join(tmpdir(), "jb-git-shelf-delete-"));
-  const invalidPatch = path.join(shelfRoot, "patch-is-a-directory");
-  await mkdir(invalidPatch);
   const shelfStore = new ShelfStore(shelfRoot);
-  await assert.rejects(shelfStore.remove(parent, {
-    id: "broken", repositoryRoot: parent, name: "Broken", createdAt: new Date().toISOString(),
-    patchFile: invalidPatch, paths: [],
-  }), "shelf deletion errors must be reported");
+  const shelfRepository = await discoverRepository(parent, new GitRunner());
+  // A real entry, so its patch sits where the store puts it: metadata read
+  // from disk cannot send `remove` at a file outside that directory, so the
+  // undeletable file has to be the entry's own.
+  // The store keys its directory by the repository root it is given, and the
+  // repository's own root is canonical — on macOS the temp dir arrives as
+  // /var and comes back as /private/var — so both calls have to use that one.
+  const shelfRoot2 = shelfRepository.info.rootPath;
+  const entry = await shelfStore.record(shelfRepository, "Broken", [], "not a real patch\n");
+  await unlink(entry.patchFile);
+  await mkdir(entry.patchFile);
+  await assert.rejects(shelfStore.remove(shelfRoot2, entry), "shelf deletion errors must be reported");
+  // An entry whose metadata points somewhere else is ignored rather than acted on.
+  await assert.doesNotReject(shelfStore.remove(shelfRoot2, {
+    ...entry, id: "broken", patchFile: path.join(shelfRoot, "elsewhere.patch"),
+  }), "an entry outside the store is not this store's to delete");
   shelfStore.dispose();
 
   // Commit Message History: IDEA offers back the messages that made it into a

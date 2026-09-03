@@ -70,6 +70,52 @@ test("a shelf the branch moved past becomes a conflict to resolve, not an error"
   await assert.rejects(repo.applyPatchFileWithFallback(patch));
 });
 
+test("a fallback that merged cleanly leaves the restored changes unstaged, like a plain apply", async () => {
+  // `--3way` implies `--index`, so without this the shelf's content came back
+  // staged and a Commit of the staging area would have taken changes the user
+  // never staged — while the plain path leaves everything unstaged.
+  const root = mkdtempSync(join(tmpdir(), "jb-git-shelf-3way-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "f.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
+  git(root, "add", "f.txt");
+  git(root, "commit", "-qm", "base");
+
+  writeFileSync(join(root, "f.txt"), "one\nTWO CHANGED\nthree\nfour\nfive\nsix\nseven\neight\n");
+  const repo = await discoverRepository(root, new GitRunner());
+  const patch = join(root, "shelf.patch");
+  writeFileSync(patch, (await repo.patch(["f.txt"])).toString("utf8"));
+  git(root, "checkout", "-q", "--", "f.txt");
+  // A line inside the patch's context — but not the line it changes — moves
+  // on. `git apply` wants exact context so the plain attempt fails, while the
+  // three-way merge settles it without conflicts: the fallback this is about.
+  writeFileSync(join(root, "f.txt"), "one\ntwo\nthree\nfour\nFIVE CHANGED\nsix\nseven\neight\n");
+  git(root, "commit", "-qam", "moved on");
+
+  assert.equal(await repo.applyPatchFileWithFallback(patch, ["f.txt"]), "clean");
+  const merged = readText(join(root, "f.txt")).split("\n");
+  assert.equal(merged[1], "TWO CHANGED", "the shelved change came back");
+  assert.equal(merged[4], "FIVE CHANGED", "and the branch's own change survived the merge");
+  assert.equal(git(root, "diff", "--cached", "--name-only"), "", "nothing was left staged");
+  const status = await repo.status();
+  assert.deepEqual(status.changes.filter((change) => change.path === "f.txt").map((change) => change.unstaged), [true]);
+});
+
+test("a shelf patch carries only tracked changes, so unshelving never resurrects an untracked file", async () => {
+  // `git diff HEAD` ignores untracked files, which is why the shelve flow
+  // filters them out before asking for a patch: a shelf that appeared to
+  // include them would quietly lose them.
+  const root = repository();
+  writeFileSync(join(root, "f.txt"), "one\nTWO CHANGED\nthree\nfour\nfive\n");
+  writeFileSync(join(root, "untracked.txt"), "never shelved\n");
+  const repo = await discoverRepository(root, new GitRunner());
+
+  const patch = (await repo.patch(["f.txt", "untracked.txt"])).toString("utf8");
+  assert.match(patch, /a\/f\.txt/);
+  assert.equal(patch.includes("untracked.txt"), false);
+});
+
 test("the Shelf tab has IDEA's actions and only deletes an entry it fully restored", () => {
   const script = panelScript(import.meta.url);
   const menu = script.slice(script.indexOf("function shelfMenuItems(shelf)"), script.indexOf("function consolePanel()"));
@@ -96,7 +142,27 @@ test("the Shelf tab has IDEA's actions and only deletes an entry it fully restor
 
   const store = readSource("../src/shelves/store.ts", import.meta.url);
   assert.match(store, /public async apply\(repository: GitRepository, entry: ShelfEntry\): Promise<"clean" \| "conflicted">/);
+  // The entry's own paths, so a cleanly-merged fallback does not leave them staged.
+  assert.match(store, /applyPatchFileWithFallback\(this\.patchPath\(repository\.info\.rootPath, entry\), entry\.paths\)/);
   assert.match(store, /public async rename\(repositoryRoot: string, entry: ShelfEntry, name: string\)/);
   // Renaming rewrites the metadata only, so the patch file keeps its id.
   assert.match(store, /const renamed: ShelfEntry = \{ \.\.\.entry, name: trimmed \};/);
+});
+
+test("shelf metadata is validated before it can steer a file operation", () => {
+  // Entries are read back from disk and then decide which file `apply` reads
+  // and `remove` deletes, so a hand-edited or corrupt one must not be able to
+  // point either of them outside the shelf directory.
+  const store = readSource("../src/shelves/store.ts", import.meta.url);
+  assert.match(store, /const SHELF_ID = \/\^\[0-9\]\+-\[a-z0-9\]\+\$\//);
+  assert.match(store, /if \(usableEntry\(entry, name, directory\)\) entries\.push\(entry\);/);
+  const check = store.slice(store.indexOf("function usableEntry("), store.indexOf("async function unlinkIfPresent("));
+  // The id has to be the generated shape and name the file it came from.
+  assert.match(check, /!SHELF_ID\.test\(entry\.id\) \|\| `\$\{entry\.id\}\.json` !== fileName/);
+  assert.match(check, /Array\.isArray\(entry\.paths\) \|\| entry\.paths\.some\(\(item\) => typeof item !== "string"\)/);
+  // A patch file anywhere else is not this store's to touch.
+  assert.match(check, /path\.dirname\(path\.resolve\(entry\.patchFile\)\) === path\.resolve\(directory\)/);
+  // The same rule decides where a patch is read from and deleted.
+  const patchPath = store.slice(store.indexOf("private patchPath("), store.indexOf("private repositoryDirectory("));
+  assert.match(patchPath, /if \(entry\.patchFile === own && existsSync\(entry\.patchFile\)\) return entry\.patchFile;/);
 });
