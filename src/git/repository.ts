@@ -525,6 +525,46 @@ export class GitRepository {
     await this.serial(() => this.runner.run(["apply", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath }));
   }
 
+  /**
+   * Applies a patch, falling back to a three-way merge when it no longer fits.
+   *
+   * A shelf taken before the branch moved on often will not apply cleanly, and
+   * refusing outright leaves the user with a patch file and no way forward.
+   * `--3way` writes the same conflict markers and unmerged index entries a
+   * merge does, so the conflict editor can settle it. Git exits non-zero even
+   * when that succeeds, so the index — not the exit code — says what happened.
+   *
+   * The clean path stays unstaged on purpose; a three-way apply stages what it
+   * could merge, because that is how Git records the parts it settled.
+   */
+  public async applyPatchFileWithFallback(patchFile: string): Promise<"clean" | "conflicted"> {
+    return this.serial(async () => {
+      try {
+        await this.runner.run(["apply", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath });
+        return "clean";
+      } catch (error) {
+        if (isGitAbort(error)) throw error;
+        // Conflicts that were already there say nothing about this patch, so
+        // the question is whether the attempt added any of its own.
+        const before = await this.unmergedPaths();
+        try {
+          await this.runner.run(["apply", "--3way", "--whitespace=nowarn", "--", patchFile], { cwd: this.info.rootPath });
+          return "clean";
+        } catch (fallbackError) {
+          if (isGitAbort(fallbackError)) throw fallbackError;
+          const after = await this.unmergedPaths();
+          if ([...after].some((candidate) => !before.has(candidate))) return "conflicted";
+          throw fallbackError;
+        }
+      }
+    });
+  }
+
+  private async unmergedPaths(): Promise<Set<string>> {
+    const output = await this.runner.text(["ls-files", "--unmerged", "-z", "--format=%(path)"], { cwd: this.info.rootPath });
+    return new Set(output.split("\0").filter(Boolean));
+  }
+
   /** Removes tracked paths from both index and worktree after their patch has been persisted. */
   public async shelveTrackedPaths(paths: readonly string[]): Promise<void> {
     await this.serial(async () => {

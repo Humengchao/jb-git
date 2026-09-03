@@ -262,8 +262,14 @@ export const logStyles = String.raw`
   .secondary { min-height: 29px; padding: 4px 8px; border-radius: 2px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .shelf-pane { min-height: 0; overflow: auto; padding: 3px 0 16px; }
-  .shelf-row { margin: 2px 6px; padding: 7px 9px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; border-radius: 3px; }
-  .shelf-row:hover { background: var(--vscode-list-hoverBackground); }
+  .shelf-row { margin: 2px 6px; border-radius: 3px; }
+  .shelf-head { display: flex; align-items: center; gap: 6px; padding: 7px 9px; cursor: pointer; border-radius: 3px; }
+  .shelf-head:hover { background: var(--vscode-list-hoverBackground); }
+  .shelf-head:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  .shelf-text { min-width: 0; }
+  .shelf-files { padding: 0 9px 6px 26px; }
+  .shelf-file { display: flex; gap: 6px; padding: 2px 0; font-size: 12px; overflow: hidden; white-space: nowrap; }
+  .shelf-file .directory { color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; }
   .shelf-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .shelf-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
   .shelf-actions { grid-row: 1 / 3; grid-column: 2; display: flex; align-items: center; gap: 4px; }

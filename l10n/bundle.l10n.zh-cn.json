@@ -517,5 +517,11 @@
   "The file's other changes and anything staged stay as they are. A recovery entry is kept in Shelf.": "该文件的其他改动以及已暂存的内容保持不变。会在“搁置”中保留一份恢复条目。",
   "Rolled back one change in {0}. Recovery shelf '{1}' was kept.": "已回滚 {0} 中的一处改动。已保留恢复搁置 '{1}'。",
   "Select at least one change to create a patch from.": "请至少选择一处更改来创建补丁。",
-  "The selected changes produced an empty patch.": "所选更改生成的补丁为空。"
+  "The selected changes produced an empty patch.": "所选更改生成的补丁为空。",
+  "Rename Shelf": "重命名搁置",
+  "A shelf needs a name.": "搁置需要一个名称。",
+  "'{0}' no longer applied cleanly and was restored as a conflict. Resolve the files in Local Changes; the shelf was kept.": "'{0}' 已无法干净应用，已作为冲突恢复。请在“本地更改”中解决这些文件；该搁置已保留。",
+  "Unshelved '{0}' and kept the shelf.": "已取消搁置 '{0}'，并保留了该搁置。",
+  "Unshelved '{0}'.": "已取消搁置 '{0}'。",
+  "Shelf…": "搁置…"
 }

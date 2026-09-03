@@ -95,9 +95,33 @@ export class ShelfStore implements vscode.Disposable {
     return path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.patch`);
   }
 
-  public async apply(repository: GitRepository, entry: ShelfEntry): Promise<void> {
-    await repository.applyPatchFile(this.patchPath(repository.info.rootPath, entry));
+  /**
+   * Restores an entry's changes.
+   *
+   * Reports whether the patch went in cleanly or landed as a conflict to
+   * settle: a shelf taken before the branch moved on is common, and the caller
+   * has to know, because an entry whose conflicts are still unresolved must
+   * not be deleted.
+   */
+  public async apply(repository: GitRepository, entry: ShelfEntry): Promise<"clean" | "conflicted"> {
+    const outcome = await repository.applyPatchFileWithFallback(this.patchPath(repository.info.rootPath, entry));
     this.changedEmitter.fire(repository.info.rootPath);
+    return outcome;
+  }
+
+  /** IDEA's Rename on a shelf. The patch file keeps its id, so nothing that references it moves. */
+  public async rename(repositoryRoot: string, entry: ShelfEntry, name: string): Promise<ShelfEntry> {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("A shelf needs a name.");
+    const renamed: ShelfEntry = { ...entry, name: trimmed };
+    await writeFile(path.join(this.repositoryDirectory(repositoryRoot), `${entry.id}.json`), JSON.stringify(renamed, null, 2), "utf8");
+    this.changedEmitter.fire(repositoryRoot);
+    return renamed;
+  }
+
+  /** The entry's patch text, for showing what a shelf holds without applying it. */
+  public async patchText(repositoryRoot: string, entry: ShelfEntry): Promise<string> {
+    return readFile(this.patchPath(repositoryRoot, entry), "utf8");
   }
 
   /** Writes the patch and its metadata; shared so a recorded entry and a shelved one have the same shape. */

@@ -247,6 +247,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     await this.open(root, undefined, "changes");
   }
 
+  public async openShelf(root?: string): Promise<void> {
+    await this.open(root, undefined, "shelf");
+  }
+
   /**
    * Opens the Log with `hash` selected.
    *
@@ -1358,16 +1362,53 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       return;
     }
-    if (message.type === "applyShelf" || message.type === "deleteShelf") {
+    if (message.type === "applyShelf" || message.type === "unshelve" || message.type === "deleteShelf"
+      || message.type === "renameShelf" || message.type === "showShelfDiff") {
       const entry = (await this.shelves.list(root)).find((item) => item.id === message.id);
       if (!entry) return;
-      if (message.type === "applyShelf") {
-        await this.shelves.apply(snapshot.repository, entry);
-        await this.manager.refresh(root);
-      } else {
+      if (message.type === "showShelfDiff") {
+        const patch = await this.shelves.patchText(root, entry);
+        await this.showReadOnlyDiff(root, entry.name, patch);
+        return;
+      }
+      if (message.type === "renameShelf") {
+        const name = await vscode.window.showInputBox({
+          title: vscode.l10n.t("Rename Shelf"),
+          prompt: vscode.l10n.t("Shelf name"),
+          value: entry.name,
+          validateInput: (value) => (value.trim() ? undefined : vscode.l10n.t("A shelf needs a name.")),
+        });
+        if (name?.trim() && name.trim() !== entry.name) await this.shelves.rename(root, entry, name.trim());
+        return;
+      }
+      if (message.type === "deleteShelf") {
         const confirmed = await vscode.window.showWarningMessage(vscode.l10n.t("Delete shelf '{0}'?", entry.name), { modal: true }, vscode.l10n.t("Delete"));
         if (confirmed === vscode.l10n.t("Delete")) await this.shelves.remove(root, entry);
+        return;
       }
+      // IDEA's Unshelve restores the changes and drops the entry; Unshelve and
+      // Keep is the other half of that choice. `applyShelf` is the old button
+      // and keeps the entry, so an existing habit does not start deleting.
+      const keep = message.type !== "unshelve" || message.keep === true;
+      const listId = message.type === "unshelve" ? message.listId : undefined;
+      if (!(await requireTrusted())) return;
+      const outcome = await this.shelves.apply(snapshot.repository, entry);
+      // The Changelist assignment names the files the shelf carried, whether
+      // or not each one ended up conflicted.
+      if (listId && this.changelists.lists(root).some((list) => list.id === listId)) {
+        for (const file of entry.paths) await this.changelists.assign(root, file, listId);
+      }
+      await this.manager.refresh(root);
+      if (outcome === "conflicted") {
+        // The entry stays: its conflicts are unresolved, so it is still the
+        // only complete copy of what was shelved.
+        void vscode.window.showWarningMessage(vscode.l10n.t("'{0}' no longer applied cleanly and was restored as a conflict. Resolve the files in Local Changes; the shelf was kept.", entry.name));
+        return;
+      }
+      if (!keep) await this.shelves.remove(root, entry);
+      void vscode.window.showInformationMessage(keep
+        ? vscode.l10n.t("Unshelved '{0}' and kept the shelf.", entry.name)
+        : vscode.l10n.t("Unshelved '{0}'.", entry.name));
       return;
     }
   }

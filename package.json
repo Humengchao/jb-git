@@ -67,6 +67,10 @@
         "title": "JB Git: Open Local Changes"
       },
       {
+        "command": "jbGit.openShelf",
+        "title": "JB Git: Open Shelf"
+      },
+      {
         "command": "jbGit.openDiff",
         "title": "JB Git: Open Diff"
       },

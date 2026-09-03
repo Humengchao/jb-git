@@ -498,6 +498,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     gitMetadataWatcher.onDidDelete(() => scheduleDiscovery()),
     vscode.commands.registerCommand("jbGit.refresh", refresh),
     vscode.commands.registerCommand("jbGit.openChanges", (rootPath?: string) => gitToolWindow.openChanges(rootPath)),
+    vscode.commands.registerCommand("jbGit.openShelf", (rootPath?: string) => gitToolWindow.openShelf(rootPath)),
     vscode.commands.registerCommand("jbGit.openDiff", async (node?: ChangeNode) => {
       if (!node) return;
       if (node.change.conflicted) {
@@ -617,6 +618,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const items: OperationItem[] = [
         { label: vscode.l10n.t("Common"), kind: vscode.QuickPickItemKind.Separator },
         { label: `$(check) ${vscode.l10n.t("Commit…")}`, command: "jbGit.openChanges" },
+        { label: `$(archive) ${vscode.l10n.t("Shelf…")}`, command: "jbGit.openShelf" },
         { label: `$(cloud-upload) ${vscode.l10n.t("Push…")}`, command: "jbGit.push" },
         { label: `$(cloud-download) ${vscode.l10n.t("Pull…")}`, command: "jbGit.pull" },
         { label: `$(sync) ${vscode.l10n.t("Fetch")}`, command: "jbGit.fetch" },

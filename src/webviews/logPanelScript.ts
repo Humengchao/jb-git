@@ -144,6 +144,9 @@ export const logScript = String.raw`
     'Commit source': '提交内容来源',
     'selected': '已选择',
     'No shelved changes': '没有已搁置的更改', 'Unshelve': '取消搁置',
+    'Restore these changes and remove the shelf': '恢复这些更改并删除该搁置',
+    'More shelf actions': '更多搁置操作', 'Unshelve and Keep': '取消搁置并保留',
+    'Unshelve into Changelist…': '取消搁置到更改列表…',
     'Branch': '分支', 'User': '用户', 'Date': '日期', 'Paths': '路径', 'Lines': '行',
     'Only commits that changed these lines; click to show the whole file': '仅显示改动过这些行的提交；点击可查看整个文件的历史',
     'Edit Commit Message…': '编辑提交消息…', 'Undo Commit…': '撤销提交…',
@@ -922,14 +925,67 @@ export const logScript = String.raw`
     top.append(node('span', '', 'Shelved Changes'), node('span', 'spacer'), button('+ Shelve', 'Shelve selected local changes', () => { selectToolTab('changes'); }, 'action'));
     pane.append(top);
     if (!(state.shelves || []).length) { pane.append(node('div', 'empty', 'No shelved changes')); return pane; }
+    const expanded = new Set(uiState.expandedShelves || []);
     for (const shelf of state.shelves) {
       const item = node('div', 'shelf-row');
-      item.append(node('div', 'shelf-name', shelf.name), node('div', 'shelf-meta', new Date(shelf.createdAt).toLocaleString() + ' · ' + fileCount(shelf.paths.length)));
+      const open = expanded.has(shelf.id);
+      const head = node('div', 'shelf-head'); head.tabIndex = 0; head.setAttribute('role', 'treeitem'); head.setAttribute('aria-expanded', String(open));
+      const twisty = node('span', 'twisty', open ? '⌄' : '›');
+      const text = node('div', 'shelf-text');
+      text.append(node('div', 'shelf-name', shelf.name), node('div', 'shelf-meta', new Date(shelf.createdAt).toLocaleString() + ' · ' + fileCount(shelf.paths.length)));
+      head.append(twisty, text);
+      const toggle = () => {
+        if (expanded.has(shelf.id)) expanded.delete(shelf.id); else expanded.add(shelf.id);
+        saveUiState({ expandedShelves: [...expanded] }); render();
+      };
+      head.addEventListener('click', toggle); keyboardActivate(head, toggle);
       const actions = node('div', 'shelf-actions');
-      actions.append(button('Unshelve', 'Apply shelved changes', () => post('applyShelf', { id: shelf.id }), 'small-button'), button('×', 'Delete Shelf', () => post('deleteShelf', { id: shelf.id }), 'row-action'));
-      item.append(actions); pane.append(item);
+      // IDEA's Unshelve restores and drops the entry; the rest live in the menu.
+      actions.append(
+        button('Unshelve', 'Restore these changes and remove the shelf', () => post('unshelve', { id: shelf.id }), 'small-button'),
+        button('⋮', 'More shelf actions', event => showMenuForElement(event.currentTarget, shelfMenuItems(shelf)), 'row-action'),
+      );
+      head.append(node('span', 'spacer'), actions);
+      item.append(head);
+      attachContextMenu(head, () => shelfMenuItems(shelf));
+      if (open) {
+        const files = node('div', 'shelf-files');
+        for (const file of shelf.paths) {
+          const row = node('div', 'shelf-file');
+          row.append(node('span', 'file-name', file.split('/').pop()), node('span', 'directory', file.split('/').slice(0, -1).join('/')));
+          row.title = file;
+          files.append(row);
+        }
+        item.append(files);
+      }
+      pane.append(item);
     }
     return pane;
+  }
+
+  /** IDEA's shelf context menu: restore with or without keeping it, retarget, rename, inspect, delete. */
+  function shelfMenuItems(shelf) {
+    const lists = state.lists || [];
+    return [
+      { icon: '↥', label: 'Unshelve', run: () => post('unshelve', { id: shelf.id }) },
+      { icon: '⎘', label: 'Unshelve and Keep', run: () => post('unshelve', { id: shelf.id, keep: true }) },
+      ...(lists.length > 1
+        ? [{
+          icon: '⇥',
+          label: 'Unshelve into Changelist…',
+          run: () => showMenuForElement(document.getElementById('shelf-pane'), lists.map(list => ({
+            icon: list.active ? '●' : '○',
+            label: list.name,
+            run: () => post('unshelve', { id: shelf.id, listId: list.id }),
+          }))),
+        }]
+        : []),
+      { separator: true },
+      { icon: '↔', label: 'Show Diff', run: () => post('showShelfDiff', { id: shelf.id }) },
+      { icon: '✎', label: 'Rename…', run: () => post('renameShelf', { id: shelf.id }) },
+      { separator: true },
+      { icon: '×', label: 'Delete…', run: () => post('deleteShelf', { id: shelf.id }) },
+    ];
   }
 
   function consolePanel() {

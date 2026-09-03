@@ -62,6 +62,33 @@ const SCENARIOS = {
     body: `await sleep(2000);
       await vscode.commands.executeCommand("jbGit.openGitToolWindow");`,
   },
+  shelf: {
+    describe: "The Shelf tab with an expanded entry and its files",
+    build: (root) => {
+      buildHistory(root);
+      writeFileSync(join(root, "app.js"), `${readFileSync(join(root, "app.js"), "utf8")}\n// shelved edit\n`);
+      writeFileSync(join(root, "notes.md"), "shelved notes\n");
+      git(root, "add", "notes.md");
+    },
+    // The command prompts for a name, which would block the harness, so the
+    // entry is written through the store the extension itself uses.
+    body: `await sleep(2000);
+      const { ShelfStore } = require(require("node:path").join(extension.extensionPath, "dist", "shelves", "store.js"));
+      const { discoverRepository } = require(require("node:path").join(extension.extensionPath, "dist", "git", "repository.js"));
+      const { GitRunner } = require(require("node:path").join(extension.extensionPath, "dist", "git", "runner.js"));
+      // The panel reads the extension's own Shelf storage, so the entry has to
+      // be written there: the harness pins the user-data directory under
+      // .vscode-test, which puts global storage at a known path.
+      const store = new ShelfStore(SHELF_STORAGE);
+      const repository = await discoverRepository(root, new GitRunner());
+      await store.create(repository, "Annotation experiment", ["app.js", "notes.md"]);
+      await vscode.commands.executeCommand("workbench.action.closeSidebar");
+      await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+      await vscode.commands.executeCommand("jbGit.openShelf", root);
+      await sleep(1500);
+      // Expand the entry so its files are on screen.
+      await vscode.commands.executeCommand("jbGit.openShelf", root);`,
+  },
   manychanges: {
     describe: "Local Changes with more files than the render cap",
     build: (root) => {
@@ -230,6 +257,7 @@ const harness = mkdtempSync(join(tmpdir(), "jb-git-harness-"));
 mkdirSync(harness, { recursive: true });
 writeFileSync(join(harness, "suite.cjs"), `const { setTimeout: sleep } = require("node:timers/promises");
 const vscode = require("vscode");
+const SHELF_STORAGE = ${JSON.stringify(join(projectRoot, ".vscode-test", "user-data", "User", "globalStorage", "hmc.jb-git"))};
 async function run() {
   const extension = vscode.extensions.getExtension("hmc.jb-git");
   if (!extension) throw new Error("the development extension was not found");

@@ -29,7 +29,10 @@ type LogMessagePayload =
   | { type: "toggleFavoriteBranch"; name: string; kind: GitBranch["kind"] }
   | { type: "moveHunk"; path: string; key: string }
   | { type: "commit"; message: string; mode: "staged" | "files"; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean; author?: string }
-  | { type: "editChangelist" | "deleteChangelist" | "setActiveChangelist" | "applyShelf" | "deleteShelf"; id: string }
+  | { type: "editChangelist" | "deleteChangelist" | "setActiveChangelist" | "applyShelf" | "deleteShelf" | "renameShelf" | "showShelfDiff"; id: string }
+  // IDEA's Unshelve keeps the changes and drops the entry; Unshelve and Keep
+  // is the other half of that choice, and a target Changelist is optional.
+  | { type: "unshelve"; id: string; keep?: boolean; listId?: string }
   | { type: "moveToChangelist" | "stage" | "unstage" | "discard" | "ignorePath"; path: string }
   | { type: "resolveWith"; path: string; side: "ours" | "theirs" }
   | { type: "runCommand"; command: string }
@@ -48,7 +51,7 @@ export type LogMessage = LogMessagePayload & {
 const SIMPLE_TYPES = new Set(["refresh", "clearConsole", "loadMore", "createChangelist", "createShelf", "requestHeadMessage", "messageHistory", "clearLineRange", "createLocalPatch"]);
 const HASH_TYPES = new Set(["selectCommit", "newBranch", "cherryPick", "revert", "reset", "showPatch", "undoCommit", "fixupCommit"]);
 const PATH_TYPES = new Set(["requestHunks", "moveToChangelist", "stage", "unstage", "discard", "ignorePath"]);
-const ID_TYPES = new Set(["editChangelist", "deleteChangelist", "setActiveChangelist", "applyShelf", "deleteShelf"]);
+const ID_TYPES = new Set(["editChangelist", "deleteChangelist", "setActiveChangelist", "applyShelf", "deleteShelf", "renameShelf", "showShelfDiff"]);
 const BRANCH_KINDS = new Set(["local", "remote", "tag"]);
 const HASH_CONTEXT_ACTIONS = new Set(["copyRevision", "createPatch", "checkoutRevision", "compareWithLocal", "createTag"]);
 const REF_CONTEXT_ACTIONS = new Set(["copyBranch", "newBranchFromRef", "showRefDiff", "createWorktreeFromRef", "renameBranch", "deleteBranch", "mergeRef", "rebaseOntoRef", "checkoutAndRebase", "pushRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag", "updateRef"]);
@@ -81,6 +84,9 @@ export function isLogMessage(value: unknown): value is LogMessage {
     // The same bound as a commit: the text lands in Git's message file.
     case "rewordCommit": return typeof value.hash === "string" && typeof value.message === "string" && value.message.length <= 1_000_000;
     case "resolveWith": return typeof value.path === "string" && (value.side === "ours" || value.side === "theirs");
+    case "unshelve": return typeof value.id === "string"
+      && optionalBoolean(value.keep)
+      && (value.listId === undefined || typeof value.listId === "string");
     case "ready": return (value.activeTab === undefined || isToolTab(value.activeTab)) && (value.logOptions === undefined || isRecord(value.logOptions));
     case "setActiveTab": return isToolTab(value.tab);
     case "selectRepository": return typeof value.root === "string";
