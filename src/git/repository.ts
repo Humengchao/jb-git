@@ -441,6 +441,26 @@ export class GitRepository {
     await this.applyHunk(pathSpec, expectedHunk, false, true, "worktree");
   }
 
+  /**
+   * The standalone patch for one working-tree hunk, without applying it.
+   *
+   * A rollback is about to throw exactly this away, so the caller persists it
+   * as the recovery entry first. Unlike a whole-file patch it applies cleanly
+   * on top of the changes that stay, which is what makes the recovery useful.
+   * The hunk is identified the same way the apply identifies it, so a stale
+   * one is refused here rather than producing a patch for something else.
+   */
+  public async hunkPatch(pathSpec: string, expectedHunk: GitDiffHunk): Promise<string> {
+    const output = await this.runner.text([
+      "diff", "--no-ext-diff", "--no-color", "--unified=3", "--", literalPathspec(pathSpec),
+    ], { cwd: this.info.rootPath });
+    const hunk = parseUnifiedDiff(output).find((candidate) => candidate.header === expectedHunk.header
+      && candidate.lines.length === expectedHunk.lines.length
+      && candidate.lines.every((line, index) => line === expectedHunk.lines[index]));
+    if (!hunk) throw new Error("This hunk changed since it was displayed; refresh the changes view and try again.");
+    return patchForHunk(output, hunk);
+  }
+
   private async applyHunk(
     pathSpec: string,
     expectedHunk: GitDiffHunk,

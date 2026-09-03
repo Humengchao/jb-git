@@ -48,25 +48,30 @@ export class ShelfStore implements vscode.Disposable {
     }
   }
 
+  /**
+   * Persists a patch as a Shelf entry without touching the working tree.
+   *
+   * `create` is a shelve: it records the changes *and* takes them out of the
+   * working copy, which is what makes it double as a whole-file Rollback. A
+   * recovery entry for something smaller — one rolled-back hunk — must keep
+   * its own hands off the file, because the caller is about to discard exactly
+   * the part the patch describes and nothing else.
+   */
+  public async record(repository: GitRepository, name: string, paths: readonly string[], patch: Buffer | string): Promise<ShelfEntry> {
+    const bytes = typeof patch === "string" ? Buffer.from(patch, "utf8") : patch;
+    if (bytes.length === 0) throw new Error("There is nothing to record.");
+    const entry = await this.writeEntry(repository.info.rootPath, name, paths, bytes);
+    this.changedEmitter.fire(repository.info.rootPath);
+    return entry;
+  }
+
   public async create(repository: GitRepository, name: string, paths: readonly string[]): Promise<ShelfEntry> {
     const patch = await repository.patch(paths);
     if (patch.length === 0) throw new Error("There are no tracked changes to shelf.");
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const directory = this.repositoryDirectory(repository.info.rootPath);
-    await mkdir(directory, { recursive: true });
-    const patchFile = path.join(directory, `${id}.patch`);
-    const metadataFile = path.join(directory, `${id}.json`);
-    const entry: ShelfEntry = {
-      id,
-      repositoryRoot: repository.info.rootPath,
-      name: name.trim() || "Shelf",
-      createdAt: new Date().toISOString(),
-      patchFile,
-      paths: [...paths],
-    };
-    // Raw bytes: the patch may contain non-UTF-8 file content.
-    await writeFile(patchFile, patch);
-    await writeFile(metadataFile, JSON.stringify(entry, null, 2), "utf8");
+    const entry = await this.writeEntry(repository.info.rootPath, name, paths, patch, id);
+    const metadataFile = path.join(this.repositoryDirectory(repository.info.rootPath), `${id}.json`);
+    const patchFile = entry.patchFile;
     // Persist first: if cleanup fails, the patch remains recoverable and the
     // working copy is never modified without a saved shelf.
     try {
@@ -93,6 +98,32 @@ export class ShelfStore implements vscode.Disposable {
   public async apply(repository: GitRepository, entry: ShelfEntry): Promise<void> {
     await repository.applyPatchFile(this.patchPath(repository.info.rootPath, entry));
     this.changedEmitter.fire(repository.info.rootPath);
+  }
+
+  /** Writes the patch and its metadata; shared so a recorded entry and a shelved one have the same shape. */
+  private async writeEntry(
+    repositoryRoot: string,
+    name: string,
+    paths: readonly string[],
+    patch: Buffer,
+    knownId?: string,
+  ): Promise<ShelfEntry> {
+    const id = knownId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const directory = this.repositoryDirectory(repositoryRoot);
+    await mkdir(directory, { recursive: true });
+    const patchFile = path.join(directory, `${id}.patch`);
+    const entry: ShelfEntry = {
+      id,
+      repositoryRoot,
+      name: name.trim() || "Shelf",
+      createdAt: new Date().toISOString(),
+      patchFile,
+      paths: [...paths],
+    };
+    // Raw bytes: the patch may contain non-UTF-8 file content.
+    await writeFile(patchFile, patch);
+    await writeFile(path.join(directory, `${id}.json`), JSON.stringify(entry, null, 2), "utf8");
+    return entry;
   }
 
   public async remove(repositoryRoot: string, entry: ShelfEntry): Promise<void> {

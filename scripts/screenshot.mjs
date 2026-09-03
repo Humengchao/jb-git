@@ -62,6 +62,25 @@ const SCENARIOS = {
     body: `await sleep(2000);
       await vscode.commands.executeCommand("jbGit.openGitToolWindow");`,
   },
+  manychanges: {
+    describe: "Local Changes with more files than the render cap",
+    build: (root) => {
+      buildHistory(root);
+      mkdirSync(join(root, "generated"), { recursive: true });
+      for (let index = 0; index < 1200; index += 1) {
+        writeFileSync(join(root, "generated", `file-${index}.txt`), `content ${index}\n`);
+      }
+      git(root, "add", "generated");
+      git(root, "commit", "-qm", "add generated files");
+      for (let index = 0; index < 1200; index += 1) {
+        writeFileSync(join(root, "generated", `file-${index}.txt`), `changed ${index}\n`);
+      }
+    },
+    body: `await sleep(2000);
+      await vscode.commands.executeCommand("workbench.action.closeSidebar");
+      await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+      await vscode.commands.executeCommand("jbGit.openChanges");`,
+  },
   branches: {
     describe: "The Log's Branches pane with Recent, Favorites and the star",
     build: (root) => {

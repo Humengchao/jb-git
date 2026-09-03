@@ -151,6 +151,10 @@ export class RepositoryManager implements vscode.Disposable {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).stageHunk(pathSpec, hunk));
   }
 
+  public async hunkPatch(rootPath: string, pathSpec: string, hunk: GitDiffHunk): Promise<string> {
+    return this.requireRepository(rootPath).hunkPatch(pathSpec, hunk);
+  }
+
   public async rollbackHunk(rootPath: string, pathSpec: string, hunk: GitDiffHunk): Promise<void> {
     await this.mutate(rootPath, () => this.requireRepository(rootPath).rollbackHunk(pathSpec, hunk));
   }

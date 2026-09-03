@@ -102,6 +102,12 @@ export const logScript = String.raw`
   let scrollMemory = {};
   const commitRowHeight = 27;
   const virtualThreshold = 500;
+  // A change row is ~18 elements and ~8 listeners, and the whole pane is
+  // rebuilt on every state message. A repository with a few thousand changed
+  // files — which happens, and once happened here through editor caches — cost
+  // tens of thousands of both per refresh. The rest of a long list is one
+  // click away instead, the way the log offers its next page.
+  const changeRowCap = 500;
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
   const isZh = document.documentElement.lang.toLowerCase().startsWith('zh');
   const zh = isZh ? {
@@ -591,7 +597,25 @@ export const logScript = String.raw`
       header.addEventListener('keydown', event => { if (event.target === header && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); toggle(); } });
       group.append(header);
       if (!collapsed && list.description) group.append(node('div', 'changelist-description', list.description));
-      if (!collapsed) for (const change of list.changes) group.append(changeRow(change));
+      if (!collapsed) {
+        const uncapped = new Set((uiState.uncappedChangelists || {})[state.selectedRoot || ''] || []).has(list.id);
+        const shown = uncapped ? list.changes : list.changes.slice(0, changeRowCap);
+        for (const change of shown) group.append(changeRow(change));
+        const hidden = list.changes.length - shown.length;
+        if (hidden > 0) {
+          group.append(button(
+            isZh ? '显示其余 ' + hidden + ' 个更改' : 'Show ' + hidden + ' more change' + (hidden === 1 ? '' : 's'),
+            'Render the rest of this Changelist',
+            () => {
+              const byRoot = { ...(uiState.uncappedChangelists || {}) };
+              const ids = new Set(byRoot[state.selectedRoot || ''] || []); ids.add(list.id);
+              byRoot[state.selectedRoot || ''] = [...ids];
+              saveUiState({ uncappedChangelists: byRoot }); render();
+            },
+            'load-more',
+          ));
+        }
+      }
       pane.append(group);
     }
     return pane;

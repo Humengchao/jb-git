@@ -1211,8 +1211,19 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         );
         if (confirmed !== rollback) return;
       }
-      const recovery = await this.shelves.create(snapshot.repository, `Hunk rollback backup · ${change.path}`, [change.path]);
-      await this.manager.rollbackHunk(root, change.path, expected);
+      // The recovery entry holds exactly the change being discarded, and is
+      // recorded rather than shelved: shelving takes the file's changes out of
+      // the working tree, which would throw away the hunks meant to stay.
+      const patch = await this.manager.hunkPatch(root, change.path, expected);
+      const recovery = await this.shelves.record(snapshot.repository, `Hunk rollback backup · ${change.path}`, [change.path], patch);
+      try {
+        await this.manager.rollbackHunk(root, change.path, expected);
+      } catch (error) {
+        // The hunk moved between the read and the apply, so nothing was
+        // discarded and the entry would describe a change that is still there.
+        await this.shelves.remove(root, recovery).catch(() => undefined);
+        throw error;
+      }
       this.hunkCache.delete(`${root}\0${change.path}`);
       void vscode.window.showInformationMessage(vscode.l10n.t("Rolled back one change in {0}. Recovery shelf '{1}' was kept.", change.path, recovery.name));
       return;
