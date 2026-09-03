@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.29
+
+- refactor: split the tool window into host, styles and script, and its 1,100-line handler into seven
+
 ## 0.1.28
 
 - feat: per-hunk Rollback, Create Patch from local changes, and Recent/Favorites in the Log's Branches pane
