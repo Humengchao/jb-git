@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.31
+
+- feat: bring the Shelf tab to IDEA's depth, and restore a stale shelf as a conflict
+
 ## 0.1.30
 
 - fix: stop a per-hunk Rollback from discarding the whole file, and cap the change rows drawn
