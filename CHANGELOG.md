@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.32
+
+- fix: keep a cleanly-merged unshelve out of the Index, and validate shelf metadata before acting on it
+
 ## 0.1.31
 
 - feat: bring the Shelf tab to IDEA's depth, and restore a stale shelf as a conflict
