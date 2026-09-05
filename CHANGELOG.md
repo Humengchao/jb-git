@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.33
+
+- perf: optimize repository discovery and state handling
+
 ## 0.1.32
 
 - fix: keep a cleanly-merged unshelve out of the Index, and validate shelf metadata before acting on it
