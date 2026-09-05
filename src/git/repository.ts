@@ -2007,6 +2007,7 @@ export async function discoverRepository(
   signal?: AbortSignal,
 ): Promise<GitRepository | null> {
   try {
+    if (signal?.aborted) throw new GitAbortError();
     const isBare = trimOutput(await runner.text(["rev-parse", "--is-bare-repository"], { cwd: workspacePath, signal })) === "true";
     const rawRootPath = trimOutput(await runner.text(
       ["rev-parse", isBare ? "--absolute-git-dir" : "--show-toplevel"],
@@ -2025,12 +2026,20 @@ export async function discoverRepository(
       runner,
     );
   } catch (error) {
+    // GitRunner wraps an aborted process in GitCommandError, so preserve the
+    // cancellation signal instead of treating it like a non-repository path.
+    if (isGitAbort(error)) throw error;
     if (error instanceof GitCommandError) return null;
     throw error;
   }
 }
 
 const DISCOVERY_EXCLUDES = new Set([".git", ".vscode-test", "node_modules", "dist", "out", "build", "target", ".cache"]);
+const DISCOVERY_CONCURRENCY = 8;
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new GitAbortError();
+}
 
 async function canonicalPath(candidate: string): Promise<string> {
   try {
@@ -2040,16 +2049,19 @@ async function canonicalPath(candidate: string): Promise<string> {
   }
 }
 
-async function repositoryCandidates(workspacePath: string): Promise<string[]> {
+async function repositoryCandidates(workspacePath: string, signal?: AbortSignal): Promise<string[]> {
+  throwIfAborted(signal);
   const candidates = new Set<string>([workspacePath]);
   const queue = [workspacePath];
   let visited = 0;
   for (let cursor = 0; cursor < queue.length && visited < 20_000; cursor += 1) {
+    throwIfAborted(signal);
     const directory = queue[cursor];
     visited += 1;
     try {
       const entries = await opendir(directory);
       for await (const entry of entries) {
+        throwIfAborted(signal);
         if (entry.name === ".git") {
           candidates.add(directory);
           continue;
@@ -2062,10 +2074,12 @@ async function repositoryCandidates(workspacePath: string): Promise<string[]> {
         }
         queue.push(child);
       }
-    } catch {
+    } catch (error) {
+      if (isGitAbort(error)) throw error;
       // Unreadable folders are unrelated to repository roots we can operate on.
     }
   }
+  throwIfAborted(signal);
   return [...candidates];
 }
 
@@ -2077,9 +2091,20 @@ export async function discoverRepositories(
 ): Promise<GitRepository[]> {
   const found = new Map<string, GitRepository>();
   for (const workspacePath of workspacePaths) {
-    const candidates = scanNested ? await repositoryCandidates(workspacePath) : [workspacePath];
-    for (const candidate of candidates) {
-      const repository = await discoverRepository(candidate, runner, signal);
+    throwIfAborted(signal);
+    const candidates = scanNested ? await repositoryCandidates(workspacePath, signal) : [workspacePath];
+    const repositories: Array<GitRepository | null> = new Array(candidates.length);
+    let nextCandidate = 0;
+    const workerCount = Math.min(DISCOVERY_CONCURRENCY, candidates.length);
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (true) {
+        throwIfAborted(signal);
+        const index = nextCandidate++;
+        if (index >= candidates.length) return;
+        repositories[index] = await discoverRepository(candidates[index], runner, signal);
+      }
+    }));
+    for (const repository of repositories) {
       if (repository) found.set(repository.info.rootPath, repository);
     }
   }

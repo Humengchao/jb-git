@@ -96,12 +96,14 @@ test("the Webview runs the same compiled module, not a copy", () => {
   const globalModule = new Function(`${wrapped}return IssueNavigation;`)();
   const segments = globalModule.linkifyIssues("ABC-1", globalModule.compileIssueRules([JIRA]));
   assert.equal(segments[0].url, "https://tracker.example.com/browse/ABC-1");
-  // Rendering builds anchors from segments; rules recompile only when the
-  // configuration value changes.
+  // Rendering builds anchors from segments; rules are compiled while applying
+  // the host state message, not once per detail node.
   const script = panelScript(import.meta.url);
   assert.match(script, /function appendIssueLinked\(parent, text\)/);
-  assert.match(script, /IssueNavigation\.compileIssueRules\(raw\)/);
+  assert.match(script, /IssueNavigation\.compileIssueRules\(normalized\)/);
   assert.match(script, /issueRuleCache\.key !== key/);
+  assert.match(script, /Object\.prototype\.hasOwnProperty\.call\(next, 'issueRules'\)/);
+  assert.doesNotMatch(script, /function appendIssueLinked\(parent, text\) \{[\s\S]*?JSON\.stringify/);
   assert.match(script, /anchor\.href = segment\.url;/);
 });
 

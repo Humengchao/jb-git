@@ -109,6 +109,25 @@ export const logScript = String.raw`
   // click away instead, the way the log offers its next page.
   const changeRowCap = 500;
   const colors = ['#4b8ff9', '#e36d75', '#55a868', '#c887d7', '#d99b42', '#45a9a5'];
+  // A render can ask for the filtered list more than once (the commit rows and
+  // details pane both do). Keep the expensive, case-folded search document per
+  // commit for the lifetime of the loaded commit array instead of rebuilding it
+  // for every filter pass. The explicit helpers keep the invalidation rules
+  // visible: a new commits array starts a new cache, and a state push can
+  // reset it when records may have changed in place.
+  let commitSearchSource;
+  let commitSearchTexts = new WeakMap();
+  let issueRuleCache = { key: '', rules: [] };
+  function resetCommitSearchCache() { commitSearchSource = undefined; commitSearchTexts = new WeakMap(); }
+  function commitSearchText(commits, commit) {
+    if (commitSearchSource !== commits) { commitSearchSource = commits; commitSearchTexts = new WeakMap(); }
+    let text = commitSearchTexts.get(commit);
+    if (text === undefined) {
+      text = (commit.subject + '\n' + commit.body + '\n' + commit.author + '\n' + commit.email + '\n' + commit.hash + '\n' + (commit.refs || []).join(' ')).toLowerCase();
+      commitSearchTexts.set(commit, text);
+    }
+    return text;
+  }
   const isZh = document.documentElement.lang.toLowerCase().startsWith('zh');
   const zh = isZh ? {
     'Log': '日志', 'Git Log': 'Git 日志', 'Console': '控制台', 'Git Console': 'Git 控制台',
@@ -357,6 +376,13 @@ export const logScript = String.raw`
     const fulfilled = !pendingCommitHash
       || next.selection?.commit?.hash === pendingCommitHash
       || (next.commits ? !next.commits.some(commit => commit.hash === pendingCommitHash) : false);
+    // Invalidate even when the host reuses the same array object: a state push
+    // is the boundary at which commit records may have changed in place.
+    if (Object.prototype.hasOwnProperty.call(next, 'commits')) resetCommitSearchCache();
+    // The host serializes each state message, so object identity is not stable
+    // across pushes. Compile once while applying the message instead of doing
+    // JSON.stringify/compilation for every issue-bearing detail node.
+    if (Object.prototype.hasOwnProperty.call(next, 'issueRules')) updateIssueRuleCache(next.issueRules);
     state = { ...state, ...next };
     if (fulfilled) pendingCommitHash = undefined;
     for (const commit of next.commits || []) if (commit.author) knownAuthors.add(commit.author);
@@ -1787,7 +1813,10 @@ export const logScript = String.raw`
 
   function filteredCommits() {
     let commits = [...(state.commits || [])];
-    if (search) commits = commits.filter(c => (c.subject + '\n' + c.body + '\n' + c.author + '\n' + c.email + '\n' + c.hash + '\n' + (c.refs || []).join(' ')).toLowerCase().includes(search.toLowerCase()));
+    if (search) {
+      const query = search.toLowerCase();
+      commits = commits.filter(commit => commitSearchText(state.commits, commit).includes(query));
+    }
     if (authorFilter) commits = commits.filter(commit => commit.author === authorFilter);
     if (dateFilter !== 'all') {
       const now = new Date(); let cutoff;
@@ -1798,16 +1827,19 @@ export const logScript = String.raw`
     return commits;
   }
 
-  let issueRuleCache = { key: '', rules: [] };
+  function updateIssueRuleCache(raw) {
+    const normalized = raw || [];
+    const key = JSON.stringify(normalized);
+    if (issueRuleCache.key !== key) {
+      issueRuleCache = { key, rules: IssueNavigation.compileIssueRules(normalized) };
+    }
+  }
 
   /**
    * Appends text with the configured issue ids turned into tracker links,
    * IDEA's Issue Navigation. Rules compile once per configuration value.
    */
   function appendIssueLinked(parent, text) {
-    const raw = state.issueRules || [];
-    const key = JSON.stringify(raw);
-    if (issueRuleCache.key !== key) issueRuleCache = { key, rules: IssueNavigation.compileIssueRules(raw) };
     for (const segment of IssueNavigation.linkifyIssues(String(text), issueRuleCache.rules)) {
       if (segment.url) {
         const anchor = document.createElement('a');

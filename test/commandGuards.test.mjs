@@ -12,6 +12,12 @@ test("aborts clone when no destination folder was chosen", () => {
   assert.match(clone.slice(0, 1200), /if \(!cloneRoot\) return void vscode\.window\.showInformationMessage/);
 });
 
+test("redacts credentials from the clone progress title", () => {
+  const clone = extension.slice(extension.indexOf('"jbGit.cloneRepository"'));
+  assert.match(clone.slice(0, 1800), /Cloning \$\{redactGitText\(source\.trim\(\)\)\}/);
+  assert.doesNotMatch(clone.slice(0, 1800), /Cloning \$\{source\.trim\(\)\}/);
+});
+
 test("confirms restricting the working tree and validates the sparse paths", () => {
   const sparse = extension.slice(extension.indexOf('"jbGit.sparseCheckoutSet"'), extension.indexOf('"jbGit.sparseCheckoutDisable"'));
   // Setting the cone deletes every file outside it; the destructive direction was the one
@@ -74,11 +80,16 @@ test("watches ordinary worktree files changed by external tools without metadata
   assert.match(watcher, /watcher\.onDidDelete\(onWorktreeChange\)/);
   assert.match(extension, /WORKTREE_WATCH_IGNORED_SEGMENTS = new Set\(\["\.git", "node_modules"/);
   assert.match(watcher, /isWorktreeWatchPathIgnored\(root, uri\.fsPath\)/);
+  assert.match(extension, /scheduleRefreshForPath\(uri\.fsPath, root\)/);
+  assert.match(extension, /const lexical = path\.normalize\(filePath\)/);
+  assert.match(extension, /deepestContaining\(manager\.all, lexical/);
 });
 
 test("validates the configured Git runtime and reacts to gitPath changes", () => {
   assert.match(extension, /runner\.version\(context\.extensionPath\)/);
   assert.match(extension, /requires Git 2\.23 or newer/);
+  assert.match(extension, /void gitRuntimeCheck\.catch\(\(\) => undefined\);/);
+  assert.doesNotMatch(extension, /await gitRuntimeCheck;/);
   assert.match(extension, /event\.affectsConfiguration\("jbGit\.gitPath"\)/);
   assert.match(extension, /workbench\.action\.reloadWindow/);
 });

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { commitOptionArguments, discoverRepositories, discoverRepository, GitBatchError, logPathspec, mergeArguments } from "../dist/git/repository.js";
-import { GitRunner, isGitAbort } from "../dist/git/runner.js";
+import { GitCommandError, GitRunner, isGitAbort } from "../dist/git/runner.js";
 import { dropPlan } from "../dist/logHistoryEdit.js";
 import { originalMessage } from "../dist/webviews/rebaseEditorProtocol.js";
 
@@ -103,6 +103,50 @@ test("discovers nested and bare repositories", async () => {
   assert.equal(repositories.length, 3);
   assert.equal(repositories.filter((repository) => repository.info.isBare).length, 1);
   assert.ok(await discoverRepository(bare, new GitRunner()));
+});
+
+test("does not spawn Git when repository discovery is already cancelled", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const runner = { text: async () => { calls += 1; throw new Error("Git must not run"); } };
+  await assert.rejects(
+    discoverRepository(process.cwd(), runner, controller.signal),
+    (error) => isGitAbort(error),
+  );
+  assert.equal(calls, 0);
+  await assert.rejects(
+    discoverRepositories([process.cwd()], runner, controller.signal, false),
+    (error) => isGitAbort(error),
+  );
+  assert.equal(calls, 0);
+});
+
+test("probes nested repository candidates with bounded concurrency", async () => {
+  const container = mkdtempSync(join(tmpdir(), "jb-git-discovery-concurrency-"));
+  const projects = join(container, "projects");
+  mkdirSync(projects);
+  for (let index = 0; index < 12; index += 1) mkdirSync(join(projects, `repo-${index}`, ".git"), { recursive: true });
+
+  let active = 0;
+  let maximum = 0;
+  const runner = {
+    text: async (args, options) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 3));
+      active -= 1;
+      if (args[0] !== "rev-parse") throw new Error("unexpected discovery command");
+      if (options.cwd === container) throw new GitCommandError(args, { exitCode: 128, stderr: "not a repository" });
+      if (args[1] === "--is-bare-repository") return "false";
+      if (args[1] === "--show-toplevel") return options.cwd;
+      return ".git";
+    },
+  };
+  const repositories = await discoverRepositories([container], runner);
+  assert.equal(repositories.length, 12);
+  assert.ok(maximum > 1, `expected parallel probes, saw a maximum of ${maximum}`);
+  assert.ok(maximum <= 8, `discovery exceeded its concurrency bound: ${maximum}`);
 });
 
 test("applies IntelliJ-style Git log graph options in Git", async () => {

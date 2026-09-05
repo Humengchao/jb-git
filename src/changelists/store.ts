@@ -1,6 +1,36 @@
-import * as vscode from "vscode";
+import type { Disposable, Event, Memento } from "vscode";
 import { GitChange } from "../git/types";
 import { commitSelectionFor, reconcileClaims, type HunkSelection } from "./hunkOwnership";
+
+/**
+ * A tiny EventEmitter implementation keeps this data store usable outside an
+ * extension host (for example in unit tests), while retaining VS Code's Event
+ * contract for callers.
+ */
+class LocalEventEmitter<T> implements Disposable {
+  private readonly listeners = new Set<(event: T) => any>();
+  public readonly event: Event<T> = (listener, thisArgs, disposables) => {
+    const callback = thisArgs ? listener.bind(thisArgs) : listener;
+    this.listeners.add(callback);
+    const disposable = { dispose: () => this.listeners.delete(callback) };
+    disposables?.push(disposable);
+    return disposable;
+  };
+
+  public fire(event: T): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(event);
+      } catch {
+        // Match VS Code's EventEmitter: a faulty listener must not stop others.
+      }
+    }
+  }
+
+  public dispose(): void {
+    this.listeners.clear();
+  }
+}
 
 /** Removes a list's claims on one file, and the map itself once it is empty. */
 function dropClaims(list: Changelist, filePath: string): void {
@@ -43,19 +73,96 @@ interface PersistedChangelistState {
   repositories: Record<string, RepositoryChangelists>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSafeKey(key: string): boolean {
+  // These names mutate Object.prototype when assigned to a normal object.
+  return key !== "__proto__" && key !== "prototype" && key !== "constructor";
+}
+
+function strings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item): item is string => typeof item === "string" && item.length > 0))];
+}
+
+function sanitizeHunks(value: unknown): Record<string, string[]> | undefined {
+  if (!isRecord(value)) return undefined;
+  const hunks: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
+  for (const [path, keys] of Object.entries(value)) {
+    const cleanKeys = strings(keys);
+    if (cleanKeys.length) hunks[path] = cleanKeys;
+  }
+  return Object.keys(hunks).length ? hunks : undefined;
+}
+
+function sanitizeRepository(value: unknown): RepositoryChangelists | undefined {
+  if (!isRecord(value) || !Array.isArray(value.lists)) return undefined;
+  const lists: Changelist[] = [];
+  const ids = new Set<string>();
+  for (const raw of value.lists) {
+    if (!isRecord(raw) || typeof raw.id !== "string" || !raw.id || ids.has(raw.id)) continue;
+    ids.add(raw.id);
+    const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : "Unnamed Changelist";
+    const list: Changelist = { id: raw.id, name, files: strings(raw.files) };
+    if (typeof raw.description === "string" && raw.description.trim()) list.description = raw.description.trim();
+    const hunks = sanitizeHunks(raw.hunks);
+    if (hunks) list.hunks = hunks;
+    lists.push(list);
+  }
+  if (!lists.length) return undefined;
+  const activeId = typeof value.activeId === "string" && ids.has(value.activeId) ? value.activeId : lists[0].id;
+  return { activeId, lists };
+}
+
+function sanitizeState(value: unknown): PersistedChangelistState {
+  const repositories: Record<string, RepositoryChangelists> = Object.create(null) as Record<string, RepositoryChangelists>;
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.repositories)) {
+    return { version: 1, repositories };
+  }
+  for (const [root, raw] of Object.entries(value.repositories)) {
+    if (!isSafeKey(root)) continue;
+    const repository = sanitizeRepository(raw);
+    if (repository) repositories[root] = repository;
+  }
+  return { version: 1, repositories };
+}
+
+function cloneState(state: PersistedChangelistState): PersistedChangelistState {
+  const repositories: Record<string, RepositoryChangelists> = Object.create(null) as Record<string, RepositoryChangelists>;
+  for (const [root, repository] of Object.entries(state.repositories)) {
+    if (!isSafeKey(root)) continue;
+    repositories[root] = {
+      activeId: repository.activeId,
+      lists: repository.lists.map((list) => ({
+        id: list.id,
+        name: list.name,
+        ...(list.description ? { description: list.description } : {}),
+        files: [...list.files],
+        ...(list.hunks
+          ? { hunks: Object.fromEntries(Object.entries(list.hunks).map(([path, keys]) => [path, [...keys]])) }
+          : {}),
+      })),
+    };
+  }
+  return { version: 1, repositories };
+}
+
 const STORAGE_KEY = "jbGit.changelists";
 
-export class ChangelistStore implements vscode.Disposable {
-  private readonly changeEmitter = new vscode.EventEmitter<string | undefined>();
-  private state: PersistedChangelistState = { version: 1, repositories: {} };
+export class ChangelistStore implements Disposable {
+  private readonly changeEmitter = new LocalEventEmitter<string | undefined>();
+  private state: PersistedChangelistState = { version: 1, repositories: Object.create(null) as Record<string, RepositoryChangelists> };
+  /** Memento updates can overlap; serialize them so an older write cannot win. */
+  private saveQueue: Promise<void> = Promise.resolve();
 
-  public constructor(private readonly storage: vscode.Memento) {}
+  public constructor(private readonly storage: Memento) {}
 
   public readonly onDidChange = this.changeEmitter.event;
 
   public async load(): Promise<void> {
-    const persisted = this.storage.get<PersistedChangelistState>(STORAGE_KEY);
-    if (persisted?.version === 1 && persisted.repositories) this.state = persisted;
+    this.state = sanitizeState(this.storage.get<unknown>(STORAGE_KEY));
   }
 
   public lists(repositoryRoot: string): readonly Changelist[] {
@@ -126,7 +233,7 @@ export class ChangelistStore implements vscode.Disposable {
     // so the fallback inherits them the same way it inherits whole files.
     for (const [filePath, keys] of Object.entries(removed.hunks ?? {})) {
       if (fallback.files.includes(filePath)) continue;
-      fallback.hunks ??= {};
+      fallback.hunks ??= Object.create(null) as Record<string, string[]>;
       const existing = fallback.hunks[filePath] ?? [];
       fallback.hunks[filePath] = [...existing, ...keys.filter((key) => !existing.includes(key))];
     }
@@ -185,7 +292,7 @@ export class ChangelistStore implements vscode.Disposable {
       else list.hunks![filePath] = kept;
     }
     if (target.id !== this.homeListId(repositoryRoot, filePath)) {
-      target.hunks ??= {};
+      target.hunks ??= Object.create(null) as Record<string, string[]>;
       const existing = target.hunks[filePath] ?? [];
       target.hunks[filePath] = [...existing, ...keys.filter((key) => !existing.includes(key))];
     }
@@ -328,8 +435,15 @@ export class ChangelistStore implements vscode.Disposable {
   }
 
   private async save(repositoryRoot: string): Promise<void> {
-    await this.storage.update(STORAGE_KEY, this.state);
-    this.changeEmitter.fire(repositoryRoot);
+    // Take a snapshot before enqueueing: callers may mutate the in-memory
+    // state while a previous Memento update is still pending.
+    const snapshot = cloneState(this.state);
+    const write = this.saveQueue.catch(() => undefined).then(async () => {
+      await this.storage.update(STORAGE_KEY, snapshot);
+      this.changeEmitter.fire(repositoryRoot);
+    });
+    this.saveQueue = write.catch(() => undefined);
+    await write;
   }
 
   public dispose(): void {

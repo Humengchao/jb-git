@@ -265,8 +265,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     pendingRefreshes.addRoot(rootPath);
     scheduleRefresh();
   };
-  const scheduleRefreshForPath = (filePath: string): void => {
+  const scheduleRefreshForPath = (filePath: string, watchRoot?: string): void => {
     if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
+    // Watchers are already rooted at a known worktree. Most events are ordinary
+    // paths, so route them lexically first and avoid a realpath syscall for every
+    // formatter/build-tool event. Canonicalisation remains the fallback for
+    // symlinked workspaces and paths whose repository is not yet in the snapshot.
+    const lexical = path.normalize(filePath);
+    if (watchRoot && !isWorktreeWatchPathIgnored(watchRoot, lexical)) {
+      const snapshot = deepestContaining(manager.all, lexical, (item) => item.repository.info.rootPath);
+      if (snapshot && !snapshot.repository.info.isBare) {
+        scheduleRefreshRoot(snapshot.repository.info.rootPath);
+        return;
+      }
+    }
     void canonicalPath(filePath).then((candidate) => {
       const snapshot = deepestContaining(manager.all, candidate, (item) => item.repository.info.rootPath);
       if (!snapshot || snapshot.repository.info.isBare) return;
@@ -329,9 +341,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // external tools that modify ordinary worktree files.
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, "**/*"));
       const onWorktreeChange = (uri: vscode.Uri): void => {
-        // Filter before canonicalisation so dependency/cache event storms do
-        // not create one realpath lookup per file.
-        if (!isWorktreeWatchPathIgnored(root, uri.fsPath)) scheduleRefreshForPath(uri.fsPath);
+        // Filter before routing so dependency/cache event storms do not create
+        // one realpath lookup per file. The rooted fast path also preserves
+        // deepest-repository routing when worktrees are nested.
+        if (!isWorktreeWatchPathIgnored(root, uri.fsPath)) scheduleRefreshForPath(uri.fsPath, root);
       };
       watcher.onDidChange(onWorktreeChange);
       watcher.onDidCreate(onWorktreeChange);
@@ -848,7 +861,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const cloneRoot = await pickWorkspaceRoot();
       if (!cloneRoot) return void vscode.window.showInformationMessage(vscode.l10n.t("Open a folder before cloning a repository."));
       const cloned = await runWithNotificationResult(
-        `Cloning ${source.trim()}`,
+        `Cloning ${redactGitText(source.trim())}`,
         (signal) => manager.clone(source.trim(), destination.trim(), mode.bare, cloneRoot, signal),
         true,
       );
@@ -1713,7 +1726,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // each workspace root (including parent and bare repositories) without a
   // recursive directory crawl. The full nested scan runs when the view opens
   // or when the user explicitly refreshes.
-  await gitRuntimeCheck;
+  // Git version probing is advisory and must not delay repository discovery or
+  // the extension becoming usable. The check started above continues in the
+  // background and reports any warning/error through the normal VS Code UI.
+  // Keep the advisory promise observed even if a UI notification itself is
+  // dismissed or fails while activation is already continuing.
+  void gitRuntimeCheck.catch(() => undefined);
   await manager.discoverAndRefresh(false);
   updateStatusBar();
 }
