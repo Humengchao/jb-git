@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.34
+
+- perf: cut the work a refresh and a state push repeat
+
 ## 0.1.33
 
 - perf: optimize repository discovery and state handling
