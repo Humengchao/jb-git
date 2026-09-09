@@ -11,7 +11,7 @@
  * parses it and checks that it only calls names the sandbox has, and why
  * `scripts/screenshot.mjs` exists at all.
  */
-import { readFileSync } from "node:fs";
+import { asSandboxGlobal, readInjectedModuleSync } from "./injectedModule";
 
 let issueNavigationScriptCache: string | undefined;
 
@@ -21,7 +21,7 @@ let issueNavigationScriptCache: string | undefined;
  * overlap handling in one place instead of a copy that could drift.
  */
 export function issueNavigationScript(): string {
-  issueNavigationScriptCache ??= `const IssueNavigation = (() => { const exports = {}; ${readFileSync(require.resolve("../issueNavigation"), "utf8")}\n;return exports; })();\n`;
+  issueNavigationScriptCache ??= asSandboxGlobal("IssueNavigation", readInjectedModuleSync("issueNavigation"));
   return issueNavigationScriptCache;
 }
 
@@ -52,6 +52,7 @@ export const logScript = String.raw`
   let expandedChangeHunks; let search; let branchFilter; let activeToolTab; let selectedBranchKeys;
   let authorFilter; let knownAuthors; let dateFilter; let sortMode; let firstParent; let noMerges;
   let collapsedGraphSeries; let selectedGraphSeries; let consoleFilter; let consolePaused;
+  let collapsedFileFolders;
 
   /** (Re)derives every view local from persisted state, so recovery can reset them together. */
   function deriveUiState() {
@@ -70,6 +71,9 @@ export const logScript = String.raw`
     selectedGraphSeries = uiState.selectedGraphSeries || '';
     consoleFilter = uiState.consoleFilter || 'operations';
     consolePaused = Boolean(uiState.consolePaused);
+    // Derived once here rather than per tree node: renderDirectory used to
+    // rebuild this Set from the persisted array for every directory it drew.
+    collapsedFileFolders = new Set(uiState.collapsedFileFolders || []);
   }
   // The state VS Code restores was written by whatever version ran last, so a
   // shape this build cannot read must fall back to defaults, not leave the
@@ -367,9 +371,60 @@ export const logScript = String.raw`
       (active && active.tagName === 'SELECT'));
   }
 
+  /**
+   * Fields the host resends only when they actually moved, each gated by its own
+   * fingerprint. Their mere presence in a push means something drawn changed, so
+   * they are never compared — a deep walk of a few thousand commit or change
+   * records would cost more than the render it was trying to avoid.
+   */
+  const GATED_STATE_FIELDS = ['commits', 'lists', 'branches', 'traces', 'selection', 'shelves'];
+
+  /** Structural comparison over the JSON shapes the host sends. */
+  function sameStateValue(left, right) {
+    if (left === right) return true;
+    if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return false;
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    if (Array.isArray(left)) {
+      if (left.length !== right.length) return false;
+      for (let index = 0; index < left.length; index += 1) if (!sameStateValue(left[index], right[index])) return false;
+      return true;
+    }
+    const leftKeys = Object.keys(left);
+    if (leftKeys.length !== Object.keys(right).length) return false;
+    for (const key of leftKeys) {
+      if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+      if (!sameStateValue(left[key], right[key])) return false;
+    }
+    return true;
+  }
+
+  /**
+   * True when merging this push would leave the drawn view exactly as it stands.
+   *
+   * renderView replaces every element in the panel, and the host sends a state
+   * message on every refresh — including the ones a worktree watcher triggers
+   * for a file that changed nothing Git reports. Skipping those is safe because
+   * every view local applyIncomingState derives (sortMode, selectedBranchKeys,
+   * selectedFilePath, knownAuthors, pendingCommitHash) is a function of the
+   * state fields compared here or of a gated field whose presence forces a
+   * render. A new derived local must be covered by one of the two.
+   */
+  function pushChangesNothingDrawn(next) {
+    // A visible error banner used to be cleared by the next render, whichever
+    // push caused it. Keep that rather than leaving a stale one on screen.
+    if (errorBanner && errorBanner.isConnected) return false;
+    for (const key of Object.keys(next)) {
+      if (key === 'stateVersion') continue;
+      if (GATED_STATE_FIELDS.includes(key)) return false;
+      if (!sameStateValue(state[key], next[key])) return false;
+    }
+    return true;
+  }
+
   function applyIncomingState(next) {
     if (typeof next.stateVersion === 'number' && next.stateVersion < lastStateVersion) return;
     if (typeof next.stateVersion === 'number') lastStateVersion = next.stateVersion;
+    if (pushChangesNothingDrawn(next)) { state = { ...state, ...next }; return; }
     const previousRoot = state.selectedRoot;
     // Keep an in-flight selection unless this push fulfils it or removed its commit;
     // clearing it unconditionally made the highlight jump back to the previous commit.
@@ -1979,29 +2034,41 @@ export const logScript = String.raw`
       current.files.push(file);
     }
     const container = node('div');
-    for (const directory of root.directories.values()) container.append(renderDirectory(directory, 0, commit));
+    for (const directory of root.directories.values()) container.append(renderDirectory(directory, 0, commit).section);
     for (const file of root.files) container.append(commitFileRow(file, 0, commit));
     return container;
   }
 
+  /**
+   * Draws one directory and returns it with the number of files beneath it.
+   *
+   * The count travels back up rather than being asked for per node: the old
+   * shape called countTreeFiles from every ancestor, so each level re-walked
+   * everything below it and a deep tree cost its own depth over again.
+   */
   function renderDirectory(directory, depth, commit) {
     const compacted = compactDirectory(directory); directory = compacted.directory;
     const section = node('section');
-    const collapsed = new Set(uiState.collapsedFileFolders || []).has(directory.path);
+    const collapsed = collapsedFileFolders.has(directory.path);
     const row = node('div', 'tree-row'); row.tabIndex = 0; row.style.paddingLeft = (8 + depth * 16) + 'px'; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-expanded', String(!collapsed));
-    const count = countTreeFiles(directory);
     const twisty = node('span', 'tree-twisty', collapsed ? '›' : '⌄');
-    row.append(twisty, node('span', 'tree-folder', '▱ ' + compacted.name), node('span', 'tree-count', fileCount(count)));
+    const countLabel = node('span', 'tree-count');
+    row.append(twisty, node('span', 'tree-folder', '▱ ' + compacted.name), countLabel);
     const children = node('div'); children.hidden = collapsed;
-    for (const child of directory.directories.values()) children.append(renderDirectory(child, depth + 1, commit));
+    let count = directory.files.length;
+    for (const child of directory.directories.values()) {
+      const rendered = renderDirectory(child, depth + 1, commit);
+      count += rendered.count; children.append(rendered.section);
+    }
     for (const file of directory.files) children.append(commitFileRow(file, depth + 1, commit));
+    countLabel.textContent = fileCount(count);
     const toggle = () => {
       children.hidden = !children.hidden; twisty.textContent = children.hidden ? '›' : '⌄'; row.setAttribute('aria-expanded', String(!children.hidden));
-      const collapsedFolders = new Set(uiState.collapsedFileFolders || []);
-      if (children.hidden) collapsedFolders.add(directory.path); else collapsedFolders.delete(directory.path);
-      saveUiState({ collapsedFileFolders: [...collapsedFolders] });
+      if (children.hidden) collapsedFileFolders.add(directory.path); else collapsedFileFolders.delete(directory.path);
+      saveUiState({ collapsedFileFolders: [...collapsedFileFolders] });
     };
-    row.addEventListener('click', toggle); keyboardActivate(row, toggle); section.append(row, children); return section;
+    row.addEventListener('click', toggle); keyboardActivate(row, toggle); section.append(row, children);
+    return { section, count };
   }
 
   function compactDirectory(directory) {
@@ -2010,12 +2077,6 @@ export const logScript = String.raw`
       current = current.directories.values().next().value; names.push(current.name);
     }
     return { name: names.join('/'), directory: current };
-  }
-
-  function countTreeFiles(directory) {
-    let count = directory.files.length;
-    for (const child of directory.directories.values()) count += countTreeFiles(child);
-    return count;
   }
 
   function commitFileRow(file, depth, commit) {

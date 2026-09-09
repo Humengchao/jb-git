@@ -13,6 +13,13 @@ export interface RepositorySnapshot {
   branches: GitBranch[];
   operation: GitOperationState;
   error?: string;
+  /**
+   * Change-detection key, computed once when the snapshot is read. A refresh
+   * compares the previous snapshots against the new ones, so deriving this on
+   * demand meant hashing every changed file and branch twice per refresh —
+   * on a hot path a worktree watcher fires on every saved file.
+   */
+  readonly key: string;
 }
 
 /** Lease held across a compound stash/rebase workflow. */
@@ -549,24 +556,24 @@ export class RepositoryManager implements vscode.Disposable {
   private async readSnapshot(repository: GitRepository): Promise<RepositorySnapshot> {
     try {
       if (repository.info.isBare) {
-        return {
+        return withSnapshotKey({
           repository,
           status: null,
           branches: await repository.branches(),
           operation: { kind: "none", canContinue: false, canAbort: false },
           error: "Bare repository: working-tree operations are unavailable.",
-        };
+        });
       }
       const [status, branches, operation] = await Promise.all([repository.status(), repository.branches(), repository.operationState()]);
-      return { repository, status, branches, operation };
+      return withSnapshotKey({ repository, status, branches, operation });
     } catch (error) {
-      return {
+      return withSnapshotKey({
         repository,
         status: null,
         branches: [],
         operation: { kind: "none", canContinue: false, canAbort: false },
         error: error instanceof Error ? error.message : String(error),
-      };
+      });
     }
   }
 
@@ -581,13 +588,13 @@ export class RepositoryManager implements vscode.Disposable {
   }
 
   private snapshotKeys(): Map<string, string> {
-    return new Map([...this.snapshots].map(([root, snapshot]) => [root, snapshotKey(snapshot)]));
+    return new Map([...this.snapshots].map(([root, snapshot]) => [root, snapshot.key]));
   }
 
   private snapshotsChanged(previous: ReadonlyMap<string, string>): boolean {
     if (previous.size !== this.snapshots.size) return true;
     for (const [root, snapshot] of this.snapshots) {
-      if (previous.get(root) !== snapshotKey(snapshot)) return true;
+      if (previous.get(root) !== snapshot.key) return true;
     }
     return false;
   }
@@ -644,15 +651,52 @@ export class RepositoryManager implements vscode.Disposable {
   }
 }
 
-/** A stable UI-facing snapshot identity. Status timestamps are deliberately ignored. */
-export function snapshotKey(snapshot: RepositorySnapshot): string {
-  return JSON.stringify({
-    repository: snapshot.repository.info,
-    status: snapshot.status ? { branch: snapshot.status.branch, changes: snapshot.status.changes } : null,
-    branches: snapshot.branches,
-    operation: snapshot.operation,
-    error: snapshot.error,
-  });
+/** Attaches the change-detection key so no refresh hashes the same snapshot twice. */
+function withSnapshotKey(snapshot: Omit<RepositorySnapshot, "key">): RepositorySnapshot {
+  return { ...snapshot, key: snapshotKey(snapshot) };
+}
+
+/**
+ * A stable UI-facing snapshot identity. Status timestamps are deliberately ignored.
+ *
+ * Every field the UI reads is written out positionally rather than as JSON: a
+ * repository with thousands of changed files spends this on each refresh, and
+ * JSON's key names and punctuation were several times the size of the values
+ * they framed. Field order and count are what make it unambiguous, so the
+ * per-record separators stay even when a value is absent.
+ */
+export function snapshotKey(snapshot: Omit<RepositorySnapshot, "key">): string {
+  const info = snapshot.repository.info;
+  const parts: string[] = [
+    info.rootPath, info.gitDir, info.commonGitDir, info.isBare ? "1" : "0",
+    snapshot.operation.kind, snapshot.operation.canContinue ? "1" : "0",
+    snapshot.operation.canAbort ? "1" : "0", snapshot.operation.detail ?? "",
+    snapshot.error ?? "",
+  ];
+  const branch = snapshot.status?.branch;
+  parts.push(
+    snapshot.status ? "1" : "0",
+    branch?.head ?? "", branch?.oid ?? "", branch?.upstream ?? "",
+    String(branch?.ahead ?? ""), String(branch?.behind ?? ""),
+  );
+  parts.push(String(snapshot.status?.changes.length ?? 0));
+  for (const change of snapshot.status?.changes ?? []) {
+    parts.push(
+      change.path, change.originalPath ?? "", change.indexStatus, change.workTreeStatus,
+      change.kind, change.staged ? "1" : "0", change.unstaged ? "1" : "0", change.conflicted ? "1" : "0",
+    );
+  }
+  parts.push(String(snapshot.branches.length));
+  for (const item of snapshot.branches) {
+    parts.push(
+      item.name, item.fullName, item.kind, item.oid, item.upstream ?? "", item.tracking ?? "",
+      String(item.ahead ?? ""), String(item.behind ?? ""), item.upstreamGone ? "1" : "0",
+    );
+  }
+  // NUL, because it is the one byte a path, a refname and a status code cannot
+  // contain. A separator that can appear inside a value would let two different
+  // snapshots agree on the joined string by shifting a field boundary.
+  return parts.join("\0");
 }
 
 function sameRepositoryIdentity(left: GitRepository, right: GitRepository): boolean {

@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import { GitConflictVersions } from "../git/types";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
 import { webviewDocument } from "./html";
+import { asSandboxGlobal, readInjectedModule } from "./injectedModule";
 import { isMergeEditorMessage } from "./mergeEditorProtocol";
 import { basesForConflicts } from "../mergeAnalysis";
 import { buildModel } from "../mergeRegions";
@@ -383,8 +384,8 @@ let mergeRegionsScriptCache: Promise<string> | undefined;
  * that could drift on exactly the code path that loses work.
  */
 function mergeRegionsScript(): Promise<string> {
-  mergeRegionsScriptCache ??= readFile(require.resolve("../mergeRegions"), "utf8").then(
-    (source) => `const MergeRegions = (() => { const exports = {}; ${source}\n;return exports; })();\n`,
+  mergeRegionsScriptCache ??= readInjectedModule("mergeRegions").then(
+    (source) => asSandboxGlobal("MergeRegions", source),
   );
   return mergeRegionsScriptCache;
 }

@@ -232,10 +232,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let refreshDeadline: number | undefined;
   let refreshInFlight = false;
   let refreshSchedulingDisposed = false;
+  /**
+   * The two settings the filesystem-event path consults. `getConfiguration`
+   * walks the default/user/workspace/folder override chain on every call, and a
+   * build tool writing a directory tree turns that into one walk per file, so
+   * both are cached and dropped by the configuration listener below. `??=`
+   * caches a `false` and a `0` correctly: only undefined refills them.
+   */
+  let cachedAutoRefresh: boolean | undefined;
+  let cachedRefreshDebounce: number | undefined;
+  const autoRefreshEnabled = (): boolean => {
+    cachedAutoRefresh ??= vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true);
+    return cachedAutoRefresh;
+  };
+  const refreshDebounceMs = (): number => {
+    cachedRefreshDebounce ??= vscode.workspace.getConfiguration("jbGit").get<number>("refreshDebounceMs", 600);
+    return cachedRefreshDebounce;
+  };
+  const forgetRefreshSettings = (): void => {
+    cachedAutoRefresh = undefined;
+    cachedRefreshDebounce = undefined;
+  };
   const scheduleRefresh = (): void => {
     if (refreshSchedulingDisposed || refreshInFlight) return;
     if (refreshTimer) clearTimeout(refreshTimer);
-    const delay = vscode.workspace.getConfiguration("jbGit").get<number>("refreshDebounceMs", 600);
+    const delay = refreshDebounceMs();
     // A steady event stream (auto-save while typing) must not defer the
     // refresh forever, so the debounce is capped by a hard deadline.
     refreshDeadline ??= Date.now() + Math.max(delay * 4, 2_000);
@@ -261,18 +282,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }, Math.max(0, Math.min(delay, refreshDeadline - Date.now())));
   };
   const scheduleRefreshRoot = (rootPath: string): void => {
-    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
+    if (!autoRefreshEnabled()) return;
     pendingRefreshes.addRoot(rootPath);
     scheduleRefresh();
   };
-  const scheduleRefreshForPath = (filePath: string, watchRoot?: string): void => {
-    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
+  /**
+   * `watchRootFiltered` says the caller already ran `isWorktreeWatchPathIgnored`
+   * against `watchRoot`. The worktree watcher has to run it before routing —
+   * that is what keeps an ignored event out of the canonicalisation fallback
+   * below and off a realpath syscall — so without this the same check ran twice
+   * for every event that was not ignored.
+   */
+  const scheduleRefreshForPath = (filePath: string, watchRoot?: string, watchRootFiltered = false): void => {
+    if (!autoRefreshEnabled()) return;
     // Watchers are already rooted at a known worktree. Most events are ordinary
     // paths, so route them lexically first and avoid a realpath syscall for every
     // formatter/build-tool event. Canonicalisation remains the fallback for
     // symlinked workspaces and paths whose repository is not yet in the snapshot.
     const lexical = path.normalize(filePath);
-    if (watchRoot && !isWorktreeWatchPathIgnored(watchRoot, lexical)) {
+    if (watchRoot && (watchRootFiltered || !isWorktreeWatchPathIgnored(watchRoot, lexical))) {
       const snapshot = deepestContaining(manager.all, lexical, (item) => item.repository.info.rootPath);
       if (snapshot && !snapshot.repository.info.isBare) {
         scheduleRefreshRoot(snapshot.repository.info.rootPath);
@@ -287,7 +315,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
   };
   const scheduleDiscovery = (): void => {
-    if (!vscode.workspace.getConfiguration("jbGit").get<boolean>("autoRefresh", true)) return;
+    if (!autoRefreshEnabled()) return;
     pendingRefreshes.addDiscovery();
     scheduleRefresh();
   };
@@ -344,7 +372,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // Filter before routing so dependency/cache event storms do not create
         // one realpath lookup per file. The rooted fast path also preserves
         // deepest-repository routing when worktrees are nested.
-        if (!isWorktreeWatchPathIgnored(root, uri.fsPath)) scheduleRefreshForPath(uri.fsPath, root);
+        if (isWorktreeWatchPathIgnored(root, uri.fsPath)) return;
+        scheduleRefreshForPath(uri.fsPath, root, true);
       };
       watcher.onDidChange(onWorktreeChange);
       watcher.onDidCreate(onWorktreeChange);
@@ -498,6 +527,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refresh()),
     vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("jbGit.autoRefresh") || event.affectsConfiguration("jbGit.refreshDebounceMs")) {
+        forgetRefreshSettings();
+      }
       if (!event.affectsConfiguration("jbGit.gitPath")) return;
       void vscode.window.showInformationMessage(vscode.l10n.t("Reload VS Code to use the new JB Git executable."), vscode.l10n.t("Reload")).then((choice) => {
         if (choice === vscode.l10n.t("Reload")) void vscode.commands.executeCommand("workbench.action.reloadWindow");

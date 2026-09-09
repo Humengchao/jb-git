@@ -271,6 +271,32 @@ export class ChangelistStore implements Disposable {
   }
 
   /**
+   * Which lists claim hunks of each file, as one pass over the lists' own claims.
+   *
+   * The callers that only ask *whether* a list claims part of a file — the tool
+   * window rebuilding its Changelist model on every refresh — used to call
+   * `claims` once per changed file, making the work proportional to changed
+   * files times lists and copying key arrays they never read. This is
+   * proportional to the claims that actually exist, which is normally a handful.
+   * Use `claims` where the keys themselves are needed.
+   */
+  public claimedListIdsByPath(repositoryRoot: string): ReadonlyMap<string, ReadonlySet<string>> {
+    const byPath = new Map<string, Set<string>>();
+    for (const list of this.ensure(repositoryRoot).lists) {
+      for (const [filePath, keys] of Object.entries(list.hunks ?? {})) {
+        if (!keys.length) continue;
+        let ids = byPath.get(filePath);
+        if (!ids) {
+          ids = new Set<string>();
+          byPath.set(filePath, ids);
+        }
+        ids.add(list.id);
+      }
+    }
+    return byPath;
+  }
+
+  /**
    * Moves individual hunks of a file into a Changelist.
    *
    * Claiming a hunk for the list that already owns the whole file is how a hunk
@@ -390,7 +416,8 @@ export class ChangelistStore implements Disposable {
 
   /** Files whose hunks are shared between Changelists, which a whole-file commit would flatten. */
   public splitPaths(repositoryRoot: string, changedPaths: readonly string[]): string[] {
-    return changedPaths.filter((filePath) => this.claims(repositoryRoot, filePath).size > 0);
+    const claimed = this.claimedListIdsByPath(repositoryRoot);
+    return changedPaths.filter((filePath) => (claimed.get(filePath)?.size ?? 0) > 0);
   }
 
   /** Paths that have per-hunk claims, so a caller re-reads only the files whose ownership can change. */

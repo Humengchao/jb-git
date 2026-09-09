@@ -80,7 +80,11 @@ test("watches ordinary worktree files changed by external tools without metadata
   assert.match(watcher, /watcher\.onDidDelete\(onWorktreeChange\)/);
   assert.match(extension, /WORKTREE_WATCH_IGNORED_SEGMENTS = new Set\(\["\.git", "node_modules"/);
   assert.match(watcher, /isWorktreeWatchPathIgnored\(root, uri\.fsPath\)/);
-  assert.match(extension, /scheduleRefreshForPath\(uri\.fsPath, root\)/);
+  // The watcher filters before routing so an ignored event never reaches the
+  // canonicalisation fallback and its realpath call; the third argument tells
+  // scheduleRefreshForPath that, so the same check does not run twice.
+  assert.match(extension, /scheduleRefreshForPath\(uri\.fsPath, root, true\)/);
+  assert.match(extension, /watchRootFiltered \|\| !isWorktreeWatchPathIgnored\(watchRoot, lexical\)/);
   assert.match(extension, /const lexical = path\.normalize\(filePath\)/);
   assert.match(extension, /deepestContaining\(manager\.all, lexical/);
 });

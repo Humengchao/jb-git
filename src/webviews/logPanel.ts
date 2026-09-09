@@ -106,6 +106,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private lastSentTracesKey?: string;
   private lastSentLogDataKey?: string;
   private lastSentSelectionKey?: string;
+  private lastSentListsKey?: string;
+  private lastSentCommitFormKey?: string;
   private readonly branchComparisons: BranchComparisonWorkspace;
   private readonly hunkCache = new Map<string, { staged: GitDiffHunk[]; unstaged: GitDiffHunk[] }>();
   private readonly commitFilesCache = new Map<string, GitCommitFile[]>();
@@ -320,6 +322,13 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       this.logCache = undefined;
       this.lastSentLogDataKey = undefined;
       this.lastSentSelectionKey = undefined;
+    }
+    // The Changelist model and the commit form both describe one repository, so
+    // they have to travel again once a different one is selected even when the
+    // new root happens to produce an identical fingerprint.
+    if (rootChanged) {
+      this.lastSentListsKey = undefined;
+      this.lastSentCommitFormKey = undefined;
     }
   }
 
@@ -568,6 +577,14 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       // incoming state; large arrays are resent only when their identity moved.
       const tracesKey = this.tracesFingerprint();
       const includeTraces = this.requestedTab === "console" && this.lastSentTracesKey !== tracesKey;
+      // The Changelist model is the largest thing this panel sends and the
+      // Webview redraws the whole pane whenever it arrives, so a refresh that
+      // did not touch the changes must not resend it. Saving one unrelated file
+      // used to rebuild every row.
+      const listsKey = lists ? changeListsFingerprint(lists) : undefined;
+      const includeLists = lists !== undefined && this.lastSentListsKey !== listsKey;
+      const commitFormKey = commitForm ? JSON.stringify(commitForm) : undefined;
+      const includeCommitForm = commitForm !== undefined && this.lastSentCommitFormKey !== commitFormKey;
       if (version !== this.updateVersion) return;
       await webview.postMessage({
         type: "state",
@@ -591,8 +608,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           operation: snapshot.operation,
           error: snapshot.error ?? null,
           ...(includeTraces ? { traces: this.traces } : {}),
-          ...(lists ? { lists } : {}),
-          ...(commitForm ?? {}),
+          ...(includeLists ? { lists } : {}),
+          ...(includeCommitForm ? commitForm : {}),
           totalChanges: changes.length,
           stagedCount: changes.filter((change) => change.staged).length,
           selectedCount: selected.size,
@@ -610,6 +627,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (includeTraces) this.lastSentTracesKey = tracesKey;
       if (logDataKey !== undefined) this.lastSentLogDataKey = logDataKey;
       if (selectionKey !== undefined) this.lastSentSelectionKey = selectionKey;
+      if (listsKey !== undefined) this.lastSentListsKey = listsKey;
+      if (commitFormKey !== undefined) this.lastSentCommitFormKey = commitFormKey;
     } catch (error) {
       if (isGitAbort(error)) return;
       if (version === this.updateVersion) await webview.postMessage({ type: "error", message: formatError(error) });
@@ -636,6 +655,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         this.lastSentTracesKey = undefined;
         this.lastSentLogDataKey = undefined;
         this.lastSentSelectionKey = undefined;
+        this.lastSentListsKey = undefined;
+        this.lastSentCommitFormKey = undefined;
         await this.view?.webview.postMessage({ type: "activateTab", tab: this.requestedTab });
         return void this.update();
       }
@@ -2034,33 +2055,45 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       for (const filePath of list.files) if (!homeByPath.has(filePath)) homeByPath.set(filePath, list.id);
     }
     for (const change of changes) if (!homeByPath.has(change.path)) homeByPath.set(change.path, activeId);
-    const claimsByPath = new Map(changes.map((change) => [change.path, this.changelists.claims(root, change.path)]));
+    const claimedByPath = this.changelists.claimedListIdsByPath(root);
+    const renderRow = (change: GitChange) => {
+      const directory = path.dirname(change.path);
+      return {
+        path: change.path,
+        partial: (claimedByPath.get(change.path)?.size ?? 0) > 0,
+        directory: directory === "." ? "" : directory,
+        fileName: path.basename(change.path),
+        originalPath: change.originalPath,
+        kind: change.kind,
+        staged: change.staged,
+        unstaged: change.unstaged,
+        conflicted: change.conflicted,
+        checked: selected.has(change.path),
+        status: statusLabel(change),
+      };
+    };
+    // One pass over the changes, bucketed by the lists each one belongs to,
+    // rather than a filter pass per list: the old shape cost changed files times
+    // Changelists on every refresh, and built a row object per pair. A row
+    // shared between buckets is one object, since it is only ever serialised.
+    const rowsByList = new Map<string, Array<ReturnType<typeof renderRow>>>();
+    for (const list of definitions) rowsByList.set(list.id, []);
+    for (const change of changes) {
+      const row = renderRow(change);
+      const home = homeByPath.get(change.path);
+      if (home !== undefined) rowsByList.get(home)?.push(row);
+      // A file whose hunks were split appears under every list that owns part of
+      // it. Listing it only under its home list left the claiming list looking
+      // empty while its commit would have taken those hunks.
+      const claiming = claimedByPath.get(change.path);
+      if (claiming) for (const id of claiming) if (id !== home) rowsByList.get(id)?.push(row);
+    }
     return definitions.map((list) => ({
       id: list.id,
       name: list.name,
       description: list.description,
       active: list.id === activeId,
-      changes: changes
-        // A file whose hunks were split appears under every list that owns
-        // part of it. Listing it only under its home list left the claiming
-        // list looking empty while its commit would have taken those hunks.
-        .filter((change) => {
-          const home = homeByPath.get(change.path);
-          return home === list.id || claimsByPath.get(change.path)?.has(list.id);
-        })
-        .map((change) => ({
-          path: change.path,
-          partial: (claimsByPath.get(change.path)?.size ?? 0) > 0,
-          directory: path.dirname(change.path) === "." ? "" : path.dirname(change.path),
-          fileName: path.basename(change.path),
-          originalPath: change.originalPath,
-          kind: change.kind,
-          staged: change.staged,
-          unstaged: change.unstaged,
-          conflicted: change.conflicted,
-          checked: selected.has(change.path),
-          status: statusLabel(change),
-        })),
+      changes: rowsByList.get(list.id) ?? [],
     }));
   }
 
@@ -2168,6 +2201,46 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
 /** Git currently exposes full SHA-1 (40 hex) or SHA-256 (64 hex) object IDs. */
 function isFullObjectId(value: string): boolean {
   return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+}
+
+/** The drawn shape of one Changelist, as much of it as its fingerprint reads. */
+interface FingerprintableChangeList {
+  id: string;
+  name: string;
+  description?: string;
+  active: boolean;
+  changes: ReadonlyArray<{
+    path: string;
+    partial: boolean;
+    originalPath?: string;
+    kind: string;
+    staged: boolean;
+    unstaged: boolean;
+    conflicted: boolean;
+    checked: boolean;
+    status: string;
+  }>;
+}
+
+/**
+ * A compact identity for the Changelist model, so an unchanged one is not
+ * resent. `directory` and `fileName` are left out because they are derived from
+ * the path that is already here; everything else the Webview draws is included,
+ * and the row counts plus NUL separators keep the field boundaries unambiguous.
+ */
+function changeListsFingerprint(lists: readonly FingerprintableChangeList[]): string {
+  const parts: string[] = [String(lists.length)];
+  for (const list of lists) {
+    parts.push(list.id, list.name, list.description ?? "", list.active ? "1" : "0", String(list.changes.length));
+    for (const change of list.changes) {
+      parts.push(
+        change.path, change.originalPath ?? "", change.kind, change.status,
+        change.partial ? "1" : "0", change.staged ? "1" : "0",
+        change.unstaged ? "1" : "0", change.conflicted ? "1" : "0", change.checked ? "1" : "0",
+      );
+    }
+  }
+  return parts.join("\0");
 }
 
 function statusLabel(change: GitChange): string {

@@ -25,8 +25,10 @@ test("shares the tested region model with the sandboxed script instead of a copy
   // The Webview cannot import modules, so the compiled mergeRegions build is
   // injected as a global and every result mutation must go through it; a
   // hand-written second implementation is exactly what could drift and lose work.
-  assert.match(source, /require\.resolve\("\.\.\/mergeRegions"\)/);
-  assert.match(source, /const MergeRegions = \(\(\) => \{ const exports = \{\};/);
+  assert.match(source, /readInjectedModule\("mergeRegions"\)/);
+  assert.match(source, /asSandboxGlobal\("MergeRegions"/);
+  const loader = readSource("../src/webviews/injectedModule.ts", import.meta.url);
+  assert.match(loader, /const \$\{globalName\} = \(\(\) => \{ const exports = \{\};/);
   assert.match(scriptMatch[1], /MergeRegions\.buildModel/);
   assert.match(scriptMatch[1], /MergeRegions\.applyEdit\(model\.regions, MergeRegions\.textDelta/);
   assert.match(scriptMatch[1], /MergeRegions\.resolveRegion/);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { compileIssueRules, linkifyIssues, safeIssueUrl } from "../dist/issueNavigation.js";
+import { readInjectedModuleSync } from "../dist/webviews/injectedModule.js";
 import { panelScript, readSource } from "./sourceText.mjs";
 
 const JIRA = { pattern: "[A-Z][A-Z0-9]+-\\d+", url: "https://tracker.example.com/browse/$0" };
@@ -88,8 +89,16 @@ test("caps the text scanned by user-configured rules", () => {
 
 test("the Webview runs the same compiled module, not a copy", () => {
   const panel = panelScript(import.meta.url);
-  assert.match(panel, /require\.resolve\("\.\.\/issueNavigation"\)/);
-  assert.match(panel, /const IssueNavigation = \(\(\) => \{ const exports = \{\};/);
+  // The panel asks the shared loader for the compiled module rather than
+  // carrying a second copy of the rules; the loader is what knows where the
+  // module sits in the `tsc` tree and beside the packaged bundle.
+  assert.match(panel, /readInjectedModuleSync\("issueNavigation"\)/);
+  assert.match(panel, /asSandboxGlobal\("IssueNavigation"/);
+  const loader = readSource("../src/webviews/injectedModule.ts", import.meta.url);
+  assert.match(loader, /const \$\{globalName\} = \(\(\) => \{ const exports = \{\};/);
+  // It has to actually find the module, not just name it.
+  const found = readInjectedModuleSync("issueNavigation");
+  assert.equal(found, readFileSync(new URL("../dist/issueNavigation.js", import.meta.url), "utf8"));
   // The injected wrapper has to evaluate to a working global.
   const compiled = readFileSync(new URL("../dist/issueNavigation.js", import.meta.url), "utf8");
   const wrapped = `const IssueNavigation = (() => { const exports = {}; ${compiled}\n;return exports; })();\n`;
