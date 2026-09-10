@@ -39,6 +39,36 @@ function changedLines(hunk: GitDiffHunk): string[] {
 }
 
 /**
+ * A stable name for each changed line, per hunk in the order they appear.
+ *
+ * The same naming rule as `hunkKeys`, one level down: the line itself, with
+ * its sign and any "\ No newline" marker it carries, goes into the name —
+ * losing the trailing newline is a different change from the same text that
+ * keeps it. Two byte-identical changed lines in one file are told apart by
+ * their order, the only thing left. Neither line numbers nor the enclosing
+ * hunk go into the name, so it does not move when the file shifts around the
+ * change or when Git splits the hunk differently. Adding an identical line
+ * above a claimed one shifts the ordinals, and the claim is then dropped at
+ * the next reconcile rather than re-pointed at a change it did not name.
+ */
+export function lineKeys(hunks: readonly GitDiffHunk[]): string[][] {
+  const seen = new Map<string, number>();
+  return hunks.map((hunk) => {
+    const keys: string[] = [];
+    for (let index = 0; index < hunk.lines.length; index += 1) {
+      const line = hunk.lines[index];
+      if (!line.startsWith("+") && !line.startsWith("-")) continue;
+      const marker = hunk.lines[index + 1]?.startsWith("\\") ? `\n${hunk.lines[index + 1]}` : "";
+      const digest = createHash("sha1").update(line + marker, "utf8").digest("hex").slice(0, 16);
+      const ordinal = seen.get(digest) ?? 0;
+      seen.set(digest, ordinal + 1);
+      keys.push(`${digest}:${ordinal}`);
+    }
+    return keys;
+  });
+}
+
+/**
  * Drops claims whose hunk is no longer in the file.
  *
  * A claim outlives an editing session on purpose — the hunk it names comes back
@@ -59,10 +89,14 @@ export function reconcileClaims(claims: readonly string[], currentKeys: readonly
  * described by what to include; the list the file belongs to commits whatever
  * the others did not claim, so it is described by what to leave out and a hunk
  * that appeared since is still its own.
+ *
+ * `lineKeys` names individual changed lines inside those hunks and is absent
+ * when the file was only ever split at hunk level, so a hunk-level selection
+ * runs exactly the code path it always did.
  */
 export type HunkSelection =
-  | { readonly mode: "only"; readonly keys: readonly string[] }
-  | { readonly mode: "except"; readonly keys: readonly string[] };
+  | { readonly mode: "only"; readonly keys: readonly string[]; readonly lineKeys?: readonly string[] }
+  | { readonly mode: "except"; readonly keys: readonly string[]; readonly lineKeys?: readonly string[] };
 
 /**
  * What one Changelist commits of one file.
@@ -74,13 +108,26 @@ export function commitSelectionFor(
   listId: string,
   homeListId: string,
   claimsByList: ReadonlyMap<string, readonly string[]>,
+  lineClaimsByList: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>(),
 ): HunkSelection | "whole" | "none" {
   if (listId === homeListId) {
     const claimedAway = [...claimsByList].filter(([owner]) => owner !== homeListId).flatMap(([, keys]) => keys);
-    return claimedAway.length === 0 ? "whole" : { mode: "except", keys: [...new Set(claimedAway)] };
+    const linesAway = [...lineClaimsByList].filter(([owner]) => owner !== homeListId).flatMap(([, keys]) => keys);
+    if (claimedAway.length === 0 && linesAway.length === 0) return "whole";
+    return {
+      mode: "except",
+      keys: [...new Set(claimedAway)],
+      ...(linesAway.length ? { lineKeys: [...new Set(linesAway)] } : {}),
+    };
   }
   const claimed = claimsByList.get(listId) ?? [];
-  return claimed.length === 0 ? "none" : { mode: "only", keys: [...claimed] };
+  const claimedLines = lineClaimsByList.get(listId) ?? [];
+  if (claimed.length === 0 && claimedLines.length === 0) return "none";
+  return {
+    mode: "only",
+    keys: [...claimed],
+    ...(claimedLines.length ? { lineKeys: [...claimedLines] } : {}),
+  };
 }
 
 /** Which list each hunk of a file belongs to, by index into the hunk list. */
@@ -124,4 +171,45 @@ export function partitionHunks(
     else byList.set(listId, [index]);
   });
   return { byList, split: byList.size > 1 };
+}
+
+/**
+ * Which list each changed line of a file belongs to, per hunk in file order.
+ *
+ * The more specific decision wins: a line claimed directly goes to its
+ * claimant, a line nobody claimed follows its hunk's claim, and whatever is
+ * left is the home list's. The first claimant in iteration order takes a line
+ * named twice, so a corrupted assignment cannot make a line vanish from every
+ * list. The result always covers every changed line exactly once.
+ */
+export function partitionLines(
+  hunks: readonly GitDiffHunk[],
+  hunkClaimsByList: ReadonlyMap<string, readonly string[]>,
+  lineClaimsByList: ReadonlyMap<string, readonly string[]>,
+  homeListId: string,
+): string[][] {
+  const keys = hunkKeys(hunks);
+  const hunkOwner = new Map<number, string>();
+  for (const [listId, claims] of hunkClaimsByList) {
+    if (listId === homeListId) continue;
+    const wanted = new Set(claims);
+    keys.forEach((key, index) => {
+      if (wanted.has(key) && !hunkOwner.has(index)) hunkOwner.set(index, listId);
+    });
+  }
+  return lineKeys(hunks).map((perHunk, hunkIndex) => {
+    const owners = perHunk.map(() => hunkOwner.get(hunkIndex) ?? homeListId);
+    const taken = new Set<number>();
+    for (const [listId, claims] of lineClaimsByList) {
+      if (listId === homeListId) continue;
+      const wanted = new Set(claims);
+      perHunk.forEach((key, lineIndex) => {
+        if (wanted.has(key) && !taken.has(lineIndex)) {
+          owners[lineIndex] = listId;
+          taken.add(lineIndex);
+        }
+      });
+    }
+    return owners;
+  });
 }

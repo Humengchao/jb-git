@@ -33,18 +33,19 @@ class LocalEventEmitter<T> implements Disposable {
 }
 
 /** Removes a list's claims on one file, and the map itself once it is empty. */
-function dropClaims(list: Changelist, filePath: string): void {
-  if (!list.hunks) return;
-  delete list.hunks[filePath];
-  if (Object.keys(list.hunks).length === 0) delete list.hunks;
+function dropClaims(list: Changelist, field: "hunks" | "lines", filePath: string): void {
+  const claims = list[field];
+  if (!claims) return;
+  delete claims[filePath];
+  if (Object.keys(claims).length === 0) delete list[field];
 }
 
 /** Follows a file's claims to its new path after a rename. */
-function renameClaims(list: Changelist, from: string, to: string): boolean {
-  const keys = list.hunks?.[from];
+function renameClaims(list: Changelist, field: "hunks" | "lines", from: string, to: string): boolean {
+  const keys = list[field]?.[from];
   if (!keys) return false;
-  delete list.hunks![from];
-  list.hunks![to] = keys;
+  delete list[field]![from];
+  list[field]![to] = keys;
   return true;
 }
 
@@ -61,6 +62,15 @@ export interface Changelist {
    * ownership existed loads unchanged.
    */
   hunks?: Record<string, string[]>;
+  /**
+   * Individual changed lines this list claimed inside one hunk.
+   *
+   * Keyed by path, holding the line names `lineKeys` produces. The more
+   * specific claim wins over a hunk claim on the same line. Absent on a list
+   * that has never claimed a line, so state written before line-level
+   * ownership existed loads unchanged.
+   */
+  lines?: Record<string, string[]>;
 }
 
 interface RepositoryChangelists {
@@ -87,14 +97,14 @@ function strings(value: unknown): string[] {
   return [...new Set(value.filter((item): item is string => typeof item === "string" && item.length > 0))];
 }
 
-function sanitizeHunks(value: unknown): Record<string, string[]> | undefined {
+function sanitizeClaims(value: unknown): Record<string, string[]> | undefined {
   if (!isRecord(value)) return undefined;
-  const hunks: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
+  const claims: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   for (const [path, keys] of Object.entries(value)) {
     const cleanKeys = strings(keys);
-    if (cleanKeys.length) hunks[path] = cleanKeys;
+    if (cleanKeys.length) claims[path] = cleanKeys;
   }
-  return Object.keys(hunks).length ? hunks : undefined;
+  return Object.keys(claims).length ? claims : undefined;
 }
 
 function sanitizeRepository(value: unknown): RepositoryChangelists | undefined {
@@ -107,8 +117,10 @@ function sanitizeRepository(value: unknown): RepositoryChangelists | undefined {
     const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : "Unnamed Changelist";
     const list: Changelist = { id: raw.id, name, files: strings(raw.files) };
     if (typeof raw.description === "string" && raw.description.trim()) list.description = raw.description.trim();
-    const hunks = sanitizeHunks(raw.hunks);
+    const hunks = sanitizeClaims(raw.hunks);
     if (hunks) list.hunks = hunks;
+    const lines = sanitizeClaims(raw.lines);
+    if (lines) list.lines = lines;
     lists.push(list);
   }
   if (!lists.length) return undefined;
@@ -142,6 +154,9 @@ function cloneState(state: PersistedChangelistState): PersistedChangelistState {
         files: [...list.files],
         ...(list.hunks
           ? { hunks: Object.fromEntries(Object.entries(list.hunks).map(([path, keys]) => [path, [...keys]])) }
+          : {}),
+        ...(list.lines
+          ? { lines: Object.fromEntries(Object.entries(list.lines).map(([path, keys]) => [path, [...keys]])) }
           : {}),
       })),
     };
@@ -229,13 +244,15 @@ export class ChangelistStore implements Disposable {
     const [removed] = repository.lists.splice(index, 1);
     const fallback = repository.lists[0];
     fallback.files.push(...removed.files.filter((file) => !fallback.files.includes(file)));
-    // A claim whose list is gone would leave those hunks belonging to nothing,
-    // so the fallback inherits them the same way it inherits whole files.
-    for (const [filePath, keys] of Object.entries(removed.hunks ?? {})) {
-      if (fallback.files.includes(filePath)) continue;
-      fallback.hunks ??= Object.create(null) as Record<string, string[]>;
-      const existing = fallback.hunks[filePath] ?? [];
-      fallback.hunks[filePath] = [...existing, ...keys.filter((key) => !existing.includes(key))];
+    // A claim whose list is gone would leave those changes belonging to
+    // nothing, so the fallback inherits them the same way it inherits files.
+    for (const field of ["hunks", "lines"] as const) {
+      for (const [filePath, keys] of Object.entries(removed[field] ?? {})) {
+        if (fallback.files.includes(filePath)) continue;
+        fallback[field] ??= Object.create(null) as Record<string, string[]>;
+        const existing = fallback[field]![filePath] ?? [];
+        fallback[field]![filePath] = [...existing, ...keys.filter((key) => !existing.includes(key))];
+      }
     }
     if (repository.activeId === listId) repository.activeId = fallback.id;
     await this.save(repositoryRoot);
@@ -247,9 +264,10 @@ export class ChangelistStore implements Disposable {
     if (!target) throw new Error("Changelist not found");
     for (const list of repository.lists) {
       list.files = list.files.filter((file) => file !== filePath);
-      // Moving the whole file is a decision about all of it, so per-hunk claims
-      // on it stop meaning anything.
-      if (list.hunks?.[filePath]) dropClaims(list, filePath);
+      // Moving the whole file is a decision about all of it, so per-hunk and
+      // per-line claims on it stop meaning anything.
+      dropClaims(list, "hunks", filePath);
+      dropClaims(list, "lines", filePath);
     }
     target.files.push(filePath);
     await this.save(repositoryRoot);
@@ -270,6 +288,16 @@ export class ChangelistStore implements Disposable {
     return claims;
   }
 
+  /** Every list's per-line claims on one file, so a caller can partition its changed lines. */
+  public lineClaims(repositoryRoot: string, filePath: string): Map<string, string[]> {
+    const claims = new Map<string, string[]>();
+    for (const list of this.ensure(repositoryRoot).lists) {
+      const keys = list.lines?.[filePath];
+      if (keys?.length) claims.set(list.id, [...keys]);
+    }
+    return claims;
+  }
+
   /**
    * Which lists claim hunks of each file, as one pass over the lists' own claims.
    *
@@ -283,14 +311,16 @@ export class ChangelistStore implements Disposable {
   public claimedListIdsByPath(repositoryRoot: string): ReadonlyMap<string, ReadonlySet<string>> {
     const byPath = new Map<string, Set<string>>();
     for (const list of this.ensure(repositoryRoot).lists) {
-      for (const [filePath, keys] of Object.entries(list.hunks ?? {})) {
-        if (!keys.length) continue;
-        let ids = byPath.get(filePath);
-        if (!ids) {
-          ids = new Set<string>();
-          byPath.set(filePath, ids);
+      for (const field of ["hunks", "lines"] as const) {
+        for (const [filePath, keys] of Object.entries(list[field] ?? {})) {
+          if (!keys.length) continue;
+          let ids = byPath.get(filePath);
+          if (!ids) {
+            ids = new Set<string>();
+            byPath.set(filePath, ids);
+          }
+          ids.add(list.id);
         }
-        ids.add(list.id);
       }
     }
     return byPath;
@@ -314,13 +344,43 @@ export class ChangelistStore implements Disposable {
       if (!existing) continue;
       const kept = existing.filter((key) => !claimed.has(key));
       if (kept.length === existing.length) continue;
-      if (kept.length === 0) dropClaims(list, filePath);
+      if (kept.length === 0) dropClaims(list, "hunks", filePath);
       else list.hunks![filePath] = kept;
     }
     if (target.id !== this.homeListId(repositoryRoot, filePath)) {
       target.hunks ??= Object.create(null) as Record<string, string[]>;
       const existing = target.hunks[filePath] ?? [];
       target.hunks[filePath] = [...existing, ...keys.filter((key) => !existing.includes(key))];
+    }
+    await this.save(repositoryRoot);
+  }
+
+  /**
+   * Moves individual changed lines of a file into a Changelist.
+   *
+   * The same rule as assignHunks, one level down: claiming lines for the list
+   * that owns the file releases them back to it rather than recording a claim.
+   * A line claim is the more specific decision and wins over any hunk claim on
+   * the same line; moving a whole hunk therefore does not disturb line claims.
+   */
+  public async assignLines(repositoryRoot: string, filePath: string, keys: readonly string[], listId: string): Promise<void> {
+    const repository = this.ensure(repositoryRoot);
+    const target = repository.lists.find((list) => list.id === listId);
+    if (!target) throw new Error("Changelist not found");
+    if (keys.length === 0) return;
+    const claimed = new Set(keys);
+    for (const list of repository.lists) {
+      const existing = list.lines?.[filePath];
+      if (!existing) continue;
+      const kept = existing.filter((key) => !claimed.has(key));
+      if (kept.length === existing.length) continue;
+      if (kept.length === 0) dropClaims(list, "lines", filePath);
+      else list.lines![filePath] = kept;
+    }
+    if (target.id !== this.homeListId(repositoryRoot, filePath)) {
+      target.lines ??= Object.create(null) as Record<string, string[]>;
+      const existing = target.lines[filePath] ?? [];
+      target.lines[filePath] = [...existing, ...keys.filter((key) => !existing.includes(key))];
     }
     await this.save(repositoryRoot);
   }
@@ -350,9 +410,10 @@ export class ChangelistStore implements Disposable {
       // case only drop the old path, or the file ends up in two lists at once.
       const alreadyAssigned = repository.lists.some((list) => list.files.includes(change.path));
       for (const list of repository.lists) {
-        // Per-hunk claims are keyed by path, so they follow the rename too or
-        // they would name a file that no longer exists.
-        if (renameClaims(list, change.originalPath, change.path)) modified = true;
+        // Claims are keyed by path, so they follow the rename too or they
+        // would name a file that no longer exists.
+        if (renameClaims(list, "hunks", change.originalPath, change.path)) modified = true;
+        if (renameClaims(list, "lines", change.originalPath, change.path)) modified = true;
         if (!list.files.includes(change.originalPath)) continue;
         list.files = list.files.filter((file) => file !== change.originalPath);
         if (!alreadyAssigned && !list.files.includes(change.path)) list.files.push(change.path);
@@ -406,7 +467,12 @@ export class ChangelistStore implements Disposable {
     const paths: string[] = [];
     const hunkSelections = new Map<string, HunkSelection>();
     for (const filePath of changedPaths) {
-      const selection = commitSelectionFor(listId, this.homeListId(repositoryRoot, filePath), this.claims(repositoryRoot, filePath));
+      const selection = commitSelectionFor(
+        listId,
+        this.homeListId(repositoryRoot, filePath),
+        this.claims(repositoryRoot, filePath),
+        this.lineClaims(repositoryRoot, filePath),
+      );
       if (selection === "none") continue;
       paths.push(filePath);
       if (selection !== "whole") hunkSelections.set(filePath, selection);
@@ -420,11 +486,12 @@ export class ChangelistStore implements Disposable {
     return changedPaths.filter((filePath) => (claimed.get(filePath)?.size ?? 0) > 0);
   }
 
-  /** Paths that have per-hunk claims, so a caller re-reads only the files whose ownership can change. */
+  /** Paths that have per-hunk or per-line claims, so a caller re-reads only the files whose ownership can change. */
   public claimedPaths(repositoryRoot: string): string[] {
     const paths = new Set<string>();
     for (const list of this.ensure(repositoryRoot).lists) {
       for (const path of Object.keys(list.hunks ?? {})) paths.add(path);
+      for (const path of Object.keys(list.lines ?? {})) paths.add(path);
     }
     return [...paths];
   }
@@ -446,8 +513,30 @@ export class ChangelistStore implements Disposable {
       const kept = reconcileClaims(existing, currentKeys);
       if (kept.length === existing.length) continue;
       modified = true;
-      if (kept.length === 0) dropClaims(list, filePath);
+      if (kept.length === 0) dropClaims(list, "hunks", filePath);
       else list.hunks![filePath] = kept;
+    }
+    if (modified) await this.save(repositoryRoot);
+  }
+
+  /**
+   * Drops per-line claims on changed lines the file no longer has.
+   *
+   * Same lifetime rule as reconcileHunks: a claim survives while the exact
+   * line it names is still there, and goes once the change is gone, so a later
+   * unrelated edit cannot be captured by hashing the same.
+   */
+  public async reconcileLines(repositoryRoot: string, filePath: string, currentKeys: readonly string[]): Promise<void> {
+    const repository = this.ensure(repositoryRoot);
+    let modified = false;
+    for (const list of repository.lists) {
+      const existing = list.lines?.[filePath];
+      if (!existing) continue;
+      const kept = reconcileClaims(existing, currentKeys);
+      if (kept.length === existing.length) continue;
+      modified = true;
+      if (kept.length === 0) dropClaims(list, "lines", filePath);
+      else list.lines![filePath] = kept;
     }
     if (modified) await this.save(repositoryRoot);
   }

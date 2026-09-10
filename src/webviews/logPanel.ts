@@ -21,7 +21,7 @@ import { conflictSideLabels } from "./mergeEditor";
 import { previewAndPush } from "../pushPreview";
 import { checkoutWithLocalChanges } from "../smartCheckout";
 import { rebaseWithLocalChanges } from "../smartRebase";
-import { hunkKeys, partitionHunks } from "../changelists/hunkOwnership";
+import { hunkKeys, lineKeys, partitionLines } from "../changelists/hunkOwnership";
 import { isLogMessage, isToolTab, LogMessage, oldestFirst, ToolTab } from "./logPanelProtocol";
 import { originalMessage } from "./rebaseEditorProtocol";
 import { dropPlan, fixupPlan, rewordPlan, squashPlan } from "../logHistoryEdit";
@@ -47,6 +47,26 @@ interface DisplayTrace extends GitTraceEvent {
 interface PersistedSelectionState {
   version: 1;
   repositories: Record<string, { selected: string[]; known: string[] }>;
+}
+
+/** One changed line's Changelist owner, as the webview labels and moves it. */
+interface OwnedLine {
+  key: string;
+  listId: string;
+  listName: string;
+}
+
+/** A hunk as Changelist ownership sees it, down to its individual changed lines. */
+interface OwnedHunk {
+  header: string;
+  lines: string[];
+  key: string;
+  listId: string;
+  listName: string;
+  /** True when the hunk's changed lines belong to more than one Changelist. */
+  split: boolean;
+  /** Per changed line, in the order they appear in `lines`. */
+  lineOwners: OwnedLine[];
 }
 
 const SELECTION_STORAGE_KEY = "jbGit.toolWindowSelections";
@@ -1193,7 +1213,10 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       await this.view?.webview.postMessage({ type: "hunks", root, requestId, path: change.path, ...hunks, owned });
       return;
     }
-    if (message.type === "moveHunk") {
+    if (message.type === "moveHunk" || message.type === "moveLines") {
+      // Whole-hunk and per-line moves are the same flow; only what is claimed
+      // differs, and both are named by content so a stale selection cannot
+      // move whatever happens to sit at a position.
       const change = changes.find((item) => item.path === message.path);
       if (!change || change.conflicted || change.kind === "untracked" || change.kind === "ignored") return;
       const requestVersion = ++this.hunkRequestVersion;
@@ -1207,10 +1230,19 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           description: list.id === home ? "the file's own Changelist" : undefined,
           id: list.id,
         })),
-        { title: vscode.l10n.t("Move this change of {0} to", change.path), placeHolder: vscode.l10n.t("Select a Changelist") },
+        {
+          title: message.type === "moveHunk"
+            ? vscode.l10n.t("Move this change of {0} to", change.path)
+            : vscode.l10n.t("Move these lines of {0} to", change.path),
+          placeHolder: vscode.l10n.t("Select a Changelist"),
+        },
       );
       if (!picked) return;
-      await this.changelists.assignHunks(root, change.path, [message.key], picked.id);
+      if (message.type === "moveHunk") {
+        await this.changelists.assignHunks(root, change.path, [message.key], picked.id);
+      } else {
+        await this.changelists.assignLines(root, change.path, message.keys, picked.id);
+      }
       const owned = await this.readOwnedHunks(root, change.path);
       const hunks = await this.readHunks(root, change);
       if (requestVersion !== this.hunkRequestVersion || this.selectedRoot !== root) return;
@@ -2144,21 +2176,43 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
    * still belong to another Changelist — so this is its own reading rather than
    * a re-slice of the staged/unstaged split.
    */
-  private async readOwnedHunks(root: string, filePath: string): Promise<Array<{ header: string; lines: string[]; key: string; listId: string; listName: string }>> {
+  private async readOwnedHunks(root: string, filePath: string): Promise<OwnedHunk[]> {
     const { hunks } = await this.manager.diffAgainstHead(root, filePath);
     if (hunks.length === 0) return [];
     const keys = hunkKeys(hunks);
-    // Reading is also when a claim on a hunk that no longer exists is dropped,
-    // which keeps the stored assignments from outliving the changes they name.
+    const lines = lineKeys(hunks);
+    // Reading is also when a claim on a change that no longer exists is
+    // dropped, which keeps the stored assignments from outliving the changes
+    // they name.
     await this.changelists.reconcileHunks(root, filePath, keys);
+    await this.changelists.reconcileLines(root, filePath, lines.flat());
     const home = this.changelists.homeListId(root, filePath);
-    const { byList } = partitionHunks(keys, this.changelists.claims(root, filePath), home);
-    const owner = new Map<number, string>();
-    for (const [listId, indices] of byList) for (const index of indices) owner.set(index, listId);
+    const owners = partitionLines(hunks, this.changelists.claims(root, filePath), this.changelists.lineClaims(root, filePath), home);
     const names = new Map(this.changelists.lists(root).map((list) => [list.id, list.name]));
     return hunks.map((hunk, index) => {
-      const listId = owner.get(index) ?? home;
-      return { header: hunk.header, lines: hunk.lines, key: keys[index], listId, listName: names.get(listId) ?? "" };
+      const perHunk = owners[index];
+      const uniform = perHunk.every((owner) => owner === perHunk[0]);
+      const listId = perHunk[0] ?? home;
+      let changedIndex = 0;
+      const lineOwners = hunk.lines
+        .filter((line) => line.startsWith("+") || line.startsWith("-"))
+        .map(() => {
+          const owner = perHunk[changedIndex] ?? home;
+          const entry = { key: lines[index][changedIndex], listId: owner, listName: names.get(owner) ?? "" };
+          changedIndex += 1;
+          return entry;
+        });
+      return {
+        header: hunk.header,
+        lines: hunk.lines,
+        key: keys[index],
+        // A hunk whose lines belong to different lists has no single owner to
+        // name here; the webview labels those lines instead.
+        listId: uniform ? listId : home,
+        listName: uniform ? names.get(listId) ?? "" : "",
+        split: !uniform,
+        lineOwners,
+      };
     });
   }
 

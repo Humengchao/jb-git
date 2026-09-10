@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { hunkKeys } from "../dist/changelists/hunkOwnership.js";
+import { hunkKeys, lineKeys } from "../dist/changelists/hunkOwnership.js";
 import { patchForHunks } from "../dist/git/patch.js";
 import { discoverRepository } from "../dist/git/repository.js";
 import { GitRunner } from "../dist/git/runner.js";
@@ -170,4 +170,102 @@ test("builds a patch from several hunks in file order", () => {
   assert.match(patch, /^diff --git a\/f b\/f\n--- a\/f\n\+\+\+ b\/f\n/);
   // The file header must appear once, not once per hunk.
   assert.equal(patch.match(/^--- a\/f$/gm).length, 1);
+});
+
+/** Edits two ADJACENT lines, so Git reports them as a single hunk. */
+function editAdjacentSpots(root) {
+  const lines = BASE.split("\n");
+  lines[2] = "FEATURE change";
+  lines[3] = "BUGFIX change";
+  writeFileSync(join(root, "app.txt"), `${lines.join("\n")}\n`);
+}
+
+test("commits one line out of a hunk, and leaves the other edit in the working tree", async () => {
+  const root = createRepository();
+  editAdjacentSpots(root);
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  const { hunks } = await repository.diffAgainstHead("app.txt");
+  assert.equal(hunks.length, 1, "adjacent edits form one hunk");
+  // -line 3, -line 4, +FEATURE change, +BUGFIX change, in that order.
+  const lines = lineKeys(hunks);
+  assert.equal(lines[0].length, 4);
+
+  await repository.commitPaths(["app.txt"], "bugfix line only", {}, new Map([
+    ["app.txt", { mode: "only", keys: [], lineKeys: [lines[0][3]] }],
+  ]));
+
+  // Only the claimed line is committed: the unclaimed removal of "line 3" and
+  // "line 4" stays home, so they survive as context, and the bugfix line is
+  // inserted after them.
+  const expected = BASE.split("\n");
+  expected.splice(4, 0, "BUGFIX change");
+  assert.equal(git(root, "show", "HEAD:app.txt"), `${expected.join("\n")}\n`);
+
+  const onDisk = readFileSync(join(root, "app.txt"), "utf8");
+  assert.match(onDisk, /^FEATURE change$/m);
+  assert.match(onDisk, /^BUGFIX change$/m);
+  const remaining = await repository.diffAgainstHead("app.txt");
+  assert.match(remaining.output, /^\+FEATURE change$/m, "the feature edit is still uncommitted");
+  assert.doesNotMatch(remaining.output, /^\+BUGFIX change$/m, "the committed line is no longer a change");
+});
+
+test("the file's own list commits around a line claimed away", async () => {
+  const root = createRepository();
+  editAdjacentSpots(root);
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const lines = lineKeys((await repository.diffAgainstHead("app.txt")).hunks);
+
+  await repository.commitPaths(["app.txt"], "everything but the bugfix line", {}, new Map([
+    ["app.txt", { mode: "except", keys: [], lineKeys: [lines[0][3]] }],
+  ]));
+
+  const committed = git(root, "show", "HEAD:app.txt");
+  assert.match(committed, /^FEATURE change$/m);
+  assert.doesNotMatch(committed, /BUGFIX change/, "the claimed line must not ride along");
+  assert.doesNotMatch(committed, /^line 3$/m, "an unclaimed removal belongs to the home list");
+  const onDisk = readFileSync(join(root, "app.txt"), "utf8");
+  assert.match(onDisk, /^BUGFIX change$/m, "the claimed line stays on disk for its own list");
+});
+
+test("a hunk claim and a line claim commit together, exactly what was named", async () => {
+  const root = createRepository();
+  const lines = BASE.split("\n");
+  lines[2] = "FEATURE change";
+  lines[3] = "BUGFIX change";
+  lines[26] = "ANOTHER docs change";
+  writeFileSync(join(root, "app.txt"), `${lines.join("\n")}\n`);
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  const { hunks } = await repository.diffAgainstHead("app.txt");
+  assert.equal(hunks.length, 2, "the adjacent edits are one hunk, the far edit another");
+  const keys = hunkKeys(hunks);
+  const lineKeySets = lineKeys(hunks);
+
+  await repository.commitPaths(["app.txt"], "docs hunk plus the bugfix line", {}, new Map([
+    ["app.txt", { mode: "only", keys: [keys[1]], lineKeys: [lineKeySets[0][3]] }],
+  ]));
+
+  const committed = git(root, "show", "HEAD:app.txt");
+  assert.match(committed, /^ANOTHER docs change$/m, "the claimed hunk is in");
+  assert.match(committed, /^BUGFIX change$/m, "the claimed line is in");
+  assert.doesNotMatch(committed, /FEATURE change/, "the unclaimed line stays out");
+  assert.match(committed, /^line 3$/m, "the unclaimed removal stays out too");
+});
+
+test("refuses a line claim the file no longer has rather than committing less", async () => {
+  const root = createRepository();
+  editAdjacentSpots(root);
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+  await assert.rejects(
+    repository.commitPaths(["app.txt"], "stale claim", {}, new Map([
+      ["app.txt", { mode: "only", keys: [], lineKeys: ["ffffffffffffffff:0"] }],
+    ])),
+    /no longer the ones on disk/,
+  );
+  // A refused commit must not have created anything.
+  assert.equal(git(root, "log", "--format=%s", "-1").trim(), "base");
 });

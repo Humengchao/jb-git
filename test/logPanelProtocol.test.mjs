@@ -122,3 +122,14 @@ test("every message the protocol admits reaches exactly one handler group", () =
   assert.deepEqual(missing, [], "every admitted message type needs a handler");
   assert.deepEqual(duplicated, [], "a type handled by two groups would run twice");
 });
+
+test("names the lines being moved by content, not by position", () => {
+  // Like the hunk key, each line key is a content digest; indices would move
+  // whichever lines happen to be there when the message arrives.
+  assert.equal(isLogMessage({ type: "moveLines", path: "a.txt", keys: ["abc:0", "def:1"] }), true);
+  assert.equal(isLogMessage({ type: "moveLines", path: "a.txt", keys: [] }), false);
+  assert.equal(isLogMessage({ type: "moveLines", path: "a.txt" }), false);
+  assert.equal(isLogMessage({ type: "moveLines", path: "a.txt", keys: "abc:0" }), false);
+  assert.equal(isLogMessage({ type: "moveLines", path: "a.txt", keys: ["abc:0", 3] }), false);
+  assert.equal(isLogMessage({ type: "moveLines", path: "a.txt", keys: ["x".repeat(33)] }), false);
+});

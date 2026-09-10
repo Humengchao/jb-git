@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { GitAbortError, GitCommandError, GitRunner, isGitAbort } from "./runner";
 import { parsePorcelainV2, parseUpstreamTrack } from "./status";
 import { parsePorcelainBlame } from "./blame";
-import { hunkKeys, type HunkSelection } from "../changelists/hunkOwnership";
-import { parseUnifiedDiff, patchForHunk, patchForHunks } from "./patch";
+import { hunkKeys, lineKeys, type HunkSelection } from "../changelists/hunkOwnership";
+import { parseUnifiedDiff, patchForHunk, patchForHunks, patchForTransformedHunks, selectHunkLines } from "./patch";
 import { buildRebaseTodo, posixPath, shellQuote, validateRebasePlan, type InteractiveRebaseExpectation, type RebaseStep } from "../interactiveRebase";
 import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
 import { appendIgnoreLine } from "../ignoreRules";
@@ -1539,6 +1539,58 @@ export class GitRepository {
     return chosen;
   }
 
+  /**
+   * The patch one selection of one file commits, or undefined when it selects
+   * nothing.
+   *
+   * A selection without line keys filters whole hunks, as it always has. Once
+   * individual lines participate, the selection is resolved to per-hunk sets
+   * of changed-line indices — a hunk claim means every changed line of that
+   * hunk — and the hunks are rebuilt around just those lines. "only" refuses a
+   * key the file no longer has, hunk or line; "except" complements, so a stale
+   * claim there simply excludes nothing.
+   */
+  private static selectPatch(
+    output: string,
+    hunks: readonly GitDiffHunk[],
+    selection: HunkSelection,
+    pathSpec: string,
+  ): string | undefined {
+    const keys = hunkKeys(hunks);
+    if (!selection.lineKeys?.length) {
+      const chosen = GitRepository.selectHunks(selection, hunks, keys, pathSpec);
+      return chosen.length === 0 ? undefined : patchForHunks(output, chosen);
+    }
+    const lines = lineKeys(hunks);
+    const selected: Array<Set<number>> = hunks.map(() => new Set<number>());
+    if (selection.mode === "only") {
+      const missingHunks = new Set(selection.keys);
+      const missingLines = new Set(selection.lineKeys);
+      keys.forEach((key, hunkIndex) => {
+        if (missingHunks.delete(key)) lines[hunkIndex].forEach((_line, lineIndex) => selected[hunkIndex].add(lineIndex));
+      });
+      lines.forEach((perHunk, hunkIndex) => {
+        perHunk.forEach((key, lineIndex) => {
+          if (missingLines.delete(key)) selected[hunkIndex].add(lineIndex);
+        });
+      });
+      if (missingHunks.size > 0 || missingLines.size > 0) {
+        throw new Error(`The changes selected in '${pathSpec}' are no longer the ones on disk. Refresh Local Changes and commit again.`);
+      }
+    } else {
+      const excludedHunks = new Set(selection.keys);
+      const excludedLines = new Set(selection.lineKeys);
+      keys.forEach((key, hunkIndex) => {
+        if (excludedHunks.has(key)) return;
+        lines[hunkIndex].forEach((lineKey, lineIndex) => {
+          if (!excludedLines.has(lineKey)) selected[hunkIndex].add(lineIndex);
+        });
+      });
+    }
+    const chosen = selectHunkLines(hunks, selected);
+    return chosen.length === 0 ? undefined : patchForTransformedHunks(output, chosen);
+  }
+
   public async commitPaths(
     paths: readonly string[],
     message: string,
@@ -1587,16 +1639,16 @@ export class GitRepository {
           if (hunks.length === 0) {
             throw new Error(`'${pathSpec}' no longer differs from HEAD, so there is nothing of it to commit.`);
           }
-          const chosen = GitRepository.selectHunks(selection, hunks, hunkKeys(hunks), pathSpec);
-          if (chosen.length === 0) continue;
+          const patch = GitRepository.selectPatch(output, hunks, selection, pathSpec);
+          if (patch === undefined) continue;
           // The patch was taken against HEAD and the temporary index was seeded
           // from HEAD, so it applies to exactly the side it was measured from.
           // --cached leaves the working tree alone, which is what keeps the
-          // hunks the other Changelists own where they are.
+          // changes the other Changelists own where they are.
           await this.runner.run(["apply", "--cached", "--whitespace=nowarn", "-"], {
             cwd: this.info.rootPath,
             env: environment,
-            input: patchForHunks(output, chosen),
+            input: patch,
           });
         }
         const args = ["commit", "--file=-", ...commitOptionArguments(options)];

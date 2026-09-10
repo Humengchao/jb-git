@@ -218,6 +218,11 @@ export const logStyles = String.raw`
      header is what gives way when the row is narrow. */
   .hunk-owner { flex: 0 0 auto; max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border-radius: 9px; font-size: 11px;
     color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); }
+  /* Per-line ownership inside a hunk split between Changelists: a quiet badge,
+     since the changed line itself is what the eye should keep. */
+  .line-owner { padding: 0 4px; margin: 0 4px 0 2px; border-radius: 8px; font-size: 10px;
+    color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); user-select: none; }
+  .line-check { margin: 0 4px 0 0; vertical-align: -1px; }
   .hunk-preview { max-height: 220px; margin: 0; padding: 5px 8px 8px; overflow: auto; font: 11px/1.35 var(--vscode-editor-font-family); }
   .hunk-add { color: var(--vscode-gitDecoration-addedResourceForeground); }
   .hunk-delete { color: var(--vscode-gitDecoration-deletedResourceForeground); }

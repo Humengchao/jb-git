@@ -186,6 +186,8 @@ export const logScript = String.raw`
     'Author': '作者', 'Parents': '父提交',
     'Show Diff': '显示差异', 'Compare with Local': '与本地比较', 'Copy Path': '复制路径',
     'Changelist': '变更列表', 'Move…': '移动…', 'some changes': '部分更改',
+    'split': '已拆分', 'Move Lines…': '移动所选行…', 'Select this line': '选择此行',
+    'Move the selected lines to another Changelist': '把选中的行移到其他变更列表',
     'Incoming commits: fetched but not merged': '传入提交：已抓取但未合并',
     'Searching all history': '正在搜索全部历史',
     'Filter loaded commits · Enter searches all history': '筛选已加载的提交 · 回车搜索全部历史',
@@ -859,14 +861,43 @@ export const logScript = String.raw`
       }, 'small-button');
       header.append(
         node('code', '', entry.header),
-        node('span', 'hunk-owner', entry.listName),
+        // A hunk split between lists at line level has no single owner to
+        // name; its changed lines carry their own labels below.
+        node('span', 'hunk-owner', entry.split ? t('split') : entry.listName),
         node('span', 'spacer'),
         move,
       );
+      const boxes = [];
+      const moveLines = button(t('Move Lines…'), t('Move the selected lines to another Changelist'), () => {
+        const keys = boxes.filter(box => box.checked).map(box => box.dataset.lineKey);
+        if (!keys.length) return;
+        moveLines.disabled = true;
+        const requestId = nextRequestId(); hunkRequestIds.set(hunkKey, requestId);
+        post('moveLines', { path: change.path, keys, requestId });
+      }, 'small-button');
+      moveLines.disabled = true;
+      header.append(moveLines);
       const preview = node('pre', 'hunk-preview');
+      // lineOwners lines up with the hunk's changed lines in order; context
+      // lines take no checkbox and no label.
+      const owners = entry.lineOwners || [];
+      let changedIndex = 0;
       const lines = (entry.lines || []).slice(0, 40);
       for (const line of lines) {
-        preview.append(node('span', line.startsWith('+') ? 'hunk-add' : line.startsWith('-') ? 'hunk-delete' : 'hunk-context', line), document.createTextNode('\n'));
+        const row = node('span', line.startsWith('+') ? 'hunk-add' : line.startsWith('-') ? 'hunk-delete' : 'hunk-context');
+        if (line.startsWith('+') || line.startsWith('-')) {
+          const owner = owners[changedIndex];
+          changedIndex += 1;
+          if (owner) {
+            const box = node('input', 'line-check'); box.type = 'checkbox'; box.title = t('Select this line'); box.dataset.lineKey = owner.key;
+            box.addEventListener('change', () => { moveLines.disabled = !boxes.some(item => item.checked); });
+            boxes.push(box);
+            row.append(box);
+            if (entry.split) row.append(node('span', 'line-owner', owner.listName));
+          }
+        }
+        row.append(document.createTextNode(line));
+        preview.append(row, document.createTextNode('\n'));
       }
       if ((entry.lines || []).length > lines.length) preview.append(node('span', 'hunk-context', '…'));
       block.append(header, preview);

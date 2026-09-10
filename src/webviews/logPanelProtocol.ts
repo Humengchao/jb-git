@@ -28,6 +28,9 @@ type LogMessagePayload =
   | { type: "createLocalPatch" }
   | { type: "toggleFavoriteBranch"; name: string; kind: GitBranch["kind"] }
   | { type: "moveHunk"; path: string; key: string }
+  // One level below moveHunk: individual changed lines of one hunk, named by
+  // the same content digest the hunk key uses.
+  | { type: "moveLines"; path: string; keys: string[] }
   | { type: "commit"; message: string; mode: "staged" | "files"; amend?: boolean; signoff?: boolean; noVerify?: boolean; push?: boolean; author?: string }
   | { type: "editChangelist" | "deleteChangelist" | "setActiveChangelist" | "applyShelf" | "deleteShelf" | "renameShelf" | "showShelfDiff"; id: string }
   // IDEA's Unshelve keeps the changes and drops the entry; Unshelve and Keep
@@ -74,6 +77,12 @@ export function isLogMessage(value: unknown): value is LogMessage {
   // A hunk is named by content, so the key is the only thing that identifies
   // which change is being moved; an index would move whatever is there now.
   if (value.type === "moveHunk") return typeof value.path === "string" && typeof value.key === "string";
+  // Line claims are named by the same content digest; the set is bounded
+  // because it lands in persisted Changelist state.
+  if (value.type === "moveLines") return typeof value.path === "string"
+    && Array.isArray(value.keys)
+    && value.keys.length >= 1 && value.keys.length <= 1_000
+    && value.keys.every((key) => typeof key === "string" && key.length <= 32);
   // A whole-history search: bounded and single-line, because it lands in a
   // command argument.
   if (value.type === "deepSearch") {
