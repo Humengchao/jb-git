@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { commitOptionArguments, discoverRepositories, discoverRepository, GitBatchError, logPathspec, mergeArguments } from "../dist/git/repository.js";
+import { commitOptionArguments, discoverRepositories, discoverRepository, GitBatchError, logPathspec, mergeArguments, parseFollowedPathLog } from "../dist/git/repository.js";
 import { GitCommandError, GitRunner, isGitAbort } from "../dist/git/runner.js";
 import { dropPlan } from "../dist/logHistoryEdit.js";
 import { originalMessage } from "../dist/webviews/rebaseEditorProtocol.js";
@@ -1519,4 +1519,52 @@ test("Hide Revision blames a commit's lines on the change before it", async () =
   // Only object ids reach Git; anything else would be parsed as a revision or an option.
   const guarded = await repository.blame("a.txt", undefined, undefined, { ignoreRevisions: ["--reverse", "HEAD~1"] });
   assert.equal(guarded.find((entry) => entry.finalLine === 2).hash, punctuate);
+});
+
+test("parses the followed-path log, including rename pairs and empty walks", () => {
+  const a = "a".repeat(40);
+  const b = "b".repeat(40);
+  const c = "c".repeat(40);
+  // The real record shape: the format's newline attaches to the first
+  // name-status token of each commit, and a merge's stands alone.
+  const output = [a, "\nM", "new.txt", b, "\nR100", "old.txt", "new.txt", c, "\nA", "old.txt", ""].join("\0");
+  const map = parseFollowedPathLog(output);
+  assert.deepEqual(map.get(a), { status: "M", path: "new.txt" });
+  assert.deepEqual(map.get(b), { status: "R100", path: "new.txt", originalPath: "old.txt" });
+  assert.deepEqual(map.get(c), { status: "A", path: "old.txt" });
+  assert.equal(parseFollowedPathLog("").size, 0);
+  // A merge commit carries no name-status lines, so it names nothing.
+  const withMerge = [a, "\n", b, "\nM", "f.txt", ""].join("\0");
+  const mergeMap = parseFollowedPathLog(withMerge);
+  assert.equal(mergeMap.has(a), false);
+  assert.deepEqual(mergeMap.get(b), { status: "M", path: "f.txt" });
+});
+
+test("names the followed file the way each commit named it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "jb-git-followed-"));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "JB Git Test");
+  git(root, "config", "user.email", "jb-git-test@example.invalid");
+  writeFileSync(join(root, "old name.txt"), "one\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "add old name");
+  git(root, "mv", "old name.txt", "new name.txt");
+  git(root, "commit", "-qm", "rename it");
+  writeFileSync(join(root, "new name.txt"), "one\ntwo\n");
+  writeFileSync(join(root, "unrelated.txt"), "else\n");
+  git(root, "add", ".");
+  git(root, "commit", "-qm", "edit after rename");
+  const repository = await discoverRepository(root, new GitRunner());
+  assert.ok(repository);
+
+  const map = await repository.followedFilePaths(["HEAD"], 100, "new name.txt");
+  assert.equal(map.size, 3, "only the commits that touched the followed file");
+  const bySubject = new Map([...map].map(([hash, file]) => [git(root, "log", "-1", "--format=%s", hash), file]));
+  assert.deepEqual(bySubject.get("edit after rename"), { status: "M", path: "new name.txt" });
+  assert.deepEqual(bySubject.get("rename it"), { status: "R100", path: "new name.txt", originalPath: "old name.txt" });
+  assert.deepEqual(bySubject.get("add old name"), { status: "A", path: "old name.txt" },
+    "a commit before the rename uses the name the file had then");
+
+  const untouched = await repository.followedFilePaths(["HEAD"], 100, "never existed.txt");
+  assert.equal(untouched.size, 0);
 });

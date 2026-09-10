@@ -551,3 +551,18 @@ test("routes user-visible strings through the translator with no duplicate keys"
     seen.add(key);
   }
 });
+
+test("restricts the File History details pane to the walked file, by the name each commit gave it", () => {
+  // Both selection paths apply it: the update()-driven read and selectCommit.
+  const occurrences = source.match(/restrictFilesToFileHistory\(root, commit\.hash, files, controller\.signal\)/g) ?? [];
+  assert.equal(occurrences.length, 2, "the update read and selectCommit must both restrict");
+  // Old names come from Git's own --follow walk, not from a guess at today's
+  // path, and the walk mirrors the main walk's revision set and window.
+  assert.match(source, /this\.manager\.followedFilePaths\(root, revisions, this\.logLimit, this\.filePath/);
+  assert.match(source, /this\.logCache\?\.fingerprint/);
+  // A commit the map does not name (a merge, or beyond the window) and an
+  // empty answer both keep the whole list rather than hiding it.
+  assert.match(source, /return restricted\.length > 0 \? restricted : files;/);
+  assert.match(source, /return simple\.length > 0 \? simple : files;/);
+  assert.match(source, /if \(!this\.filePath \|\| !this\.filePathExact\) return files;/);
+});

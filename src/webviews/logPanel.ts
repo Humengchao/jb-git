@@ -122,6 +122,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
   private updateTimer?: NodeJS.Timeout;
   private logCache?: { root: string; fingerprint: string; limit: number; commits: GitCommit[]; exhausted: boolean };
   private selectionCache?: { key: string; files: LogSelection["files"] };
+  /** The followed file's name at each commit, per root/refs-fingerprint/ref/path/window of the File History walk. */
+  private followedPathsCache?: { key: string; map: Map<string, GitCommitFile> };
   private lastSentBranchesKey?: string;
   private lastSentTracesKey?: string;
   private lastSentLogDataKey?: string;
@@ -332,6 +334,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
     this.hunkRequestVersion += 1;
     this.headMessageRequestVersion += 1;
     this.selectionCache = undefined;
+    this.followedPathsCache = undefined;
     this.logRequestController?.abort();
     this.selectionController?.abort();
     // update() checks this generation after every Git await.
@@ -545,6 +548,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             let message: string;
             try {
               ({ files, message } = await this.readCommitSelection(root, commit.hash, controller.signal));
+              files = await this.restrictFilesToFileHistory(root, commit.hash, files, controller.signal);
             } finally {
               if (this.selectionController === controller) this.selectionController = undefined;
             }
@@ -1125,6 +1129,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       let messageText: string;
       try {
         ({ files, message: messageText } = await this.readCommitSelection(root, commit.hash, controller.signal));
+        files = await this.restrictFilesToFileHistory(root, commit.hash, files, controller.signal);
       } finally {
         if (this.selectionController === controller) this.selectionController = undefined;
       }
@@ -2166,6 +2171,60 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       return { files: filesResult.value, message: "" };
     }
     return { files: filesResult.value, message: messageResult.value };
+  }
+
+  /**
+   * The followed file's name at each commit, walked once per
+   * root/fingerprint/ref/path/window rather than per selected commit.
+   *
+   * The revision set mirrors the main walk: a selected ref replaces it, and a
+   * line range walks HEAD alone, the same way `logPage` does. Filter options
+   * only shrink what the view shows, so the unfiltered map is always a
+   * superset of the commits it can select.
+   */
+  private async followedPathMap(root: string, signal?: AbortSignal): Promise<Map<string, GitCommitFile>> {
+    const fingerprint = this.logCache?.fingerprint ?? "";
+    const key = [root, fingerprint, this.selectedRef ?? "", this.filePath ?? "", this.logLimit].join("\0");
+    if (this.followedPathsCache?.key === key) return this.followedPathsCache.map;
+    const head = this.manager.snapshot(root)?.status?.branch.oid;
+    const revisions = this.selectedRef
+      ? [this.selectedRef]
+      : this.lineRange || !head
+        ? [head ?? "HEAD"]
+        : ["--branches", "--remotes", "--tags", head];
+    try {
+      const map = await this.manager.followedFilePaths(root, revisions, this.logLimit, this.filePath ?? "", signal);
+      this.followedPathsCache = { key, map };
+      return map;
+    } catch (error) {
+      if (isGitAbort(error)) throw error;
+      // A failed map must not take the details pane down with it: the caller
+      // falls back to matching the name the file has today.
+      this.followedPathsCache = { key, map: new Map() };
+      return this.followedPathsCache.map;
+    }
+  }
+
+  /**
+   * IDEA's per-revision file list in File History: only the walked file, named
+   * the way the commit named it.
+   *
+   * A file followed through a rename is called by its old name in older
+   * commits, so matching on today's name would wrongly drop it and matching on
+   * a static name set could wrongly keep an unrelated file. The followed walk
+   * answers exactly, per commit. A commit the map does not name (a merge, or
+   * one paged past the map's window) falls back to today's name, and a match
+   * that comes back empty keeps the whole list rather than hiding it.
+   */
+  private async restrictFilesToFileHistory(root: string, hash: string, files: GitCommitFile[], signal?: AbortSignal): Promise<GitCommitFile[]> {
+    if (!this.filePath || !this.filePathExact) return files;
+    const followed = (await this.followedPathMap(root, signal)).get(hash);
+    if (!followed) {
+      const simple = files.filter((file) => file.path === this.filePath || file.originalPath === this.filePath);
+      return simple.length > 0 ? simple : files;
+    }
+    const restricted = files.filter((file) => file.path === followed.path || (file.originalPath !== undefined && file.originalPath === followed.path));
+    return restricted.length > 0 ? restricted : files;
   }
 
   /**

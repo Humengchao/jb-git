@@ -74,6 +74,48 @@ function parseNameStatus(output: string): GitCommitFile[] {
 }
 
 /**
+ * Parses `git log --follow --name-status -z --format=%H` into the name the
+ * followed file had at each commit.
+ *
+ * The record shape, with `-z` turning the commit header's terminator into NUL
+ * and the format's own newline attaching to the first name-status token:
+ * `<hash>\0` then `\n<status>\0 <path>\0 [<originalPath>\0]` per commit. A
+ * merge contributes no name-status lines (its `\n` stands alone), and a
+ * commit that did not touch the file is absent altogether, so both are simply
+ * missing from the map.
+ */
+export function parseFollowedPathLog(output: string): Map<string, GitCommitFile> {
+  const byCommit = new Map<string, GitCommitFile>();
+  const fields = output.split("\0");
+  let hash: string | undefined;
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    if (!field || field === "\n") continue;
+    if (/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(field) && fields[index + 1]?.startsWith("\n")) {
+      hash = field;
+      continue;
+    }
+    if (!hash) continue;
+    const status = field.startsWith("\n") ? field.slice(1) : field;
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const originalPath = fields[index + 1];
+      const filePath = fields[index + 2];
+      if (originalPath && filePath) {
+        byCommit.set(hash, { status, path: filePath, originalPath });
+        index += 2;
+      }
+      continue;
+    }
+    const filePath = fields[index + 1];
+    if (filePath) {
+      byCommit.set(hash, { status, path: filePath });
+      index += 1;
+    }
+  }
+  return byCommit;
+}
+
+/**
  * With a custom pretty format, `--log-size` reports that formatted record's
  * exact byte length. Unlike a sentinel byte, this framing cannot be forged by
  * a legal commit message.
@@ -341,6 +383,29 @@ export class GitRepository {
       );
       return parseNameStatus(output);
     }
+  }
+
+  /**
+   * The name a file followed through renames had at each commit, as
+   * `git log --follow` walks it.
+   *
+   * File History restricts a commit's file list to the walked file, and this
+   * is what tells old names from unrelated files that happen to share one.
+   * `revisions` mirrors the walk the Log itself ran, so the map never names a
+   * commit the view cannot show; it may miss a merge (name-status is empty for
+   * one) or a commit beyond `limit`, and the caller falls back for those.
+   */
+  public async followedFilePaths(
+    revisions: readonly string[],
+    limit: number,
+    pathSpec: string,
+    signal?: AbortSignal,
+  ): Promise<Map<string, GitCommitFile>> {
+    const output = await this.runner.text(
+      ["log", "--follow", "--name-status", "-z", "--format=%H", "-n", String(limit), ...revisions, "--", literalPathspec(pathSpec)],
+      { cwd: this.info.rootPath, signal },
+    );
+    return parseFollowedPathLog(output);
   }
 
   /**
