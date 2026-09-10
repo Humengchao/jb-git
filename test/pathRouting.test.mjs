@@ -18,11 +18,18 @@ test("accepts in-repository names beginning with two dots", () => {
   assert.equal(isPathInside(root, join(root, "..", "outside", "file.ts")), false);
 });
 
-test("canonicalizes paths below symlinked and deleted descendants", async () => {
+test("canonicalizes paths below symlinked and deleted descendants", async (context) => {
   const root = mkdtempSync(join(tmpdir(), "jb-git-routing-"));
   const real = join(root, "real");
   mkdirSync(real);
-  symlinkSync(real, join(root, "alias"));
+  try {
+    symlinkSync(real, join(root, "alias"));
+  } catch {
+    // Windows grants SeCreateSymbolicLinkPrivilege only to elevated processes
+    // or with Developer Mode on; the CI runner qualifies, a stock shell does not.
+    context.skip("creating symlinks is not permitted on this host");
+    return;
+  }
   // realpathSync.native matches fsPromises.realpath (used by canonicalPath):
   // on Windows both expand 8.3 short names like RUNNER~1, the JS
   // implementation behind plain realpathSync does not.

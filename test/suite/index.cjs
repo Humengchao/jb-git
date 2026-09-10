@@ -42,7 +42,9 @@ async function run() {
   assert.equal(isProtectedBranch("release/2026.2", ["main", "release/*"]), true);
   assert.equal(isProtectedBranch("feature/release-notes", ["main", "release/*"]), false);
   const { safeWorktreeUri } = require(path.join(extension.extensionPath, "dist", "discardSafety.js"));
-  assert.equal(safeWorktreeUri(parent, "src/..foo").fsPath, path.join(parent, "src", "..foo"));
+  // Uri.file lowercases a Windows drive letter in fsPath, so the expectation
+  // goes through the same normalization instead of comparing against path.join.
+  assert.equal(safeWorktreeUri(parent, "src/..foo").fsPath, vscode.Uri.file(path.join(parent, "src", "..foo")).fsPath);
   assert.throws(() => safeWorktreeUri(parent, "../outside"), /outside the repository/);
   const tracker = new RefreshGenerationTracker();
   tracker.addRoot("repository-a");
