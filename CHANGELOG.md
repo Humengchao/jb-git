@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.36
+
+- feat: restrict the File History details pane to the walked file, by its name at each commit
+- fix: show 24-hour times in the Git tool window
+- feat: exec and break rows in the interactive rebase sequence editor
+
 ## 0.1.35
 
 - feat: let two edits in one hunk belong to different Changelists
