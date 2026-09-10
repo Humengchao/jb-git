@@ -604,3 +604,27 @@ test("paints fresh graph canvases in frame-sized batches instead of one long fra
   assert.match(scriptMatch[1], /if \(drawGraphs\(60\)\) graphDrawFrame = requestAnimationFrame\(step\);/);
   assert.doesNotMatch(scriptMatch[1], /requestAnimationFrame\(drawGraphs\)/);
 });
+
+test("reuses the commit pane while everything it shows is unchanged", () => {
+  // The pane costs the rows: a rebuild per state message, even a status-only
+  // one. It is rebuilt only when the commits (by identity), filters, graph
+  // folds, selection or an inline reword moved.
+  assert.match(scriptMatch[1], /let commitPaneMemo;/);
+  assert.match(scriptMatch[1], /function commitPaneCached\(\)/);
+  assert.match(scriptMatch[1], /commitPaneMemo\.commits === state\.commits/);
+  assert.match(scriptMatch[1], /state\.selection\?\.commit\?\.hash/);
+  assert.match(scriptMatch[1], /workspace\.append\(branchPaneCached\(\), columnSplitter\('branch'\), commitPaneCached\(\)/);
+});
+
+test("a worktree save refreshes the status without re-reading the branch list", () => {
+  const extension = readSource("../src/extension.ts", import.meta.url);
+  // for-each-ref is the expensive half of a refresh on a branch-heavy
+  // repository, and a plain file save can never move a ref.
+  assert.match(extension, /scheduleRefreshRoot\(snapshot\.repository\.info\.rootPath, false\)/);
+  assert.match(extension, /if \(!isWorktreeWatchPathIgnored\(root, candidate\)\) scheduleRefreshRoot\(root, false\)/);
+  // Metadata events (.git writes: refs, HEAD, index, operation markers) still
+  // get the full read, and a queued status-only request cannot downgrade it.
+  assert.match(extension, /refsStale: Boolean\(this\.roots\.get\(rootPath\)\?\.refsStale\) \|\| refsStale/);
+  const manager = readSource("../src/repositoryManager.ts", import.meta.url);
+  assert.match(manager, /reuseBranches \? Promise\.resolve\(previous\.branches\) : repository\.branches\(\)/);
+});

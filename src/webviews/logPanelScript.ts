@@ -555,7 +555,7 @@ export const logScript = String.raw`
     root.append(toolbar());
     const workspace = node('div', 'workspace'); workspace.id = 'log-workspace';
     if (state.empty) workspace.append(node('div', 'empty', 'Open a folder containing a Git repository.'));
-    else workspace.append(branchPaneCached(), columnSplitter('branch'), commitPane(), columnSplitter('details'), detailsPane());
+    else workspace.append(branchPaneCached(), columnSplitter('branch'), commitPaneCached(), columnSplitter('details'), detailsPane());
     root.append(workspace); finishRender(root, saved, true);
     if (!state.empty) requestAnimationFrame(() => setupWorkspaceColumns(workspace));
   }
@@ -1503,6 +1503,33 @@ export const logScript = String.raw`
       virtualRenderFrame = requestAnimationFrame(() => { virtualRenderFrame = undefined; renderCommitWindow(list); });
     });
     scroll.append(head, list); pane.append(scroll); renderCommitRows(list); return pane;
+  }
+
+  /**
+   * The commit pane costs the rows themselves: a few hundred rows with a
+   * canvas each, rebuilt on every state message, even a status-only one. It
+   * is rebuilt only when something it shows moved — the commits by identity,
+   * the filters, the graph folds, the selection — so a background refresh
+   * that changes no commit keeps the rows, their scroll and the search box's
+   * focus.
+   */
+  let commitPaneMemo;
+  function commitPaneCached() {
+    const key = [
+      state.logSearch || '', String(state.logLimit || ''), String(Boolean(state.hasMoreCommits)),
+      search, authorFilter, dateFilter,
+      JSON.stringify(state.logOptions || {}),
+      state.selectedRef || '', state.filePath || '', state.lineRange ? state.lineRange.start + '-' + state.lineRange.end : '',
+      state.selection?.commit?.hash || '',
+      [...collapsedGraphSeries].sort().join('\n'),
+      [...multiSelectedHashes].sort().join('\n'),
+    ].join('\0');
+    if (commitPaneMemo && commitPaneMemo.key === key && commitPaneMemo.commits === state.commits) {
+      return commitPaneMemo.element;
+    }
+    const element = commitPane();
+    commitPaneMemo = { key, commits: state.commits, element };
+    return element;
   }
 
   function filterButton(label, value, title, active, items) {

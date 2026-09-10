@@ -40,6 +40,8 @@ export interface BlameLineArgument {
 
 export interface RefreshGenerationBatch {
   readonly roots: ReadonlyMap<string, number>;
+  /** Roots whose refs may have moved since the last full read, which alone justifies re-reading the branch list. */
+  readonly refsStale: ReadonlySet<string>;
   readonly discoveryGeneration?: number;
 }
 
@@ -48,12 +50,14 @@ export interface RefreshGenerationBatch {
  * refresh to erase work that arrived later (or belongs to another root).
  */
 export class RefreshGenerationTracker {
-  private readonly roots = new Map<string, number>();
+  private readonly roots = new Map<string, { generation: number; refsStale: boolean }>();
   private generation = 0;
   private discoveryGeneration?: number;
 
-  public addRoot(rootPath: string): void {
-    this.roots.set(rootPath, ++this.generation);
+  public addRoot(rootPath: string, refsStale = true): void {
+    // A queued status-only request must not downgrade a queued refs-aware one:
+    // a commit's metadata event and a plain save can race for the same root.
+    this.roots.set(rootPath, { generation: ++this.generation, refsStale: Boolean(this.roots.get(rootPath)?.refsStale) || refsStale });
   }
 
   public addDiscovery(): void {
@@ -62,14 +66,15 @@ export class RefreshGenerationTracker {
 
   public capture(): RefreshGenerationBatch {
     return {
-      roots: new Map(this.roots),
+      roots: new Map([...this.roots].map(([rootPath, value]) => [rootPath, value.generation])),
+      refsStale: new Set([...this.roots].filter(([, value]) => value.refsStale).map(([rootPath]) => rootPath)),
       discoveryGeneration: this.discoveryGeneration,
     };
   }
 
   public complete(batch: RefreshGenerationBatch): void {
     for (const [root, generation] of batch.roots) {
-      if (this.roots.get(root) === generation) this.roots.delete(root);
+      if (this.roots.get(root)?.generation === generation) this.roots.delete(root);
     }
     if (batch.discoveryGeneration !== undefined && this.discoveryGeneration === batch.discoveryGeneration) {
       this.discoveryGeneration = undefined;
@@ -269,7 +274,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const roots = [...batch.roots.keys()];
       const operation = batch.discoveryGeneration !== undefined
         ? manager.discoverAndRefresh()
-        : Promise.all(roots.map((root) => manager.refresh(root))).then(() => undefined);
+        : Promise.all(roots.map((root) => manager.refresh(root, { refsStale: batch.refsStale.has(root) }))).then(() => undefined);
       void operation
         .then(updateStatusBar, (error) => vscode.window.showErrorMessage(formatGitError(error)))
         .finally(() => {
@@ -281,9 +286,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         });
     }, Math.max(0, Math.min(delay, refreshDeadline - Date.now())));
   };
-  const scheduleRefreshRoot = (rootPath: string): void => {
+  const scheduleRefreshRoot = (rootPath: string, refsStale = true): void => {
     if (!autoRefreshEnabled()) return;
-    pendingRefreshes.addRoot(rootPath);
+    pendingRefreshes.addRoot(rootPath, refsStale);
     scheduleRefresh();
   };
   /**
@@ -303,7 +308,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (watchRoot && (watchRootFiltered || !isWorktreeWatchPathIgnored(watchRoot, lexical))) {
       const snapshot = deepestContaining(manager.all, lexical, (item) => item.repository.info.rootPath);
       if (snapshot && !snapshot.repository.info.isBare) {
-        scheduleRefreshRoot(snapshot.repository.info.rootPath);
+        // A worktree file event cannot move a ref, so the branch list survives
+        // this refresh; the metadata watcher covers .git writes separately.
+        scheduleRefreshRoot(snapshot.repository.info.rootPath, false);
         return;
       }
     }
@@ -311,7 +318,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const snapshot = deepestContaining(manager.all, candidate, (item) => item.repository.info.rootPath);
       if (!snapshot || snapshot.repository.info.isBare) return;
       const root = snapshot.repository.info.rootPath;
-      if (!isWorktreeWatchPathIgnored(root, candidate)) scheduleRefreshRoot(root);
+      if (!isWorktreeWatchPathIgnored(root, candidate)) scheduleRefreshRoot(root, false);
     });
   };
   const scheduleDiscovery = (): void => {

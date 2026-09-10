@@ -58,6 +58,13 @@ async function run() {
   staleA.addRoot("repository-a");
   staleA.complete(firstA);
   assert.deepEqual([...staleA.capture().roots.keys()], ["repository-a"], "a newer generation for the same root must remain pending");
+  const flags = new RefreshGenerationTracker();
+  flags.addRoot("repository-a", false);
+  assert.deepEqual([...flags.capture().refsStale], [], "a worktree save does not mark the refs stale");
+  flags.addRoot("repository-a", true);
+  assert.deepEqual([...flags.capture().refsStale], ["repository-a"], "a metadata event marks the refs stale");
+  flags.addRoot("repository-a", false);
+  assert.deepEqual([...flags.capture().refsStale], ["repository-a"], "a queued status-only request must not downgrade a queued refs-aware one");
   assert.equal(isWorktreeWatchPathIgnored(parent, path.join(parent, ".git", "index")), true);
   assert.equal(isWorktreeWatchPathIgnored(parent, path.join(parent, "node_modules", "dependency", "index.js")), true);
   assert.equal(isWorktreeWatchPathIgnored(parent, path.join(parent, "src", "index.js")), false);
@@ -73,6 +80,16 @@ async function run() {
     assert.equal(manager.repository(), repositoryBeforeRescan, "rediscovery must preserve repository identity and its mutation lock");
     assert.equal(await manager.initializeRepository(child), false, "initialization inside a parent repository should be a no-op");
     await assert.rejects(access(path.join(child, ".git")), "a nested .git directory must not be created");
+
+    const parentRoot = repositoryBeforeRescan.info.rootPath;
+    await manager.refresh(parentRoot);
+    const full = manager.snapshot(parentRoot);
+    await manager.refresh(parentRoot, { refsStale: false });
+    assert.equal(manager.snapshot(parentRoot).branches, full.branches,
+      "a worktree-only refresh reuses the branch list instead of re-running for-each-ref");
+    await manager.refresh(parentRoot, { refsStale: true });
+    assert.notEqual(manager.snapshot(parentRoot).branches, full.branches,
+      "a refs-stale refresh re-reads the branch list");
   } finally {
     manager.dispose();
   }

@@ -89,13 +89,13 @@ export class RepositoryManager implements vscode.Disposable {
     });
   }
 
-  public async refresh(rootPath?: string): Promise<void> {
+  public async refresh(rootPath?: string, options?: { refsStale?: boolean }): Promise<void> {
     await this.enqueueRefresh(async () => {
       const previous = this.snapshotKeys();
       const targets = rootPath ? this.repositories.filter((repo) => repo.info.rootPath === rootPath) : this.repositories;
       await Promise.all(
         targets.map(async (repository) => {
-          this.snapshots.set(repository.info.rootPath, await this.readSnapshot(repository));
+          this.snapshots.set(repository.info.rootPath, await this.readSnapshot(repository, options?.refsStale ?? true));
         }),
       );
       await this.updateContextKeys();
@@ -557,7 +557,7 @@ export class RepositoryManager implements vscode.Disposable {
     }
   }
 
-  private async readSnapshot(repository: GitRepository): Promise<RepositorySnapshot> {
+  private async readSnapshot(repository: GitRepository, refsStale = true): Promise<RepositorySnapshot> {
     try {
       if (repository.info.isBare) {
         return withSnapshotKey({
@@ -568,7 +568,17 @@ export class RepositoryManager implements vscode.Disposable {
           error: "Bare repository: working-tree operations are unavailable.",
         });
       }
-      const [status, branches, operation] = await Promise.all([repository.status(), repository.branches(), repository.operationState()]);
+      // The branch list only moves with refs, and the metadata watcher marks
+      // those refreshes; a worktree save reuses the previous list instead of
+      // paying for-each-ref on every keystroke burst. An error snapshot's list
+      // is not trusted — it may be the empty fallback.
+      const previous = this.snapshots.get(repository.info.rootPath);
+      const reuseBranches = !refsStale && previous !== undefined && !previous.error;
+      const [status, branches, operation] = await Promise.all([
+        repository.status(),
+        reuseBranches ? Promise.resolve(previous.branches) : repository.branches(),
+        repository.operationState(),
+      ]);
       return withSnapshotKey({ repository, status, branches, operation });
     } catch (error) {
       return withSnapshotKey({

@@ -64,8 +64,11 @@ test("continues fetching the remaining repositories when one remote fails", () =
 
 test("tracks debounced refreshes by root and generation", () => {
   assert.match(extension, /class RefreshGenerationTracker/);
-  assert.match(extension, /if \(this\.roots\.get\(root\) === generation\) this\.roots\.delete\(root\)/);
+  assert.match(extension, /if \(this\.roots\.get\(root\)\?\.generation === generation\) this\.roots\.delete\(root\)/);
   assert.match(extension, /pendingRefreshes\.complete\(batch\)/);
+  // A worktree save must not clear a queued refs-aware request for the same
+  // root, or a branch list could go stale for as long as the user keeps typing.
+  assert.match(extension, /refsStale: Boolean\(this\.roots\.get\(rootPath\)\?\.refsStale\) \|\| refsStale/);
   // A manager change can describe A while B is still waiting. It must never
   // clear the whole pending set as the previous implementation did.
   const managerChange = extension.slice(extension.indexOf("manager.onDidChange"), extension.indexOf("vscode.workspace.onDidChangeWorkspaceFolders"));
