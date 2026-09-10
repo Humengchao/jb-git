@@ -1044,7 +1044,7 @@ export const logScript = String.raw`
       const head = node('div', 'shelf-head'); head.tabIndex = 0; head.setAttribute('role', 'treeitem'); head.setAttribute('aria-expanded', String(open));
       const twisty = node('span', 'twisty', open ? '⌄' : '›');
       const text = node('div', 'shelf-text');
-      text.append(node('div', 'shelf-name', shelf.name), node('div', 'shelf-meta', new Date(shelf.createdAt).toLocaleString() + ' · ' + fileCount(shelf.paths.length)));
+      text.append(node('div', 'shelf-name', shelf.name), node('div', 'shelf-meta', formatDateTime(shelf.createdAt) + ' · ' + fileCount(shelf.paths.length)));
       head.append(twisty, text);
       const toggle = () => {
         if (expanded.has(shelf.id)) expanded.delete(shelf.id); else expanded.add(shelf.id);
@@ -1118,7 +1118,7 @@ export const logScript = String.raw`
   function consoleTraceNode(trace) {
     const block = node('details', 'trace'); if (trace.exitCode !== 0) block.open = true;
     const summary = node('summary'); const status = node('span', trace.exitCode === 0 ? 'trace-status-ok' : 'trace-status-error', trace.exitCode === 0 ? '✓' : '!');
-    summary.append(status, node('span', 'trace-time', new Date(trace.startedAt).toLocaleTimeString() + ' · ' + trace.durationMs + ' ms'), node('span', 'trace-command', 'git ' + trace.args.join(' ')));
+    summary.append(status, node('span', 'trace-time', clockTimeSeconds(new Date(trace.startedAt)) + ' · ' + trace.durationMs + ' ms'), node('span', 'trace-command', 'git ' + trace.args.join(' ')));
     if (trace.background) summary.append(node('span', 'trace-background', 'background'));
     const detail = node('div', 'trace-output'); detail.append(node('div', 'trace-cwd', trace.cwd));
     if (trace.stdout) detail.append(node('div', '', trace.stdout.slice(0, 4_000).trimEnd()));
@@ -2018,7 +2018,7 @@ export const logScript = String.raw`
       details.append(refs);
     }
     const meta = node('div', 'detail-meta');
-    for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', new Date(commit.authoredAt).toLocaleString()], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
+    for (const [key, value] of [['Author', commit.author + ' <' + commit.email + '>'], ['Date', formatDateTime(commit.authoredAt)], ['Commit', commit.hash], ['Parents', (commit.parents || []).map(p => p.slice(0, 10)).join(', ') || '—']]) { meta.append(node('span', '', key), node('strong', '', value)); }
     details.append(meta);
     if (rewordEditingHash !== commit.hash && commit.body && commit.body !== commit.subject) {
       const body = node('div', 'detail-body');
@@ -2399,7 +2399,14 @@ export const logScript = String.raw`
     chip.title = (info.kind === 'tag' ? 'Tag' : info.kind === 'remote' ? 'Remote branch' : info.head ? 'Current branch' : 'Local branch') + ' ' + info.name;
     return chip;
   }
-  const formatDate = value => { const date = new Date(value); const now = new Date(); return date.toDateString() === now.toDateString() ? date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : date.toLocaleDateString(); };
+  // 24-hour times everywhere, the way IDEA prints them; toLocaleTimeString
+  // would hand en-US an am/pm suffix.
+  const pad2 = value => String(value).padStart(2, '0');
+  const clockTime = date => pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+  const clockTimeSeconds = date => clockTime(date) + ':' + pad2(date.getSeconds());
+  const isoDate = date => date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate());
+  const formatDateTime = value => { const date = new Date(value); return isoDate(date) + ' ' + clockTime(date); };
+  const formatDate = value => { const date = new Date(value); const now = new Date(); return date.toDateString() === now.toDateString() ? clockTime(date) : isoDate(date); };
   function updateSelectionWithoutRerender() {
     const selectedHash = state.selection?.commit.hash;
     document.querySelectorAll('.commit-row').forEach(item => {
