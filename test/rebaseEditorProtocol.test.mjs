@@ -13,35 +13,49 @@ function source(file) {
 test("validates rebase-editor messages at the extension-host boundary", () => {
   assert.equal(isRebaseEditorMessage({ type: "ready" }), true);
   assert.equal(isRebaseEditorMessage({ type: "cancel" }), true);
-  assert.equal(isRebaseEditorMessage({ type: "start", steps: [] }), true);
-  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "pick" }] }), true);
-  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "reword", message: "m" }] }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [] }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "commit", oid: OID_A, action: "pick" }] }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "commit", oid: OID_A, action: "reword", message: "m" }] }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "exec", command: "make test" }] }), true);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "break" }] }), true);
 
-  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "exec" }] }), false);
-  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: 42, action: "pick" }] }), false);
-  assert.equal(isRebaseEditorMessage({ type: "start", steps: [{ oid: OID_A, action: "pick", message: 7 }] }), false);
-  assert.equal(isRebaseEditorMessage({ type: "start", steps: "all" }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "commit", oid: OID_A, action: "exec" }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ oid: OID_A, action: "pick" }] }), false, "a row without a kind is from before interjections existed");
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "commit", oid: 42, action: "pick" }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "commit", oid: OID_A, action: "pick", message: 7 }] }), false);
+  // An exec command lands verbatim on a todo line, so a newline would inject
+  // another instruction Git would try to parse.
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "exec", command: "one\ntwo" }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "exec", command: 42 }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: [{ kind: "jump" }] }), false);
+  assert.equal(isRebaseEditorMessage({ type: "start", rows: "all" }), false);
   assert.equal(isRebaseEditorMessage({ type: "unknown" }), false);
   assert.equal(isRebaseEditorMessage(null), false);
 });
 
 test("accepts only a plan that covers exactly the commits that were offered", () => {
-  assert.equal(planCoversSameCommits([{ oid: OID_A, action: "pick" }], [OID_A]), true);
+  assert.equal(planCoversSameCommits([{ kind: "commit", oid: OID_A, action: "pick" }], [OID_A]), true);
   // Reordering is the whole point of the editor, so order must not matter here.
   assert.equal(planCoversSameCommits(
-    [{ oid: OID_B, action: "pick" }, { oid: OID_A, action: "pick" }],
+    [{ kind: "commit", oid: OID_B, action: "pick" }, { kind: "commit", oid: OID_A, action: "pick" }],
     [OID_A, OID_B],
   ), true);
-
-  assert.equal(planCoversSameCommits([{ oid: OID_A, action: "pick" }], [OID_A, OID_B]), false, "a dropped row must not silently shrink the plan");
+  // exec/break rows name no commit and may appear freely between the rows that do.
   assert.equal(planCoversSameCommits(
-    [{ oid: OID_A, action: "pick" }, { oid: "c".repeat(40), action: "pick" }],
+    [{ kind: "break" }, { kind: "commit", oid: OID_A, action: "pick" }, { kind: "exec", command: "make test" }],
+    [OID_A],
+  ), true);
+
+  assert.equal(planCoversSameCommits([{ kind: "commit", oid: OID_A, action: "pick" }], [OID_A, OID_B]), false, "a dropped row must not silently shrink the plan");
+  assert.equal(planCoversSameCommits(
+    [{ kind: "commit", oid: OID_A, action: "pick" }, { kind: "commit", oid: "c".repeat(40), action: "pick" }],
     [OID_A, OID_B],
   ), false, "a substituted commit must be rejected");
   assert.equal(planCoversSameCommits(
-    [{ oid: OID_A, action: "pick" }, { oid: OID_A, action: "pick" }],
+    [{ kind: "commit", oid: OID_A, action: "pick" }, { kind: "commit", oid: OID_A, action: "pick" }],
     [OID_A, OID_B],
   ), false, "a duplicated commit must be rejected");
+  assert.equal(planCoversSameCommits([{ kind: "break" }], [OID_A]), false, "an interjection cannot stand in for a commit");
 });
 
 test("prefills a reword from the complete message without repeating the subject", () => {
@@ -71,10 +85,10 @@ test("re-checks the sandbox plan on the extension side before running it", () =>
   const editor = source("src/webviews/rebaseEditor.ts");
   // The Webview must not be able to widen the rewrite: the commit set, the
   // subjects and the plan's validity are all resolved from the repository.
-  assert.match(editor, /planCoversSameCommits\(message\.steps, offered\)/);
-  assert.match(editor, /subject: subjects\.get\(step\.oid\)/);
-  assert.match(editor, /validateRebasePlan\(steps\)/);
-  assert.match(editor, /isNoOpPlan\(steps, offered\)/);
+  assert.match(editor, /planCoversSameCommits\(message\.rows, offered\)/);
+  assert.match(editor, /subject: subjects\.get\(row\.oid\)/);
+  assert.match(editor, /validateRebasePlan\(rows\)/);
+  assert.match(editor, /isNoOpPlan\(rows, offered\)/);
 });
 
 test("keeps the embedded rebase editor script syntactically valid", () => {
@@ -142,11 +156,11 @@ test("guards the interactive rebase command and keeps a paused rebase recoverabl
   assert.match(flow, /restoreTemporaryStash\(manager, root, parked, lease\)/);
   assert.match(flow, /openRebaseEditor\(manager, root, base, async \(steps, expectation\)/);
   assert.match(flow, /manager\.interactiveRebase\(root, base, steps, expectation, lease\)/);
-  // An edit row parks the sequencer with exit code 0, so the success path has
-  // to read the operation state: "finished" would be a lie, and restoring the
-  // parked stash would drop it onto the commit being amended.
+  // An edit or break row parks the sequencer with exit code 0, so the success
+  // path has to read the operation state: "finished" would be a lie, and
+  // restoring the parked stash would drop it onto the commit being amended.
   assert.match(flow, /if \(manager\.snapshot\(root\)\?\.operation\.kind === "rebase"\) \{\s*\n\s*stoppedForEdit = true;/);
-  assert.match(flow, /Stopped at the commit marked 'edit'/);
+  assert.match(flow, /Stopped as planned \(an 'edit' commit or a break row\)/);
   // Only modal questions may be awaited inside the flow; a toast awaited there
   // would pin the progress notification open.
   for (const [, args] of flow.matchAll(/await vscode\.window\.showWarningMessage\(([\s\S]{0,400}?)\);/g)) {
@@ -182,7 +196,7 @@ test("does not let closing the panel cancel an accepted rebase", () => {
   assert.ok(accepted >= 0 && disposed > accepted, "Start must mark the plan accepted before disposing the panel");
   assert.match(editor, /if \(!accepted && !running\) finish\(false\)/);
   assert.match(editor, /messageRegistration = panel\.webview\.onDidReceiveMessage/);
-  assert.match(editor, /await runRebase\(steps, expectation\);\s*\n\s*finish\(true\)/);
+  assert.match(editor, /await runRebase\(rows, expectation\);\s*\n\s*finish\(true\)/);
 });
 
 test("reorders by drag handle and Alt+arrows, and speaks the user's language", () => {

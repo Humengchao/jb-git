@@ -7,7 +7,7 @@ import { parsePorcelainV2, parseUpstreamTrack } from "./status";
 import { parsePorcelainBlame } from "./blame";
 import { hunkKeys, lineKeys, type HunkSelection } from "../changelists/hunkOwnership";
 import { parseUnifiedDiff, patchForHunk, patchForHunks, patchForTransformedHunks, selectHunkLines } from "./patch";
-import { buildRebaseTodo, posixPath, shellQuote, validateRebasePlan, type InteractiveRebaseExpectation, type RebaseStep } from "../interactiveRebase";
+import { buildRebaseTodo, isRebaseInterjection, posixPath, shellQuote, validateRebasePlan, type InteractiveRebaseExpectation, type PlanRow, type RebaseStep } from "../interactiveRebase";
 import { parseDiff3, resolveSimpleConflicts, type Diff3Labels, type MergeBlock } from "../mergeAnalysis";
 import { appendIgnoreLine } from "../ignoreRules";
 import { DEFAULT_COMMENT_CHAR } from "../commitMessage";
@@ -1210,7 +1210,7 @@ export class GitRepository {
    */
   public async interactiveRebase(
     base: string,
-    steps: readonly RebaseStep[],
+    rows: readonly PlanRow[],
     expectation?: InteractiveRebaseExpectation,
   ): Promise<void> {
     await this.serial(async () => {
@@ -1220,9 +1220,9 @@ export class GitRepository {
       }
       const status = await this.status();
       const revision = await this.resolveCommit(base);
-      const planProblem = validateRebasePlan(steps);
+      const planProblem = validateRebasePlan(rows);
       if (planProblem) throw new Error(planProblem);
-      if (expectation) await this.verifyRebaseExpectation(revision, steps, expectation, status);
+      if (expectation) await this.verifyRebaseExpectation(revision, rows, expectation, status);
       // Only a tracked change blocks a rebase. Git itself replays happily over
       // untracked files and only complains about one it would actually
       // overwrite, so counting them here refused a rebase Git would have run.
@@ -1241,7 +1241,7 @@ export class GitRepository {
       let rebaseInvoked = false;
       try {
         await mkdir(scratch, { recursive: true });
-        const plan = buildRebaseTodo(steps, scratch, this.runner.gitPath);
+        const plan = buildRebaseTodo(rows, scratch, this.runner.gitPath);
         const todoPath = path.join(scratch, "todo");
         await writeFile(todoPath, plan.todo, "utf8");
         for (const message of plan.messages) {
@@ -1249,7 +1249,7 @@ export class GitRepository {
         }
         // Writing the todo can take long enough for another worktree to move
         // HEAD. Verify once more immediately before handing control to Git.
-        if (expectation) await this.verifyRebaseExpectation(revision, steps, expectation);
+        if (expectation) await this.verifyRebaseExpectation(revision, rows, expectation);
         rebaseInvoked = true;
         await this.runner.run([
           // Config that rewrites the todo is pinned off so the plan Git runs is
@@ -1954,7 +1954,7 @@ export class GitRepository {
 
   private async verifyRebaseExpectation(
     revision: string,
-    steps: readonly RebaseStep[],
+    rows: readonly PlanRow[],
     expectation: InteractiveRebaseExpectation,
     knownStatus?: GitStatusSnapshot,
   ): Promise<void> {
@@ -1971,7 +1971,8 @@ export class GitRepository {
     if (!sameObjectIdSequence(current.map((commit) => commit.hash), expectation.commits)) {
       throw new Error("The commit history changed while the rebase plan was being reviewed. Reload the history and try again.");
     }
-    const planned = steps.map((step) => step.oid);
+    // Coverage is about commits alone; exec/break rows name none.
+    const planned = rows.filter((row): row is RebaseStep => !isRebaseInterjection(row)).map((step) => step.oid);
     if (!sameObjectIdSet(planned, expectation.commits)) {
       throw new Error("The rebase plan no longer covers the reviewed commits. Close the editor and start again.");
     }

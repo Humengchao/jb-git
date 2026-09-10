@@ -477,3 +477,104 @@ test("pauses on a conflict and can still finish from the persisted plan", async 
   // The exec line's message file survived the pause, so the reword still applied.
   assert.deepEqual(subjects(root), ["one, reworded", "two", "base"]);
 });
+
+test("emits exec and break rows at their position in the todo", () => {
+  const plan = buildRebaseTodo([
+    { kind: "break" },
+    { oid: "a".repeat(40), subject: "one", action: "pick" },
+    { kind: "exec", command: "make test" },
+    { oid: "b".repeat(40), subject: "two", action: "pick" },
+  ], "/tmp/scratch");
+  assert.deepEqual(todoLines(plan), [
+    "break",
+    `pick ${"a".repeat(40)} one`,
+    "exec make test",
+    `pick ${"b".repeat(40)} two`,
+  ]);
+});
+
+test("a run's amend exec keeps its place when interjections sit around it", () => {
+  const plan = buildRebaseTodo([
+    { oid: "a".repeat(40), subject: "one", action: "pick" },
+    { kind: "exec", command: "make build" },
+    { oid: "b".repeat(40), subject: "two", action: "squash", message: "one and two" },
+    { kind: "break" },
+  ], "/tmp/scratch");
+  const lines = todoLines(plan);
+  assert.deepEqual(lines.slice(0, 3), [
+    `pick ${"a".repeat(40)} one`,
+    "exec make build",
+    `fixup ${"b".repeat(40)} two`,
+  ]);
+  // The amend runs right after the run's last commit, before the break.
+  assert.match(lines[3], /^exec test .*--format=%s\)" = 'one' && .* commit --amend /);
+  assert.equal(lines[4], "break");
+});
+
+test("commit rules see through interjections, and interjections are validated", () => {
+  const pick = { oid: "a".repeat(40), subject: "one", action: "pick" };
+  // An interjection before the first commit changes nothing about fold legality.
+  assert.match(validateRebasePlan([{ kind: "break" }, { oid: "a".repeat(40), subject: "one", action: "fixup" }]) ?? "", /first replayed commit/);
+  assert.match(validateRebasePlan([{ kind: "exec", command: "true" }, { ...pick, action: "drop" }]) ?? "", /Dropping every commit/);
+  assert.equal(validateRebasePlan([{ kind: "break" }, pick, { kind: "exec", command: "make test" }]), undefined);
+  assert.equal(validateRebasePlan([{ kind: "exec", command: "   " }, pick]), "An exec row needs a command.");
+  assert.equal(validateRebasePlan([{ kind: "exec", command: "one\ntwo" }, pick]), "An exec command must be a single line.");
+});
+
+test("an interjection makes the plan worth running even with untouched commits", () => {
+  const pick = { oid: "a".repeat(40), subject: "one", action: "pick" };
+  assert.equal(isNoOpPlan([pick], ["a".repeat(40)]), true);
+  assert.equal(isNoOpPlan([pick, { kind: "break" }], ["a".repeat(40)]), false);
+  assert.equal(isNoOpPlan([{ kind: "exec", command: "true" }, pick], ["a".repeat(40)]), false);
+});
+
+test("a break row pauses the rebase and Continue finishes the plan", async () => {
+  const root = repositoryWithCommits(["one", "two"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+
+  await repository.interactiveRebase("HEAD~2", [
+    { oid: candidates[0].hash, subject: "one", action: "pick" },
+    { kind: "break" },
+    { oid: candidates[1].hash, subject: "two", action: "pick" },
+  ]);
+  assert.equal((await repository.operationState()).kind, "rebase", "the sequencer parks at the break");
+  assert.deepEqual(subjects(root), ["one", "base"], "only what came before the break is applied");
+
+  await repository.continueOperation("rebase");
+  assert.equal((await repository.operationState()).kind, "none");
+  assert.deepEqual(subjects(root), ["two", "one", "base"]);
+});
+
+test("an exec row runs through Git's own shell at its position in the plan", async () => {
+  const root = repositoryWithCommits(["one", "two"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+
+  await repository.interactiveRebase("HEAD~2", [
+    { oid: candidates[0].hash, subject: "one", action: "pick" },
+    { kind: "exec", command: "git tag exec-was-here" },
+    { oid: candidates[1].hash, subject: "two", action: "pick" },
+  ]);
+  assert.equal((await repository.operationState()).kind, "none");
+  assert.deepEqual(subjects(root), ["two", "one", "base"]);
+  assert.equal(git(root, "log", "-1", "--format=%s", "exec-was-here"), "one",
+    "the exec ran right after the first commit was replayed");
+});
+
+test("a failing exec stops the sequence where it failed", async () => {
+  const root = repositoryWithCommits(["one", "two"]);
+  const repository = await discoverRepository(root, new GitRunner());
+  const candidates = await repository.interactiveRebaseCandidates("HEAD~2");
+
+  await assert.rejects(repository.interactiveRebase("HEAD~2", [
+    { oid: candidates[0].hash, subject: "one", action: "pick" },
+    { kind: "exec", command: "exit 1" },
+    { oid: candidates[1].hash, subject: "two", action: "pick" },
+  ]));
+  assert.equal((await repository.operationState()).kind, "rebase", "the sequence stays parked for Continue or Abort");
+  assert.deepEqual(subjects(root), ["one", "base"], "what followed the failing exec was not applied");
+  await repository.abortOperation("rebase");
+  assert.equal((await repository.operationState()).kind, "none");
+  assert.deepEqual(subjects(root), ["two", "one", "base"], "abort puts the branch back");
+});

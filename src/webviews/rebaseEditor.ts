@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { RepositoryManager } from "../repositoryManager";
-import { REBASE_ACTIONS, validateRebasePlan, isNoOpPlan, type InteractiveRebaseExpectation, type RebaseStep } from "../interactiveRebase";
+import { REBASE_ACTIONS, validateRebasePlan, isNoOpPlan, type InteractiveRebaseExpectation, type PlanRow } from "../interactiveRebase";
 import { isRebaseEditorMessage, originalMessage, planCoversSameCommits } from "./rebaseEditorProtocol";
 import { webviewDocument } from "./html";
 
@@ -28,7 +28,7 @@ export async function openRebaseEditor(
   manager: RepositoryManager,
   rootPath: string,
   base: string,
-  runRebase: (steps: readonly RebaseStep[], expectation: InteractiveRebaseExpectation) => Promise<void>,
+  runRebase: (rows: readonly PlanRow[], expectation: InteractiveRebaseExpectation) => Promise<void>,
 ): Promise<boolean> {
   const candidates = await manager.interactiveRebaseCandidates(rootPath, base);
   if (candidates.length === 0) {
@@ -99,22 +99,26 @@ export async function openRebaseEditor(
           return;
         }
 
-        if (!planCoversSameCommits(message.steps, offered)) {
+        if (!planCoversSameCommits(message.rows, offered)) {
           await panel.webview.postMessage({ type: "error", message: "The plan no longer matches the commits that were loaded. Close the editor and start again." });
           return;
         }
-        const steps: RebaseStep[] = message.steps.map((step) => ({
-          oid: step.oid,
-          subject: subjects.get(step.oid) ?? "",
-          action: step.action,
-          message: step.message,
-        }));
-        const problem = validateRebasePlan(steps);
+        const rows: PlanRow[] = message.rows.map((row) => {
+          if (row.kind === "exec") return { kind: "exec", command: row.command };
+          if (row.kind === "break") return { kind: "break" };
+          return {
+            oid: row.oid,
+            subject: subjects.get(row.oid) ?? "",
+            action: row.action,
+            message: row.message,
+          };
+        });
+        const problem = validateRebasePlan(rows);
         if (problem) {
           await panel.webview.postMessage({ type: "error", message: problem });
           return;
         }
-        if (isNoOpPlan(steps, offered)) {
+        if (isNoOpPlan(rows, offered)) {
           await panel.webview.postMessage({ type: "error", message: "This plan leaves history unchanged." });
           return;
         }
@@ -125,7 +129,7 @@ export async function openRebaseEditor(
         // while Git rewrites the commits it was showing.
         panel.dispose();
         try {
-          await runRebase(steps, expectation);
+          await runRebase(rows, expectation);
           finish(true);
         } catch (error) {
           finish(error instanceof Error ? error : new Error(String(error)));
@@ -173,7 +177,13 @@ function styles(): string {
     .oid { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family); margin-right: 6px; }
     .author { color: var(--vscode-descriptionForeground); }
     textarea { grid-column: 4 / span 2; width: 100%; box-sizing: border-box; min-height: 64px; font-family: var(--vscode-editor-font-family); background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; padding: 4px; resize: vertical; }
-    .moves { display: flex; gap: 2px; }
+    /* exec/break rows are instructions, not commits: dashed frame, and their
+       content spans where the action select and subject would sit. */
+    li.exec-row, li.break-row { border-style: dashed; }
+    .exec-row input { grid-column: 3 / span 2; width: 100%; box-sizing: border-box; height: 26px; font-family: var(--vscode-editor-font-family); background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; padding: 0 8px; }
+    .break-row .break-label { grid-column: 3 / span 2; padding-top: 4px; color: var(--vscode-descriptionForeground); font-style: italic; }
+    .moves { display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; max-width: 150px; }
+    .row-insert { font-size: 10px; padding: 2px 4px; opacity: 0.85; }
     button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 2px; padding: 2px 6px; cursor: pointer; }
     button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
     button:disabled { opacity: 0.4; cursor: default; }
@@ -216,6 +226,12 @@ function script(): string {
       'Fold into the previous kept commit and keep both messages': '并入上一个保留的提交，保留两者的消息',
       'Fold into the previous kept commit and discard this message': '并入上一个保留的提交，丢弃此提交的消息',
       'Remove this commit': '丢弃此提交',
+      'Insert an exec row below': '在下方插入 exec 行',
+      'Insert a break row below': '在下方插入 break 行',
+      'Command to run with sh at this point': '在此处用 sh 运行的命令',
+      'Pause the rebase here; Continue resumes the plan': '在此处暂停变基；Continue 将继续执行计划',
+      'Remove this row': '移除此行',
+      'An exec row needs a command.': 'exec 行需要一个命令。',
     } : {};
     const t = value => zh[value] || value;
     const ACTION_HELP = {
@@ -242,10 +258,10 @@ function script(): string {
     function needsMessage(action) { return action === 'reword' || action === 'squash'; }
     function isFold(action) { return action === 'squash' || action === 'fixup'; }
 
-    /** The kept commit a fold at this position lands on, which is the message it joins. */
+    /** The kept commit a fold at this position lands on, which is the message it joins. Interjection rows are transparent to this, as Git's are. */
     function leaderOf(index) {
       for (let i = index - 1; i >= 0; i -= 1) {
-        if (rows[i].action === 'drop') continue;
+        if (rows[i].kind !== 'commit' || rows[i].action === 'drop') continue;
         if (!isFold(rows[i].action)) return rows[i];
       }
       return undefined;
@@ -261,13 +277,19 @@ function script(): string {
 
     /** The reason Start is disabled; quiet marks the nothing-to-do-yet state. */
     function localProblem() {
-      const applied = rows.filter((row) => row.action !== 'drop');
+      const commits = rows.filter((row) => row.kind === 'commit');
+      const applied = commits.filter((row) => row.action !== 'drop');
       if (!applied.length) return { text: 'Dropping every commit would leave nothing to replay.' };
       if (isFold(applied[0].action)) return { text: 'The first replayed commit has nothing earlier to fold into.' };
-      for (const row of rows) {
+      for (const row of commits) {
         if (needsMessage(row.action) && !row.message.trim()) return { text: 'A reword or squash needs a commit message.' };
       }
-      if (rows.every((row, index) => row.action === 'pick' && row.oid === originalOrder[index])) {
+      for (const row of rows) {
+        if (row.kind === 'exec' && !row.command.trim()) return { text: 'An exec row needs a command.' };
+      }
+      // A plan of untouched commits with no interjection changes nothing; an
+      // exec or break row is itself the point of running.
+      if (rows.length === commits.length && commits.every((row, index) => row.action === 'pick' && row.oid === originalOrder[index])) {
         return { text: 'This plan leaves history unchanged.', quiet: true };
       }
       return undefined;
@@ -293,8 +315,10 @@ function script(): string {
       const list = node('ol');
       rows.forEach((row, index) => {
         const item = node('li');
-        if (row.action === 'drop') item.classList.add('dropped');
-        if (isFold(row.action)) item.classList.add('folded');
+        if (row.kind === 'exec') item.classList.add('exec-row');
+        if (row.kind === 'break') item.classList.add('break-row');
+        if (row.kind === 'commit' && row.action === 'drop') item.classList.add('dropped');
+        if (row.kind === 'commit' && isFold(row.action)) item.classList.add('folded');
 
         // Only the handle starts a drag: a draggable row would swallow text
         // selection in the subject and the message editor.
@@ -313,46 +337,73 @@ function script(): string {
 
         item.append(node('span', 'order', String(index + 1)));
 
-        const shell = node('div', 'select-shell');
-        const select = node('select');
-        select.setAttribute('aria-label', t('Action for commit') + ' ' + row.shortOid);
-        for (const action of actions) {
-          const option = node('option', undefined, action);
-          option.value = action;
-          option.title = t(ACTION_HELP[action] || '');
-          if (action === row.action) option.selected = true;
-          select.append(option);
-        }
-        select.title = t(ACTION_HELP[row.action] || '');
-        select.addEventListener('change', () => {
-          row.action = select.value;
-          if (needsMessage(row.action) && !row.message) row.message = prefill(row, index);
-          render(index);
-        });
-        shell.append(select);
-        item.append(shell);
+        if (row.kind === 'exec') {
+          const input = node('input', 'exec-command');
+          input.value = row.command;
+          input.title = t('Command to run with sh at this point');
+          input.setAttribute('aria-label', t('Command to run with sh at this point'));
+          input.addEventListener('input', () => { row.command = input.value; refreshFooter(); });
+          item.append(input);
+        } else if (row.kind === 'break') {
+          item.append(node('span', 'break-label', 'Pause the rebase here; Continue resumes the plan'));
+        } else {
+          const shell = node('div', 'select-shell');
+          const select = node('select');
+          select.setAttribute('aria-label', t('Action for commit') + ' ' + row.shortOid);
+          for (const action of actions) {
+            const option = node('option', undefined, action);
+            option.value = action;
+            option.title = t(ACTION_HELP[action] || '');
+            if (action === row.action) option.selected = true;
+            select.append(option);
+          }
+          select.title = t(ACTION_HELP[row.action] || '');
+          select.addEventListener('change', () => {
+            row.action = select.value;
+            if (needsMessage(row.action) && !row.message) row.message = prefill(row, index);
+            render(index);
+          });
+          shell.append(select);
+          item.append(shell);
 
-        const subject = node('div', 'subject');
-        subject.append(node('span', 'oid', row.shortOid));
-        subject.append(document.createTextNode(row.subject || '(no subject)'));
-        subject.append(node('span', 'author', '  ' + row.author));
-        item.append(subject);
+          const subject = node('div', 'subject');
+          subject.append(node('span', 'oid', row.shortOid));
+          subject.append(document.createTextNode(row.subject || '(no subject)'));
+          subject.append(node('span', 'author', '  ' + row.author));
+          item.append(subject);
+        }
 
         const moves = node('div', 'moves');
         const up = node('button', undefined, '↑');
         up.title = t('Move earlier');
-        up.setAttribute('aria-label', t('Move earlier') + ' ' + row.shortOid);
+        up.setAttribute('aria-label', t('Move earlier') + ' ' + (row.kind === 'commit' ? row.shortOid : row.kind));
         up.disabled = index === 0;
         up.addEventListener('click', () => move(index, -1));
         const down = node('button', undefined, '↓');
         down.title = t('Move later');
-        down.setAttribute('aria-label', t('Move later') + ' ' + row.shortOid);
+        down.setAttribute('aria-label', t('Move later') + ' ' + (row.kind === 'commit' ? row.shortOid : row.kind));
         down.disabled = index === rows.length - 1;
         down.addEventListener('click', () => move(index, 1));
-        moves.append(up, down);
+        // exec/break rows are Git's todo lines made visual: they are inserted
+        // below a row and carry no commit of their own, so they can also be
+        // removed outright rather than dropped.
+        const addExec = node('button', 'row-insert', '+ exec');
+        addExec.title = t('Insert an exec row below');
+        addExec.addEventListener('click', () => { rows.splice(index + 1, 0, { kind: 'exec', command: '' }); render(index + 1); });
+        const addBreak = node('button', 'row-insert', '+ break');
+        addBreak.title = t('Insert a break row below');
+        addBreak.addEventListener('click', () => { rows.splice(index + 1, 0, { kind: 'break' }); render(index + 1); });
+        moves.append(up, down, addExec, addBreak);
+        if (row.kind !== 'commit') {
+          const remove = node('button', 'row-insert', '✕');
+          remove.title = t('Remove this row');
+          remove.setAttribute('aria-label', t('Remove this row') + ' ' + row.kind);
+          remove.addEventListener('click', () => { rows.splice(index, 1); render(index); });
+          moves.append(remove);
+        }
         item.append(moves);
 
-        if (needsMessage(row.action)) {
+        if (row.kind === 'commit' && needsMessage(row.action)) {
           const editor = node('textarea');
           editor.value = row.message;
           editor.setAttribute('aria-label', t('Message for commit') + ' ' + row.shortOid);
@@ -402,7 +453,9 @@ function script(): string {
       start.addEventListener('click', () => {
         vscode.postMessage({
           type: 'start',
-          steps: rows.map((row) => ({ oid: row.oid, action: row.action, message: needsMessage(row.action) ? row.message : undefined })),
+          rows: rows.map((row) => row.kind === 'commit'
+            ? { kind: 'commit', oid: row.oid, action: row.action, message: needsMessage(row.action) ? row.message : undefined }
+            : row.kind === 'exec' ? { kind: 'exec', command: row.command } : { kind: 'break' }),
         });
       });
       const cancel = node('button', undefined, 'Cancel');
@@ -412,7 +465,7 @@ function script(): string {
       refreshFooter();
 
       if (focusIndex !== undefined) {
-        const focus = list.children[focusIndex]?.querySelector('select');
+        const focus = list.children[focusIndex]?.querySelector('select, input');
         if (focus) focus.focus();
       }
     }
@@ -430,6 +483,7 @@ function script(): string {
       if (data.type === 'load') {
         actions = data.actions;
         rows = data.commits.map((commit) => ({
+          kind: 'commit',
           oid: commit.oid,
           shortOid: commit.shortOid,
           subject: commit.subject,

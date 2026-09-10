@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { discoverRepositories, discoverRepository, GitRepository } from "./git/repository";
 import * as path from "node:path";
 import { GitRunner, isGitAbort } from "./git/runner";
-import { type InteractiveRebaseExpectation, type RebaseStep } from "./interactiveRebase";
+import { type InteractiveRebaseExpectation, type PlanRow } from "./interactiveRebase";
 import { type Diff3Labels, type MergeBlock } from "./mergeAnalysis";
 import { type HunkSelection } from "./changelists/hunkOwnership";
 import { GitBlameEntry, GitBlameOptions, GitBranch, GitCommit, GitCommitFile, GitCommitOptions, GitConflictVersions, GitDiffHunk, GitIgnoreTarget, GitMergeOptions, GitOperationKind, GitRebaseOptions, GitOperationState, GitPullStrategy, GitRemote, GitResetMode, GitStashEntry, GitStatusSnapshot, GitSubmodule, GitWorktree } from "./git/types";
@@ -297,11 +297,11 @@ export class RepositoryManager implements vscode.Disposable {
   public async interactiveRebase(
     rootPath: string,
     base: string,
-    steps: readonly RebaseStep[],
+    rows: readonly PlanRow[],
     expectation?: InteractiveRebaseExpectation,
     lease?: RepositoryMutationLease,
   ): Promise<void> {
-    await this.mutate(rootPath, () => this.requireRepository(rootPath).interactiveRebase(base, steps, expectation), lease);
+    await this.mutate(rootPath, () => this.requireRepository(rootPath).interactiveRebase(base, rows, expectation), lease);
   }
 
   public async cherryPick(rootPath: string, hash: string): Promise<void> {

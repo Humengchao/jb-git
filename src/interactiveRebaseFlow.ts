@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { GitCommandError } from "./git/runner";
+import { isRebaseInterjection } from "./interactiveRebase";
 import { RepositoryManager } from "./repositoryManager";
 import { restoreTemporaryStash, stashLocalChanges } from "./temporaryStash";
 import { openRebaseEditor } from "./webviews/rebaseEditor";
@@ -52,7 +53,7 @@ export async function runInteractiveRebase(manager: RepositoryManager, root: str
           // withProgress directly, not a plain notification wrapper: a rebase
           // that stops on a conflict needs the conflict-aware message below.
           await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Rebasing {0} commit(s)", steps.length) },
+            { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Rebasing {0} commit(s)", steps.filter((row) => !isRebaseInterjection(row)).length) },
             () => manager.interactiveRebase(root, base, steps, expectation, lease),
           );
         } catch (error) {
@@ -93,7 +94,7 @@ export async function runInteractiveRebase(manager: RepositoryManager, root: str
       });
     });
     if (started && stoppedForEdit) {
-      await vscode.window.showInformationMessage(vscode.l10n.t("Stopped at the commit marked 'edit'. Amend or test it, then run Continue Operation; the rest of the plan resumes from there."));
+      await vscode.window.showInformationMessage(vscode.l10n.t("Stopped as planned (an 'edit' commit or a break row). Amend, test or inspect, then run Continue Operation; the rest of the plan resumes from there."));
     } else if (started) {
       await vscode.window.showInformationMessage(vscode.l10n.t("The interactive rebase finished."));
     }
