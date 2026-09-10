@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.35
+
+- feat: let two edits in one hunk belong to different Changelists
+- test: tolerate hosts without symlink privilege and VS Code's fsPath case
+- perf: cut per-record, per-line and per-canvas work in status, blame and the log graph
+
 ## 0.1.34
 
 - perf: cut the work a refresh and a state push repeat
