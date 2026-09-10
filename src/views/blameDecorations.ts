@@ -15,6 +15,21 @@ import { compileIssueRules, linkifyIssues } from "../issueNavigation";
 
 let issueRuleCache: { key: string; rules: ReturnType<typeof compileIssueRules> } = { key: "", rules: [] };
 
+/**
+ * The compiled issue rules for the current configuration.
+ *
+ * Reading `getConfiguration` and hashing the setting cost more than compiling the
+ * rules themselves, so once per render the rules are fetched here and carried
+ * into every hover rather than each hover re-reading the configuration — a
+ * multi-thousand-line file builds one hover message per line.
+ */
+function currentIssueRules(): ReturnType<typeof compileIssueRules> {
+  const raw = vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []);
+  const key = JSON.stringify(raw);
+  if (issueRuleCache.key !== key) issueRuleCache = { key, rules: compileIssueRules(raw) };
+  return issueRuleCache.rules;
+}
+
 /** What a document's annotations are reading: a path in a repository, optionally at a revision. */
 export interface BlameTarget {
   repositoryRoot: string;
@@ -305,6 +320,10 @@ export class BlameAnnotationController implements vscode.Disposable {
     // marks them. A working-tree annotation has no such revision.
     const annotated = this.targets.get(editor.document.uri.toString())?.revision;
     const hiddenCount = this.hidden.get(editor.document.uri.toString())?.size ?? 0;
+    // The rules are the same for every line of the document; reading the
+    // configuration and hashing the setting once here replaces what used to be
+    // one getConfiguration plus JSON.stringify per hover message.
+    const rules = currentIssueRules();
     const lines = layoutBlameAnnotations(entries, options);
     const decorations: vscode.DecorationOptions[] = [];
     // The layout keeps the order of `entries`, so the entry a line came from is
@@ -316,7 +335,7 @@ export class BlameAnnotationController implements vscode.Disposable {
       const own = annotated !== undefined && entry.hash === annotated;
       decorations.push({
         range: new vscode.Range(line.line, 0, line.line, 0),
-        hoverMessage: hover(entry, editor.document.uri, line.line, hiddenCount),
+        hoverMessage: hover(entry, editor.document.uri, line.line, rules, hiddenCount),
         renderOptions: {
           before: {
             contentText: nonBreaking(line.text),
@@ -419,7 +438,7 @@ function markdownEscape(value: string): string {
   return value.replace(/[\\`*_{}[\]()#+\-.!|<>]/g, (character) => `\\${character}`);
 }
 
-function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number, hiddenCount = 0): vscode.MarkdownString {
+function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number, rules: ReturnType<typeof compileIssueRules>, hiddenCount = 0): vscode.MarkdownString {
   const message = new vscode.MarkdownString(undefined, true);
   // The command links below are ours, so the hover has to be allowed to run them.
   // Only the extension commands listed here may be invoked from this hover.
@@ -433,7 +452,7 @@ function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number, hiddenCount 
     return message;
   }
   const argument = encodeURIComponent(JSON.stringify([{ uri: uri.toString(), line }]));
-  message.appendMarkdown(`**${issueLinkedMarkdown(entry.summary || "(no commit message)")}**\n\n`);
+  message.appendMarkdown(`**${issueLinkedMarkdown(entry.summary || "(no commit message)", rules)}**\n\n`);
   message.appendMarkdown(`${markdownEscape(entry.author)}${entry.authorMail ? ` <${markdownEscape(entry.authorMail)}>` : ""}\n\n`);
   message.appendMarkdown(`${formatShortDate(entry)} · ${formatRelativeDate(entry, Date.now())}\n\n`);
   message.appendMarkdown(`\`${abbreviateHash(entry.hash)}\`  ·  ${markdownEscape(entry.filename)}\n\n`);
@@ -449,11 +468,7 @@ function hover(entry: GitBlameEntry, uri: vscode.Uri, line: number, hiddenCount 
 }
 
 /** The commit subject with configured issue ids linked, IDEA's Issue Navigation in the hover. */
-function issueLinkedMarkdown(summary: string): string {
-  const raw = vscode.workspace.getConfiguration("jbGit").get<unknown[]>("issueNavigation", []);
-  const key = JSON.stringify(raw);
-  if (issueRuleCache.key !== key) issueRuleCache = { key, rules: compileIssueRules(raw) };
-  const rules = issueRuleCache.rules;
+function issueLinkedMarkdown(summary: string, rules: ReturnType<typeof compileIssueRules>): string {
   return linkifyIssues(summary, rules)
     .map((segment) => (segment.url
       ? `[${markdownEscape(segment.text)}](${markdownUrl(segment.url)})`

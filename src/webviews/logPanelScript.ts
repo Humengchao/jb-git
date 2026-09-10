@@ -1664,7 +1664,7 @@ export const logScript = String.raw`
       row.dataset.index = String(index); row.setAttribute('aria-posinset', String(index + 1)); row.setAttribute('aria-setsize', String(virtualCommits.length));
       row.tabIndex = selected || (!currentHash && index === 0) ? 0 : -1; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
       row.setAttribute('aria-label', (commit.subject || 'No subject') + ', ' + commit.author + ', ' + formatDate(commit.authoredAt) + ', ' + commit.hash.slice(0, 8));
-      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; canvas.dataset.graph = JSON.stringify(virtualGraph[index]); canvas.title = t('Click a graph line to select or collapse its series'); canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
+      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; graphCache.set(canvas, { graph: virtualGraph[index], segments: graphSegments(virtualGraph[index]) }); canvas.title = t('Click a graph line to select or collapse its series'); canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
       const ordered = orderedRefs(commit.refs);
       const refs = node('div', 'refs'); for (const ref of ordered.slice(0, 2)) refs.append(refChip(ref));
       if (ordered.length > 2) { const more = node('span', 'ref', '+' + String(ordered.length - 2)); more.title = ordered.slice(2).map(shortRef).join('\n'); refs.append(more); }
@@ -2255,27 +2255,46 @@ export const logScript = String.raw`
     return segments;
   }
 
+  /**
+   * The graph and its drawn segments for one canvas.
+   *
+   * Every row used to serialise its graph into a data attribute and drawGraphs
+   * and each pointer move parsed it back, and graphSegments rebuilt its
+   * segment list every time. The object lives as long as the canvas, so the
+   * cache is a WeakMap keyed by it; virtual re-renders made new canvases and
+   * set fresh entries, and old canvases are collected with the map.
+   */
+  const graphCache = new WeakMap();
+  function graphFor(canvas) {
+    return graphCache.get(canvas) || null;
+  }
+
   function drawGraphs() {
     const activeSeries = hoveredGraphSeries || selectedGraphSeries;
-    document.querySelectorAll('canvas[data-graph]').forEach(canvas => {
-      const graph = JSON.parse(canvas.dataset.graph); const ctx = canvas.getContext('2d'); const scale = 2; const x = lane => 8 * scale + lane * 12 * scale; const mid = 13.5 * scale;
+    // One style read for the whole pass. Inside the loop this was a recalc per
+    // canvas, and drawGraphs runs again on every hover that moves the highlight.
+    const pageBackground = getComputedStyle(document.body).backgroundColor;
+    document.querySelectorAll('canvas.graph-interactive').forEach(canvas => {
+      const drawing = graphFor(canvas); if (!drawing) return;
+      const graph = drawing.graph; const ctx = canvas.getContext('2d'); const scale = 2; const x = lane => 8 * scale + lane * 12 * scale; const mid = 13.5 * scale;
       ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.lineCap = 'round';
-      for (const segment of graphSegments(graph)) {
+      for (const segment of drawing.segments) {
         ctx.globalAlpha = activeSeries && segment.seriesId !== activeSeries ? .2 : 1;
         ctx.lineWidth = (segment.seriesId === activeSeries ? 2.6 : 1.5) * scale; ctx.strokeStyle = graphColor(segment.seriesId);
         ctx.setLineDash(segment.dotted ? [3 * scale, 3 * scale] : []); ctx.beginPath(); ctx.moveTo(segment.x1, segment.y1); ctx.lineTo(segment.x2, segment.y2); ctx.stroke();
       }
       ctx.setLineDash([]); ctx.globalAlpha = activeSeries && graph.nodeSeriesId !== activeSeries ? .25 : 1;
       ctx.fillStyle = graphColor(graph.nodeSeriesId); ctx.beginPath(); ctx.arc(x(graph.lane), mid, (graph.nodeSeriesId === activeSeries ? 4.8 : 4) * scale, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = getComputedStyle(document.body).backgroundColor; ctx.lineWidth = 1.3 * scale; ctx.stroke(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = pageBackground; ctx.lineWidth = 1.3 * scale; ctx.stroke(); ctx.globalAlpha = 1;
     });
   }
 
   function graphSeriesAt(canvas, event) {
-    const graph = JSON.parse(canvas.dataset.graph); const bounds = canvas.getBoundingClientRect();
+    const drawing = graphFor(canvas); if (!drawing) return '';
+    const graph = drawing.graph; const bounds = canvas.getBoundingClientRect();
     const point = { x: (event.clientX - bounds.left) * canvas.width / bounds.width, y: (event.clientY - bounds.top) * canvas.height / bounds.height };
     let selected = ''; let nearest = 12;
-    for (const segment of graphSegments(graph)) {
+    for (const segment of drawing.segments) {
       const distance = pointToSegmentDistance(point.x, point.y, segment.x1, segment.y1, segment.x2, segment.y2);
       if (distance < nearest) { nearest = distance; selected = segment.seriesId; }
     }

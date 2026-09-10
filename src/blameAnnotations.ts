@@ -98,8 +98,20 @@ export function layoutBlameAnnotations(
   options: BlameAnnotationOptions,
 ): BlameAnnotationLine[] {
   const committed = entries.filter((entry) => !entry.uncommitted && entry.authorTimestamp > 0);
-  const oldest = committed.length ? Math.min(...committed.map((entry) => entry.authorTimestamp)) : 0;
-  const newest = committed.length ? Math.max(...committed.map((entry) => entry.authorTimestamp)) : 0;
+  // One folded pass instead of `Math.min(...committed.map(...))`: spreading an
+  // array into arguments passes the V8 argument-count limit (~125k) and a file
+  // that reaches it crashes the whole annotation with RangeError, so the two
+  // bounds are gathered here where the arrays are never built either.
+  let oldest = Number.POSITIVE_INFINITY;
+  let newest = Number.NEGATIVE_INFINITY;
+  for (const entry of committed) {
+    if (entry.authorTimestamp < oldest) oldest = entry.authorTimestamp;
+    if (entry.authorTimestamp > newest) newest = entry.authorTimestamp;
+  }
+  if (!committed.length) {
+    oldest = 0;
+    newest = 0;
+  }
   const span = newest - oldest;
 
   const fields = entries.map((entry) => {

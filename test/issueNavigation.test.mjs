@@ -118,9 +118,24 @@ test("the Webview runs the same compiled module, not a copy", () => {
 
 test("the Blame hover links the summary through the same rules", () => {
   const controller = readSource("../src/views/blameDecorations.ts", import.meta.url);
-  assert.match(controller, /issueLinkedMarkdown\(entry\.summary \|\| "\(no commit message\)"\)/);
+  assert.match(controller, /issueLinkedMarkdown\(entry\.summary \|\| "\(no commit message\)", rules\)/);
   assert.match(controller, /const raw = vscode\.workspace\.getConfiguration\("jbGit"\)\.get<unknown\[\]>\("issueNavigation", \[\]\)/);
   // Unmatched text still goes through the Markdown escaper; a link label does too.
   assert.match(controller, /markdownUrl\(segment\.url\)/);
   assert.match(controller, /enabledCommands: \["jbGit\.blameShowCommit", "jbGit\.copyRevisionNumber", "jbGit\.annotatePreviousRevision", "jbGit\.blameHideRevision", "jbGit\.blameShowHiddenRevisions"\]/);
+});
+
+test("reads the issue configuration once per annotation render, not once per line", () => {
+  // hoverMessage is eager, so a decorated file builds one MarkdownString per
+  // line. Reading getConfiguration and hashing the setting inside that loop
+  // cost a config walk and a JSON.stringify for every annotated line.
+  const controller = readSource("../src/views/blameDecorations.ts", import.meta.url);
+  const render = controller.slice(controller.indexOf("private render(editor"), controller.indexOf("private renderCommitHighlight"));
+  assert.match(render, /const rules = currentIssueRules\(\);/);
+  assert.match(render, /hover\(entry, editor\.document\.uri, line\.line, rules, hiddenCount\)/);
+  // The per-line helpers take the compiled rules; neither may reach for the
+  // configuration itself.
+  const perLine = controller.slice(controller.indexOf("function hover("));
+  assert.doesNotMatch(perLine, /getConfiguration/);
+  assert.doesNotMatch(perLine, /JSON\.stringify\(raw\)/);
 });

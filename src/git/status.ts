@@ -28,6 +28,24 @@ function parseStatusCode(value: string): GitStatusCode {
   return " MADRCTU?!".includes(code) ? code : " ";
 }
 
+/**
+ * The index just past the `nth` space in `value`, or -1 when there are fewer.
+ *
+ * The porcelain record's path is everything after a fixed number of fields, so
+ * the tail is taken as one slice. Splitting the record into fields would give
+ * the same answer but allocate an array plus a second copy of every path.
+ */
+function afterSpace(value: string, nth: number): number {
+  let spaces = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 32) {
+      spaces += 1;
+      if (spaces === nth) return index + 1;
+    }
+  }
+  return -1;
+}
+
 function makeChange(
   indexStatus: GitStatusCode,
   workTreeStatus: GitStatusCode,
@@ -65,7 +83,8 @@ export function parseUpstreamTrack(value: string | undefined): { ahead: number; 
 
 /** Parses `git status --porcelain=v2 -z --branch` output. */
 export function parsePorcelainV2(output: Buffer | string): GitStatusSnapshot {
-  const tokens = (Buffer.isBuffer(output) ? output : Buffer.from(output)).toString("utf8").split("\0");
+  const text = Buffer.isBuffer(output) ? output.toString("utf8") : output;
+  const tokens = text.split("\0");
   const branch: GitBranchStatus = {
     head: null,
     oid: null,
@@ -105,27 +124,32 @@ export function parsePorcelainV2(output: Buffer | string): GitStatusSnapshot {
       continue;
     }
 
+    // A record's `<XY>` field always follows the one-character record type, and
+    // its path is the last field. Both are read by offset: splitting the record
+    // allocated an array per changed file and rejoining the tail made a second
+    // copy of every path, which `status` pays on every refresh.
     const recordType = token[0];
-    const fields = token.split(" ");
-    if (recordType === "1" && fields.length >= 9) {
-      const indexStatus = parseStatusCode(fields[1][0]);
-      const workTreeStatus = parseStatusCode(fields[1][1]);
-      changes.push(makeChange(indexStatus, workTreeStatus, fields.slice(8).join(" ")));
+    const indexStatus = parseStatusCode(token[2]);
+    const workTreeStatus = parseStatusCode(token[3]);
+    if (recordType === "1") {
+      const pathStart = afterSpace(token, 8);
+      if (pathStart < 0) continue;
+      changes.push(makeChange(indexStatus, workTreeStatus, token.slice(pathStart)));
       continue;
     }
-    if (recordType === "2" && fields.length >= 10) {
-      const indexStatus = parseStatusCode(fields[1][0]);
-      const workTreeStatus = parseStatusCode(fields[1][1]);
+    if (recordType === "2") {
+      const pathStart = afterSpace(token, 9);
+      if (pathStart < 0) continue;
       const originalPath = tokens[index + 1] ?? "";
       index += 1;
-      changes.push(makeChange(indexStatus, workTreeStatus, fields.slice(9).join(" "), originalPath));
+      changes.push(makeChange(indexStatus, workTreeStatus, token.slice(pathStart), originalPath));
       continue;
     }
-    if (recordType === "u" && fields.length >= 11) {
-      const indexStatus = parseStatusCode(fields[1][0]);
-      const workTreeStatus = parseStatusCode(fields[1][1]);
+    if (recordType === "u") {
+      const pathStart = afterSpace(token, 10);
+      if (pathStart < 0) continue;
       // Every `u` record is unmerged; valid AA/DD pairs contain no literal U.
-      changes.push(makeChange(indexStatus, workTreeStatus, fields.slice(10).join(" "), undefined, true));
+      changes.push(makeChange(indexStatus, workTreeStatus, token.slice(pathStart), undefined, true));
     }
   }
 

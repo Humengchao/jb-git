@@ -58,6 +58,41 @@ test("treats every porcelain v2 unmerged record as conflicted", () => {
   }
 });
 
+test("keeps every space in a path, whichever record carries it", () => {
+  // The path is the last field and may hold spaces, so it is taken as one slice
+  // past a counted number of fields. Getting that count wrong truncates a path
+  // or swallows a leading directory, and only a multi-space path shows it.
+  const snapshot = parsePorcelainV2([
+    "1 .M N... 100644 100644 100644 abc123 def456 a b/c  d/e f.txt",
+    "2 R. N... 100644 100644 100644 abc123 def456 R100 new dir/new name.txt",
+    "old dir/old name.txt",
+    "u UU N... 100644 100644 100644 100644 aaa bbb ccc my conflicted file.txt",
+    "? un tracked file.txt",
+  ].join("\0") + "\0");
+
+  assert.deepEqual(snapshot.changes.map((change) => change.path), [
+    "a b/c  d/e f.txt",
+    "new dir/new name.txt",
+    "my conflicted file.txt",
+    "un tracked file.txt",
+  ]);
+  assert.equal(snapshot.changes[1].originalPath, "old dir/old name.txt");
+  assert.equal(snapshot.changes[1].kind, "renamed");
+  assert.equal(snapshot.changes[2].conflicted, true);
+});
+
+test("skips a truncated record instead of inventing a path for it", () => {
+  // A record cut short of its path field used to reach makeChange with an empty
+  // path once the fields were rejoined; it is dropped now, and must not take the
+  // records around it with it.
+  const snapshot = parsePorcelainV2([
+    "1 .M N... 100644 100644",
+    "1 .M N... 100644 100644 100644 abc123 def456 good.txt",
+  ].join("\0") + "\0");
+
+  assert.deepEqual(snapshot.changes.map((change) => change.path), ["good.txt"]);
+});
+
 test("reads ahead, behind and gone out of an upstream track decoration", () => {
   assert.deepEqual(parseUpstreamTrack("[ahead 2, behind 1]"), { ahead: 2, behind: 1, gone: false });
   assert.deepEqual(parseUpstreamTrack("[ahead 3]"), { ahead: 3, behind: 0, gone: false });
