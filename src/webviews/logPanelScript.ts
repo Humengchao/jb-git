@@ -301,7 +301,7 @@ export const logScript = String.raw`
 
   function finishRender(root, saved, graphs = false) {
     app.append(root); restoreScroll(saved);
-    if (graphs) requestAnimationFrame(drawGraphs);
+    if (graphs) scheduleGraphDraw();
   }
 
   function closeContextMenu(restoreInvoker = false) {
@@ -555,7 +555,7 @@ export const logScript = String.raw`
     root.append(toolbar());
     const workspace = node('div', 'workspace'); workspace.id = 'log-workspace';
     if (state.empty) workspace.append(node('div', 'empty', 'Open a folder containing a Git repository.'));
-    else workspace.append(branchPane(), columnSplitter('branch'), commitPane(), columnSplitter('details'), detailsPane());
+    else workspace.append(branchPaneCached(), columnSplitter('branch'), commitPane(), columnSplitter('details'), detailsPane());
     root.append(workspace); finishRender(root, saved, true);
     if (!state.empty) requestAnimationFrame(() => setupWorkspaceColumns(workspace));
   }
@@ -1446,9 +1446,32 @@ export const logScript = String.raw`
     const existing = document.getElementById('branch-pane');
     if (!existing) return;
     const replacement = branchPane();
+    branchPaneMemo = undefined;
     existing.replaceWith(replacement);
     const input = replacement.querySelector('.branch-filter');
     if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  }
+
+  /**
+   * The branch pane costs one row — with listeners — per local/remote/tag and
+   * is rebuilt on every state message, so it is reused while everything it
+   * shows is unchanged. state.branches keeps its identity across pushes that
+   * omit it; the always-resent arrays are compared by content. Reuse also
+   * keeps the filter input's focus and the pane's scroll, which a rebuild
+   * took away on every background refresh.
+   */
+  let branchPaneMemo;
+  function branchPaneCached() {
+    const key = [
+      state.selectedRef || '', state.branch || '', branchFilter,
+      (state.recentBranches || []).join('\n'),
+      (state.favoriteBranches || []).join('\n'),
+      [...selectedBranchKeys].sort().join('\n'),
+    ].join('\0');
+    if (branchPaneMemo && branchPaneMemo.key === key && branchPaneMemo.branches === state.branches) return branchPaneMemo.element;
+    const element = branchPane();
+    branchPaneMemo = { key, branches: state.branches, element };
+    return element;
   }
 
   function setupRovingRows(container, selector) {
@@ -1695,7 +1718,7 @@ export const logScript = String.raw`
       row.dataset.index = String(index); row.setAttribute('aria-posinset', String(index + 1)); row.setAttribute('aria-setsize', String(virtualCommits.length));
       row.tabIndex = selected || (!currentHash && index === 0) ? 0 : -1; row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(selected));
       row.setAttribute('aria-label', (commit.subject || 'No subject') + ', ' + commit.author + ', ' + formatDate(commit.authoredAt) + ', ' + commit.hash.slice(0, 8));
-      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; graphCache.set(canvas, { graph: virtualGraph[index], segments: graphSegments(virtualGraph[index]) }); canvas.title = t('Click a graph line to select or collapse its series'); canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
+      const subject = node('div', 'subject-cell'); const canvas = node('canvas', 'graph-interactive'); canvas.width = 144; canvas.height = 54; graphCache.set(canvas, { graph: virtualGraph[index], segments: graphSegments(virtualGraph[index]) }); dirtyGraphs.add(canvas); canvas.title = t('Click a graph line to select or collapse its series'); canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', 'Commit graph lane ' + String(virtualGraph[index].lane + 1)); attachGraphInteraction(canvas); subject.append(canvas);
       const ordered = orderedRefs(commit.refs);
       const refs = node('div', 'refs'); for (const ref of ordered.slice(0, 2)) refs.append(refChip(ref));
       if (ordered.length > 2) { const more = node('span', 'ref', '+' + String(ordered.length - 2)); more.title = ordered.slice(2).map(shortRef).join('\n'); refs.append(more); }
@@ -1766,7 +1789,7 @@ export const logScript = String.raw`
       const spacer = node('div', 'virtual-spacer'); spacer.style.height = String((virtualCommits.length - last) * commitRowHeight) + 'px'; spacer.setAttribute('role', 'presentation'); list.append(spacer);
     }
     if (state.hasMoreCommits) list.append(button('Load 300 more commits', 'Load older history', () => post('loadMore'), 'load-more'));
-    requestAnimationFrame(drawGraphs);
+    scheduleGraphDraw();
   }
 
   function navigateCommitRows(event, row) {
@@ -2300,13 +2323,25 @@ export const logScript = String.raw`
     return graphCache.get(canvas) || null;
   }
 
-  function drawGraphs() {
+  // Canvases that have not had their first paint yet. A hover redraws every
+  // canvas anyway, so the set only steers the first, batched pass.
+  const dirtyGraphs = new WeakSet();
+
+  function drawGraphs(limit) {
     const activeSeries = hoveredGraphSeries || selectedGraphSeries;
     // One style read for the whole pass. Inside the loop this was a recalc per
     // canvas, and drawGraphs runs again on every hover that moves the highlight.
     const pageBackground = getComputedStyle(document.body).backgroundColor;
+    let drawn = 0;
+    let remaining = 0;
     document.querySelectorAll('canvas.graph-interactive').forEach(canvas => {
       const drawing = graphFor(canvas); if (!drawing) return;
+      if (limit !== undefined) {
+        if (!dirtyGraphs.has(canvas)) return;
+        if (drawn >= limit) { remaining += 1; return; }
+        drawn += 1;
+      }
+      dirtyGraphs.delete(canvas);
       const graph = drawing.graph; const ctx = canvas.getContext('2d'); const scale = 2; const x = lane => 8 * scale + lane * 12 * scale; const mid = 13.5 * scale;
       ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.lineCap = 'round';
       for (const segment of drawing.segments) {
@@ -2318,6 +2353,22 @@ export const logScript = String.raw`
       ctx.fillStyle = graphColor(graph.nodeSeriesId); ctx.beginPath(); ctx.arc(x(graph.lane), mid, (graph.nodeSeriesId === activeSeries ? 4.8 : 4) * scale, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = pageBackground; ctx.lineWidth = 1.3 * scale; ctx.stroke(); ctx.globalAlpha = 1;
     });
+    return remaining;
+  }
+
+  /**
+   * First paint of fresh canvases in frame-sized batches: a few hundred
+   * canvases in one frame cost more than the frame has, so the rows show their
+   * text first and the graph lanes fill in over the next frames.
+   */
+  let graphDrawFrame = 0;
+  function scheduleGraphDraw() {
+    if (graphDrawFrame) return;
+    const step = () => {
+      graphDrawFrame = 0;
+      if (drawGraphs(60)) graphDrawFrame = requestAnimationFrame(step);
+    };
+    graphDrawFrame = requestAnimationFrame(step);
   }
 
   function graphSeriesAt(canvas, event) {

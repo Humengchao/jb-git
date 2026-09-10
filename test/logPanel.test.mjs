@@ -566,3 +566,41 @@ test("restricts the File History details pane to the walked file, by the name ea
   assert.match(source, /return simple\.length > 0 \? simple : files;/);
   assert.match(source, /if \(!this\.filePath \|\| !this\.filePathExact\) return files;/);
 });
+
+test("a fresh walk is posted before its selection read, and the details follow on their own request", () => {
+  // Switching the branch filter used to wait for the walk plus two more Git
+  // reads (files and message) before anything was posted. The fresh walk now
+  // skips the selection read when nothing steered it; the webview asks for the
+  // first row's selection itself, exactly as it does when the posted selection
+  // is not in the list.
+  assert.match(source, /let freshWalk = false;/);
+  assert.match(source, /const selectionDefaulted = /);
+  assert.match(source, /if \(commit && selectionKey && selectionKey !== this\.lastSentSelectionKey && \(!freshWalk \|\| !selectionDefaulted\)\)/);
+  assert.match(scriptMatch[1], /pendingCommitHash = commits\[0\]\.hash; requestCommitSelection\(pendingCommitHash\)/);
+  // A selection the webview already asked for is never read twice: the
+  // selectCommit handler warms the same caches the refresh path checks.
+  assert.match(source, /this\.lastSentSelectionKey = clickedSelectionKey;/);
+  // A steered selection (revealCommit) still rides with the state push.
+  assert.match(source, /!freshWalk \|\| !selectionDefaulted/);
+});
+
+test("reuses the branches pane while everything it shows is unchanged", () => {
+  // state.branches keeps its identity across pushes that omit it; the
+  // always-resent arrays are compared by content.
+  assert.match(scriptMatch[1], /let branchPaneMemo;/);
+  assert.match(scriptMatch[1], /branchPaneMemo\.branches === state\.branches/);
+  assert.match(scriptMatch[1], /\(state\.recentBranches \|\| \[\]\)\.join/);
+  assert.match(scriptMatch[1], /workspace\.append\(branchPaneCached\(\)/);
+  // Typing in the pane's own filter still rebuilds just the pane.
+  assert.match(scriptMatch[1], /branchPaneMemo = undefined;/);
+});
+
+test("paints fresh graph canvases in frame-sized batches instead of one long frame", () => {
+  // Only canvases without a first paint join the batch; a hover still redraws
+  // every canvas synchronously, so a highlight can never wait for the queue.
+  assert.match(scriptMatch[1], /const dirtyGraphs = new WeakSet\(\);/);
+  assert.match(scriptMatch[1], /dirtyGraphs\.add\(canvas\)/);
+  assert.match(scriptMatch[1], /function scheduleGraphDraw\(\)/);
+  assert.match(scriptMatch[1], /if \(drawGraphs\(60\)\) graphDrawFrame = requestAnimationFrame\(step\);/);
+  assert.doesNotMatch(scriptMatch[1], /requestAnimationFrame\(drawGraphs\)/);
+});

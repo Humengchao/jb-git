@@ -487,6 +487,9 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           this.selectedRef ?? null, this.filePath ?? null, readOptions,
         ]);
         let commits: GitCommit[];
+        // True when this update paid for a fresh `git log` read, which is the
+        // slow part of switching the branch filter on a large history.
+        let freshWalk = false;
         const cache = this.logCache;
         const cacheMatches = cache?.fingerprint === fingerprint && cache.root === root && this.currentCommitsRoot === root;
         if (!cacheMatches && this.currentCommitsRoot === root) {
@@ -501,6 +504,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           } else {
             // Grow the existing walk with --skip instead of asking Git to
             // serialize and parse every older record again.
+            freshWalk = true;
             const additional = this.logLimit - cache.limit;
             const controller = new AbortController();
             this.logRequestController = controller;
@@ -519,6 +523,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             commits = cache.commits.slice(0, this.logLimit);
           }
         } else {
+          freshWalk = true;
           const controller = new AbortController();
           this.logRequestController = controller;
           try {
@@ -533,12 +538,17 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
           this.currentCommitsRoot = root;
         }
         this.currentCommits = commits;
-        if (!this.selectedHash || !commits.some((commit) => commit.hash === this.selectedHash)) {
-          this.selectedHash = commits[0]?.hash;
-        }
+        const selectionDefaulted = !this.selectedHash || !commits.some((commit) => commit.hash === this.selectedHash);
+        if (selectionDefaulted) this.selectedHash = commits[0]?.hash;
         const commit = commits.find((item) => item.hash === this.selectedHash);
-        if (commit) {
-          const selectionKey = `${fingerprint}\0${commit.hash}`;
+        selectionKey = commit ? `${fingerprint}\0${commit.hash}` : undefined;
+        // A fresh walk goes out as soon as it lands; the details of the row it
+        // selects follow through the webview's own selectCommit request, which
+        // it already sends when the posted selection is not in the list. Two
+        // more Git reads no longer hold the whole state back on a branch
+        // switch. A steered selection (revealCommit) still rides with the
+        // state, and a selection already sent is never read again.
+        if (commit && selectionKey && selectionKey !== this.lastSentSelectionKey && (!freshWalk || !selectionDefaulted)) {
           const selectionVersion = this.selectionRequestVersion;
           if (this.selectionCache?.key !== selectionKey) {
             const controller = new AbortController();
@@ -1135,6 +1145,11 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       }
       if (this.selectedHash !== commit.hash || selectionVersion !== this.selectionRequestVersion
         || this.selectedRoot !== root) return;
+      // Warm the refresh-side caches with what this click already read, so the
+      // next state push does not read the same commit's details again.
+      const clickedSelectionKey = `${this.logCache?.fingerprint ?? ""}\0${commit.hash}`;
+      this.selectionCache = { key: clickedSelectionKey, files };
+      this.lastSentSelectionKey = clickedSelectionKey;
       await this.view?.webview.postMessage({ type: "selection", root, requestId, selection: { commit: { ...commit, body: messageText }, files } });
       return;
     }
