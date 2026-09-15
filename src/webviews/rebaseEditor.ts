@@ -32,7 +32,7 @@ export async function openRebaseEditor(
 ): Promise<boolean> {
   const candidates = await manager.interactiveRebaseCandidates(rootPath, base);
   if (candidates.length === 0) {
-    await vscode.window.showInformationMessage("There are no commits to rebase from that starting point.");
+    await vscode.window.showInformationMessage(vscode.l10n.t("There are no commits to rebase from that starting point."));
     return false;
   }
 
@@ -218,6 +218,7 @@ function script(): string {
       'The first replayed commit has nothing earlier to fold into.': '第一个重放的提交没有更早的提交可以并入。',
       'A reword or squash needs a commit message.': 'reword 或 squash 需要提交消息。',
       'This plan leaves history unchanged.': '当前计划不会改变历史。',
+      'The plan no longer matches the commits that were loaded. Close the editor and start again.': '计划与已加载的提交不再一致。请关闭编辑器后重新开始。',
       'Move earlier': '上移', 'Move later': '下移', 'Drag to reorder': '拖动以重新排序',
       'Action for commit': '选择操作：提交', 'Message for commit': '提交消息：提交',
       'Keep this commit as it is': '按原样保留此提交',
@@ -496,7 +497,10 @@ function script(): string {
         render();
       } else if (data.type === 'error') {
         const label = app.querySelector('.problem');
-        if (label) { label.textContent = data.message; label.classList.remove('quiet'); }
+        // Through the same translator the locally-detected problems use: the
+        // host posts English, and a message it does not know passes through
+        // unchanged rather than being dropped.
+        if (label) { label.textContent = t(data.message); label.classList.remove('quiet'); }
       }
     });
 

@@ -136,7 +136,7 @@ export class BlameAnnotationController implements vscode.Disposable {
     }
     const target = await this.resolveTarget(document.uri);
     if (!target) {
-      await vscode.window.showInformationMessage("The active file is not inside a discovered Git repository.");
+      await vscode.window.showInformationMessage(vscode.l10n.t("The active file is not inside a discovered Git repository."));
       return false;
     }
     await this.show(document, target);
@@ -176,14 +176,14 @@ export class BlameAnnotationController implements vscode.Disposable {
     const target = this.targets.get(uri.toString());
     if (!entry || !target) return;
     if (entry.uncommitted) {
-      await vscode.window.showInformationMessage("This line is not committed yet, so it has no previous revision.");
+      await vscode.window.showInformationMessage(vscode.l10n.t("This line is not committed yet, so it has no previous revision."));
       return;
     }
     if (!entry.previousHash || !entry.previousPath) {
       await vscode.window.showInformationMessage(
         entry.boundary
-          ? "Git stopped walking the history here, so there is no previous revision to annotate."
-          : "This line was added by the first commit that touched the file, so it has no previous revision.",
+          ? vscode.l10n.t("Git stopped walking the history here, so there is no previous revision to annotate.")
+          : vscode.l10n.t("This line was added by the first commit that touched the file, so it has no previous revision."),
       );
       return;
     }
@@ -221,7 +221,7 @@ export class BlameAnnotationController implements vscode.Disposable {
     const key = uri.toString();
     if (!entry || !this.targets.has(key)) return;
     if (entry.uncommitted) {
-      await vscode.window.showInformationMessage("This line is not committed yet, so there is no revision to hide.");
+      await vscode.window.showInformationMessage(vscode.l10n.t("This line is not committed yet, so there is no revision to hide."));
       return;
     }
     const set = this.hidden.get(key) ?? new Set<string>();
@@ -296,7 +296,7 @@ export class BlameAnnotationController implements vscode.Disposable {
     } catch (error) {
       this.forget(document.uri);
       this.renderAll();
-      await vscode.window.showWarningMessage(`JB Git could not annotate ${target.relativePath}: ${describe(error)}`);
+      await vscode.window.showWarningMessage(vscode.l10n.t("JB Git could not annotate {0}: {1}", target.relativePath, describe(error)));
     }
   }
 

@@ -67,7 +67,7 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
       if (requestVersion !== session.requestVersion || !this.sessions.has(key)) return;
       if (isBinary(leftContent) || isBinary(rightContent)) {
         await panel.webview.postMessage({ type: "selection", index });
-        await vscode.window.showInformationMessage(`${file.path} is binary and cannot be displayed in the text diff editor.`);
+        await vscode.window.showInformationMessage(vscode.l10n.t("{0} is binary and cannot be displayed in the text diff editor.", file.path));
         return;
       }
       const leftText = displayContent(leftContent, `${left.name}:${oldPath}`);

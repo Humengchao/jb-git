@@ -215,8 +215,8 @@ test("offers IntelliJ branch operations from the branch context menu", () => {
   for (const action of ["pushRef", "mergeRef", "rebaseOntoRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]) {
     assert.match(menu[1], new RegExp(`act\\('${action}'\\)`), `${action} should be reachable`);
   }
-  assert.match(menu[1], /Merge ' \+ branch\.name \+ ' into '/);
-  assert.match(menu[1], /Rebase ' \+ into \+ ' onto '/);
+  assert.match(menu[1], /format\('Merge \{0\} into \{1\}', branch\.name, into\)/);
+  assert.match(menu[1], /format\('Rebase \{0\} onto \{1\}', into, branch\.name\)/);
   // Every new action needs a handler on the extension side.
   for (const action of ["pushRef", "mergeRef", "rebaseOntoRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]) {
     assert.match(source, new RegExp(`message\\.action === "${action}"`), `${action} should be handled`);
@@ -309,8 +309,9 @@ test("targets refs unambiguously and guards branch operations by kind", () => {
   assert.match(handler.slice(0, 900), /if \(branch\.kind === "tag"\) return;/);
   assert.match(handler.slice(0, 1200), /if \(pull && branch\.kind !== "remote"\) return;/);
   assert.match(source.slice(source.indexOf('message.action === "fetchRef"')).slice(0, 300), /branch\.kind !== "remote"/);
-  // Rebase rewrites the current branch, so it must confirm like the other rewriting actions.
-  assert.match(handler.slice(0, 1200), /showWarningMessage\(\s*`Rebase/);
+  // Rebase rewrites the current branch, so it must confirm like the other
+  // rewriting actions — and through the translator, like every other dialog.
+  assert.match(handler.slice(0, 1200), /showWarningMessage\(\s*vscode\.l10n\.t\("Rebase '\{0\}' onto \{1\}\?"/);
 
   const menu = scriptMatch[1].match(/function branchContextItems\(branch\) \{([\s\S]*?)\r?\n  }/);
   assert.ok(menu);
@@ -565,4 +566,20 @@ test("restricts the File History details pane to the walked file, by the name ea
   assert.match(source, /return restricted\.length > 0 \? restricted : files;/);
   assert.match(source, /return simple\.length > 0 \? simple : files;/);
   assert.match(source, /if \(!this\.filePath \|\| !this\.filePathExact\) return files;/);
+});
+
+test("every string the Webview hands its translator has a Chinese entry", () => {
+  // t() falls back to its argument, so a missing key is invisible until a
+  // Chinese user meets one English label among the translated ones — which is
+  // how '(no subject)' and the branch menu's Push entry stayed English.
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  const dictionary = script.slice(script.indexOf("const zh = isZh ? {"), script.indexOf("} : {};"));
+  const keys = new Set([...dictionary.matchAll(/(?:'((?:[^'\\]|\\.)+)'|"((?:[^"\\]|\\.)+)")\s*:/g)].map((entry) => entry[1] ?? entry[2]));
+  const missing = [];
+  for (const entry of script.matchAll(/\b(?:t|format)\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g)) {
+    const key = entry[1] ?? entry[2];
+    if (key && !keys.has(key)) missing.push(key);
+  }
+  assert.deepEqual(missing, [], "the Webview dictionary is missing keys it translates");
 });
