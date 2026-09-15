@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.37
+
+- fix: translate the dialogs, menus and editor messages that still shipped in English
+
 ## 0.1.36
 
 - feat: restrict the File History details pane to the walked file, by its name at each commit
