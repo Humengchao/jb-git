@@ -215,6 +215,7 @@ export const logScript = String.raw`
     'Open a folder containing a Git repository.': '请打开包含 Git 仓库的文件夹。',
     "Update '{0}'": "更新 '{0}'",
     'Push…': '推送…', '(no subject)': '(无提交主题)',
+    'detached HEAD': '游离 HEAD',
     "New Branch from '{0}'…": "从 '{0}' 新建分支…",
     "Push '{0}'…": "推送 '{0}'…",
     "New Tag at '{0}'…": "在 '{0}' 上新建标签…",
@@ -589,11 +590,11 @@ export const logScript = String.raw`
 
   function changesToolbar() {
     const bar = node('div', 'changes-toolbar');
-    bar.append(
-      repositorySelect(),
-      button(state.branch || 'detached HEAD', 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
-      button('Refresh', 'Refresh', () => post('refresh'), 'icon-button'),
-    );
+    bar.append(repositorySelect());
+    // No repository means no HEAD at all: claiming a detached one told a user
+    // who had merely opened an ordinary folder that their history was adrift.
+    if (state.branch) bar.append(button(state.branch, 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'));
+    bar.append(button('Refresh', 'Refresh', () => post('refresh'), 'icon-button'));
     if (activeToolTab === 'changes') {
       bar.append(
         button('+ Changelist', 'New Changelist', () => post('createChangelist'), 'action'),
@@ -1157,7 +1158,9 @@ export const logScript = String.raw`
     bar.append(
       selectShell(repositories),
       button('Refresh', 'Refresh repository', () => post('refresh'), 'icon-button'),
-      button(state.branch || 'detached HEAD', 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
+    );
+    if (state.branch) bar.append(button(state.branch, 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'));
+    bar.append(
       node('span', 'spacer'),
       button('More…', 'More Git actions', () => post('runCommand', { command: 'jbGit.operationsPopup' }), 'icon-button'),
     );

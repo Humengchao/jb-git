@@ -191,7 +191,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const toolWindowStatus = vscode.window.createStatusBarItem("jbGit.toolWindowStatus", vscode.StatusBarAlignment.Left, 21);
   toolWindowStatus.name = "JB Git";
   toolWindowStatus.text = "$(source-control) JB Git";
-  toolWindowStatus.tooltip = "Open the JB Git tool window";
+  toolWindowStatus.tooltip = vscode.l10n.t("Open the JB Git tool window");
   toolWindowStatus.command = "jbGit.openGitToolWindow";
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   const outputChannel = vscode.window.createOutputChannel("JB Git");
@@ -203,7 +203,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel.show(true);
   };
   branchStatus.command = "jbGit.branchesPopup";
-  branchStatus.tooltip = "Git Branches and Operations";
+  branchStatus.tooltip = vscode.l10n.t("Git Branches and Operations");
 
   const updateStatusBar = (): void => {
     if ((vscode.workspace.workspaceFolders ?? []).length) toolWindowStatus.show();

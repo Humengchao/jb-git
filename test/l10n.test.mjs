@@ -150,3 +150,21 @@ test("the branch menu formats its labels instead of concatenating them", () => {
   assert.deepEqual(offenders, [], "branch labels must go through format()");
   assert.match(script, /const format = \(pattern, \.\.\.values\) => t\(pattern\)/);
 });
+
+test("no permanently visible UI property is set to raw English", () => {
+  // The notification guard above only watches showMessage. A status bar
+  // tooltip is set by assignment and sits on screen for the whole session:
+  // both of JB Git's stayed English while every dialog was translated.
+  const VISIBLE = /\.(tooltip|placeholder|prompt|detail|description) = ("(?:[^"\\]|\\.)*"|`(?:[^`\\$]|\\.)*`)/g;
+  const offenders = [];
+  for (const file of sourceFiles()) {
+    const source = readSource(`../${file}`, import.meta.url);
+    for (const match of source.matchAll(VISIBLE)) {
+      const prose = match[2].slice(1, -1).replace(/\$\{[^}]*\}/g, " ");
+      // Three plain words in a row is what makes it a sentence a reader notices.
+      if (!/[A-Za-z]+ [a-z]+ [a-z]+/.test(prose)) continue;
+      offenders.push(`${file}: ${prose.trim().slice(0, 60)}`);
+    }
+  }
+  assert.deepEqual(offenders, [], "visible UI text must go through vscode.l10n.t");
+});

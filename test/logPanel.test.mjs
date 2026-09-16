@@ -583,3 +583,18 @@ test("every string the Webview hands its translator has a Chinese entry", () => 
   }
   assert.deepEqual(missing, [], "the Webview dictionary is missing keys it translates");
 });
+
+test("an empty workspace is not described as a detached HEAD", () => {
+  // With no repository the host sends no branch at all, and the toolbars used
+  // to fall back to 'detached HEAD' — telling someone who had opened an
+  // ordinary folder that their history was adrift, right beside the panel's
+  // own "Open a folder containing a Git repository."
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  assert.doesNotMatch(script, /state\.branch \|\| 'detached HEAD'/);
+  // Both toolbars gate the button on actually knowing a branch.
+  assert.equal(script.match(/if \(state\.branch\) bar\.append\(button\(state\.branch, 'Branches'/g)?.length, 2);
+  // A real detached HEAD is a label the host sends, so it needs a translation.
+  const dictionary = script.slice(script.indexOf("const zh = isZh ? {"), script.indexOf("} : {};"));
+  assert.match(dictionary, /'detached HEAD':/);
+});
