@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.38
+
+- fix: keep JB Git's own editors out of the source file tab strip
+
 ## 0.1.37
 
 - fix: translate the dialogs, menus and editor messages that still shipped in English
