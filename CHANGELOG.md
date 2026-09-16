@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.39
+
+- fix: stop calling an empty workspace a detached HEAD, and translate the status bar
+
 ## 0.1.38
 
 - fix: keep JB Git's own editors out of the source file tab strip
