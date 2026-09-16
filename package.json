@@ -487,23 +487,74 @@
         }
       ],
       "commandPalette": [
-        { "command": "jbGit.openDiff", "when": "false" },
-        { "command": "jbGit.moveToChangelist", "when": "false" },
-        { "command": "jbGit.commitChangelist", "when": "false" },
-        { "command": "jbGit.applyShelf", "when": "false" },
-        { "command": "jbGit.deleteShelf", "when": "false" },
-        { "command": "jbGit.removeRemote", "when": "false" },
-        { "command": "jbGit.fetchRemote", "when": "false" },
-        { "command": "jbGit.pushRemote", "when": "false" },
-        { "command": "jbGit.discardChange", "when": "false" },
-        { "command": "jbGit.markResolved", "when": "false" },
-        { "command": "jbGit.continueOperation", "when": "jbGit.canContinueOperation" },
-        { "command": "jbGit.abortOperation", "when": "jbGit.canAbortOperation" },
-        { "command": "jbGit.skipOperation", "when": "jbGit.canSkipOperation" },
-        { "command": "jbGit.bisectGood", "when": "jbGit.operationKind == bisect" },
-        { "command": "jbGit.bisectBad", "when": "jbGit.operationKind == bisect" },
-        { "command": "jbGit.bisectSkip", "when": "jbGit.operationKind == bisect" },
-        { "command": "jbGit.bisectReset", "when": "jbGit.operationKind == bisect" }
+        {
+          "command": "jbGit.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.moveToChangelist",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.commitChangelist",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.applyShelf",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.deleteShelf",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.removeRemote",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.fetchRemote",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.pushRemote",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.discardChange",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.markResolved",
+          "when": "false"
+        },
+        {
+          "command": "jbGit.continueOperation",
+          "when": "jbGit.canContinueOperation"
+        },
+        {
+          "command": "jbGit.abortOperation",
+          "when": "jbGit.canAbortOperation"
+        },
+        {
+          "command": "jbGit.skipOperation",
+          "when": "jbGit.canSkipOperation"
+        },
+        {
+          "command": "jbGit.bisectGood",
+          "when": "jbGit.operationKind == bisect"
+        },
+        {
+          "command": "jbGit.bisectBad",
+          "when": "jbGit.operationKind == bisect"
+        },
+        {
+          "command": "jbGit.bisectSkip",
+          "when": "jbGit.operationKind == bisect"
+        },
+        {
+          "command": "jbGit.bisectReset",
+          "when": "jbGit.operationKind == bisect"
+        }
       ]
     },
     "keybindings": [
@@ -538,6 +589,19 @@
           "type": "boolean",
           "default": true,
           "description": "%configuration.confirmDiscard%"
+        },
+        "jbGit.toolEditorLocation": {
+          "type": "string",
+          "enum": [
+            "beside",
+            "active"
+          ],
+          "enumDescriptions": [
+            "%configuration.toolEditorLocation.beside%",
+            "%configuration.toolEditorLocation.active%"
+          ],
+          "default": "beside",
+          "description": "%configuration.toolEditorLocation%"
         },
         "jbGit.protectedBranches": {
           "type": "array",
@@ -613,7 +677,10 @@
           "maxItems": 100,
           "items": {
             "type": "object",
-            "required": ["pattern", "url"],
+            "required": [
+              "pattern",
+              "url"
+            ],
             "properties": {
               "pattern": {
                 "type": "string",

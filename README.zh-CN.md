@@ -34,6 +34,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 ### IDEA 风格工作区
 
 - Git 以原生底部 Panel 工具窗口显示，不占用活动栏侧边栏，也不会打开编辑器标签页。
+- 合并编辑器、交互式变基序列编辑器和分支比较对应 IDEA 的对话框，因此默认在代码旁边单独成组打开，不会挤在源文件标签中间；它们彼此共用同一组，不会每开一个就多劈一列。想放回源文件标签里，把 `jbGit.toolEditorLocation` 设为 `active`。
 - 同一个底部 Git 工具窗口包含 `Log`、`Console`、`Local Changes` 和 `Shelf` 四个页签。
 - Local Changes 包含 Changelist、文件勾选、提交消息、Amend、Sign-off、跳过 Hooks、Commit 和 Commit and Push。
 - Log 使用横向三栏布局：左侧 Branches、中间提交图和提交表、右侧 Changed Files 与 Commit Details；三栏宽度都可以拖动调节并自动记忆。

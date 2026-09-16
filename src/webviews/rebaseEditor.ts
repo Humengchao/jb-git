@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { RepositoryManager } from "../repositoryManager";
 import { REBASE_ACTIONS, validateRebasePlan, isNoOpPlan, type InteractiveRebaseExpectation, type PlanRow } from "../interactiveRebase";
 import { isRebaseEditorMessage, originalMessage, planCoversSameCommits } from "./rebaseEditorProtocol";
-import { webviewDocument } from "./html";
+import { registerToolPanel, toolEditorColumn, webviewDocument } from "./html";
 
 /** A commit as the sequence editor displays it. */
 interface EditorCommit {
@@ -57,9 +57,10 @@ export async function openRebaseEditor(
   const panel = vscode.window.createWebviewPanel(
     "jbGit.rebaseEditor",
     `Rebase ${commits.length} Commit(s)`,
-    vscode.ViewColumn.Active,
+    toolEditorColumn(),
     { enableScripts: true, retainContextWhenHidden: true },
   );
+  registerToolPanel(panel);
 
   try {
     return await new Promise<boolean>((resolve, reject) => {

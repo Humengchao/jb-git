@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { GitRepository } from "../git/repository";
 import { GitBranch } from "../git/types";
 import { DiffContentProvider } from "../views/diffProvider";
-import { webviewDocument } from "./html";
+import { registerToolPanel, toolEditorColumn, webviewDocument } from "./html";
 
 type ComparisonMessage =
   | { type: "ready" }
@@ -41,13 +41,14 @@ export class BranchComparisonWorkspace implements vscode.Disposable {
 
   private async openPanel(key: string, repository: GitRepository, left: GitBranch, right: GitBranch): Promise<void> {
     const files = await repository.diffFiles(left.oid, right.oid);
-    const initialColumn = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+    const initialColumn = toolEditorColumn();
     const panel = vscode.window.createWebviewPanel(
       "jbGit.branchComparison",
       `Changes Between ${left.name} and ${right.name}`,
       { viewColumn: initialColumn, preserveFocus: false },
       { enableScripts: true, retainContextWhenHidden: true },
     );
+    registerToolPanel(panel);
     panel.webview.html = webviewDocument(panel.title, comparisonStyles, comparisonScript);
 
     const session: ComparisonSession = { key, panel, disposables: [], requestVersion: 0 };
