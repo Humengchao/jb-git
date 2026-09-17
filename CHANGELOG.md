@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.41
+
+- fix: make a failed publish fail the release run, after the release exists
+
 ## 0.1.40
 
 - fix: publish the GitHub release before the Marketplace can fail the run
