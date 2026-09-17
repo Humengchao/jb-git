@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.40
+
+- fix: publish the GitHub release before the Marketplace can fail the run
+
 ## 0.1.39
 
 - fix: stop calling an empty workspace a detached HEAD, and translate the status bar
