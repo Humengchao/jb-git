@@ -180,4 +180,12 @@ test("the GitHub release is published before anything that can fail elsewhere", 
   // And the summary must not claim a publish that only attempted.
   assert.match(workflow, /MARKETPLACE_OUTCOME: \$\{\{ steps\.publish-marketplace\.outcome \}\}/);
   assert.match(workflow, /if \[ "\$MARKETPLACE_OUTCOME" = "success" \]/);
+  // continue-on-error rewrites the step's conclusion to success, so without a
+  // last word the run goes green while the Marketplace stays on an old
+  // version. It must still end red — after the release, which costs nothing.
+  const report = at("Report a publish that did not happen");
+  assert.ok(release < report, "the release must exist before the run is failed");
+  assert.match(workflow.slice(report), /steps\.publish-marketplace\.outcome == 'failure' \|\| steps\.publish-ovsx\.outcome == 'failure'/);
+  assert.match(workflow.slice(report), /::error title=Marketplace publish failed::/);
+  assert.match(workflow.slice(report), /\n *exit 1\n/);
 });

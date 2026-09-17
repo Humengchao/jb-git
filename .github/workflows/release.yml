@@ -177,3 +177,26 @@ jobs:
               echo "Download \`jb-git-$VERSION.vsix\` from the [release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/v$VERSION) and upload it at <https://marketplace.visualstudio.com/manage/publishers/hmc>."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # continue-on-error rewrites a failed step's conclusion to success, so a
+      # broken upload would otherwise leave a green run and nothing but a line
+      # in the summary — which is how the Marketplace went stale from 0.1.37
+      # without anyone noticing. The release is already published by now, so
+      # failing here costs nothing and is the only signal that actually shows.
+      - name: Report a publish that did not happen
+        if: steps.publish-marketplace.outcome == 'failure' || steps.publish-ovsx.outcome == 'failure'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          MARKETPLACE_OUTCOME: ${{ steps.publish-marketplace.outcome }}
+          OPEN_VSX_OUTCOME: ${{ steps.publish-ovsx.outcome }}
+        # `if` rather than `[ … ] && echo`: the default shell is `bash -e`, where
+        # a false test is a failing command, so the Open VSX line would never be
+        # reached whenever the Marketplace was the one that succeeded.
+        run: |
+          if [ "$MARKETPLACE_OUTCOME" = "failure" ]; then
+            echo "::error title=Marketplace publish failed::JB Git $VERSION is on GitHub but not on the Visual Studio Marketplace. Check VSCE_PAT, then upload the VSIX from the release."
+          fi
+          if [ "$OPEN_VSX_OUTCOME" = "failure" ]; then
+            echo "::error title=Open VSX publish failed::JB Git $VERSION is on GitHub but not on Open VSX. Check OVSX_PAT, then upload the VSIX from the release."
+          fi
+          exit 1
