@@ -157,3 +157,27 @@ test("the unit runner lists its files itself instead of trusting the shell to ex
   assert.match(runner, /spawnSync\(process\.execPath, \["--test", \.\.\.files/);
   assert.match(runner, /process\.exit\(result\.status \?\? 1\)/);
 });
+
+test("the GitHub release is published before anything that can fail elsewhere", () => {
+  // v0.1.34, v0.1.35 and v0.1.37-39 were tagged and bumped but never released:
+  // `vsce publish` sat ahead of the release step without continue-on-error, so
+  // one transient Marketplace error took the VSIX down with it and left an
+  // orphan tag. The release is the artifact of record and goes first.
+  const workflow = readSource("../.github/workflows/release.yml", import.meta.url);
+  const at = (name) => {
+    const index = workflow.indexOf(`- name: ${name}`);
+    assert.ok(index >= 0, `the release workflow should still have a "${name}" step`);
+    return index;
+  };
+  const release = at("Create the GitHub release");
+  assert.ok(at("Commit and tag the release") < release, "the release needs its tag first");
+  for (const publish of ["Publish to the Visual Studio Marketplace", "Publish to Open VSX"]) {
+    assert.ok(release < at(publish), `${publish} must not run before the GitHub release`);
+    // Each third-party publish carries its own continue-on-error.
+    const step = workflow.slice(at(publish), at(publish) + 400);
+    assert.match(step, /continue-on-error: true/, `${publish} must not be able to fail the run`);
+  }
+  // And the summary must not claim a publish that only attempted.
+  assert.match(workflow, /MARKETPLACE_OUTCOME: \$\{\{ steps\.publish-marketplace\.outcome \}\}/);
+  assert.match(workflow, /if \[ "\$MARKETPLACE_OUTCOME" = "success" \]/);
+});
