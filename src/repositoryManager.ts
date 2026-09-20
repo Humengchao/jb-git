@@ -28,6 +28,13 @@ export interface RepositoryMutationLease {
   readonly token: symbol;
 }
 
+export interface RepositoryRefreshRequest {
+  readonly rootPath: string;
+  readonly refsStale?: boolean;
+}
+
+const SNAPSHOT_CONCURRENCY = 4;
+
 export class RepositoryManager implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private readonly snapshots = new Map<string, RepositorySnapshot>();
@@ -68,6 +75,7 @@ export class RepositoryManager implements vscode.Disposable {
     await this.enqueueRefresh(async () => {
       const previous = this.snapshotKeys();
       const discovered = await discoverRepositories(this.workspacePaths(), this.runner, undefined, scanNested);
+      if (this.disposed) return;
       const existingByRoot = new Map(this.repositories.map((repository) => [repository.info.rootPath, repository]));
       const repositories = discovered.map((repository) => {
         const existing = existingByRoot.get(repository.info.rootPath);
@@ -76,7 +84,7 @@ export class RepositoryManager implements vscode.Disposable {
         // across a rescan on one lock instead of creating two independent queues.
         return existing && sameRepositoryIdentity(existing, repository) ? existing : repository;
       });
-      const snapshots = await Promise.all(repositories.map((repository) => this.readSnapshot(repository)));
+      const snapshots = await this.readSnapshots(repositories);
       if (this.disposed) return;
       // Swap the list and its snapshots together: while the reads were in flight, commands
       // could otherwise see a repository without a snapshot or a snapshot without its
@@ -85,21 +93,26 @@ export class RepositoryManager implements vscode.Disposable {
       this.snapshots.clear();
       for (const snapshot of snapshots) this.snapshots.set(snapshot.repository.info.rootPath, snapshot);
       await this.updateContextKeys();
-      if (this.snapshotsChanged(previous)) this.changeEmitter.fire();
+      if (!this.disposed && this.snapshotsChanged(previous)) this.changeEmitter.fire();
     });
   }
 
   public async refresh(rootPath?: string, options?: { refsStale?: boolean }): Promise<void> {
     await this.enqueueRefresh(async () => {
-      const previous = this.snapshotKeys();
       const targets = rootPath ? this.repositories.filter((repo) => repo.info.rootPath === rootPath) : this.repositories;
-      await Promise.all(
-        targets.map(async (repository) => {
-          this.snapshots.set(repository.info.rootPath, await this.readSnapshot(repository, options?.refsStale ?? true));
-        }),
-      );
-      await this.updateContextKeys();
-      if (this.snapshotsChanged(previous)) this.changeEmitter.fire();
+      await this.refreshSnapshots(targets, () => options?.refsStale ?? true);
+    });
+  }
+
+  public async refreshMany(requests: readonly RepositoryRefreshRequest[]): Promise<void> {
+    const refsByRoot = new Map<string, boolean>();
+    for (const request of requests) {
+      refsByRoot.set(request.rootPath, Boolean(refsByRoot.get(request.rootPath)) || (request.refsStale ?? true));
+    }
+    if (!refsByRoot.size) return;
+    await this.enqueueRefresh(async () => {
+      const targets = this.repositories.filter((repository) => refsByRoot.has(repository.info.rootPath));
+      await this.refreshSnapshots(targets, (rootPath) => refsByRoot.get(rootPath) ?? true);
     });
   }
 
@@ -557,6 +570,33 @@ export class RepositoryManager implements vscode.Disposable {
     }
   }
 
+  private async refreshSnapshots(repositories: readonly GitRepository[], refsStale: (rootPath: string) => boolean): Promise<void> {
+    if (!repositories.length) return;
+    const previous = this.snapshotKeys();
+    const snapshots = await this.readSnapshots(repositories, refsStale);
+    if (this.disposed) return;
+    for (const snapshot of snapshots) this.snapshots.set(snapshot.repository.info.rootPath, snapshot);
+    await this.updateContextKeys();
+    if (!this.disposed && this.snapshotsChanged(previous)) this.changeEmitter.fire();
+  }
+
+  private async readSnapshots(
+    repositories: readonly GitRepository[],
+    refsStale: (rootPath: string) => boolean = () => true,
+  ): Promise<RepositorySnapshot[]> {
+    const snapshots = new Array<RepositorySnapshot>(repositories.length);
+    let nextIndex = 0;
+    const readNext = async (): Promise<void> => {
+      while (!this.disposed && nextIndex < repositories.length) {
+        const index = nextIndex++;
+        const repository = repositories[index];
+        snapshots[index] = await this.readSnapshot(repository, refsStale(repository.info.rootPath));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(SNAPSHOT_CONCURRENCY, repositories.length) }, readNext));
+    return snapshots;
+  }
+
   private async readSnapshot(repository: GitRepository, refsStale = true): Promise<RepositorySnapshot> {
     try {
       if (repository.info.isBare) {
@@ -574,12 +614,15 @@ export class RepositoryManager implements vscode.Disposable {
       // is not trusted — it may be the empty fallback.
       const previous = this.snapshots.get(repository.info.rootPath);
       const reuseBranches = !refsStale && previous !== undefined && !previous.error;
-      const [status, branches, operation] = await Promise.all([
+      const [status, branches, operation] = await Promise.allSettled([
         repository.status(),
         reuseBranches ? Promise.resolve(previous.branches) : repository.branches(),
         repository.operationState(),
       ]);
-      return withSnapshotKey({ repository, status, branches, operation });
+      if (status.status === "rejected") throw status.reason;
+      if (branches.status === "rejected") throw branches.reason;
+      if (operation.status === "rejected") throw operation.reason;
+      return withSnapshotKey({ repository, status: status.value, branches: branches.value, operation: operation.value });
     } catch (error) {
       return withSnapshotKey({
         repository,

@@ -274,7 +274,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const roots = [...batch.roots.keys()];
       const operation = batch.discoveryGeneration !== undefined
         ? manager.discoverAndRefresh()
-        : Promise.all(roots.map((root) => manager.refresh(root, { refsStale: batch.refsStale.has(root) }))).then(() => undefined);
+        : manager.refreshMany(roots.map((rootPath) => ({ rootPath, refsStale: batch.refsStale.has(rootPath) })));
       void operation
         .then(updateStatusBar, (error) => vscode.window.showErrorMessage(formatGitError(error)))
         .finally(() => {
