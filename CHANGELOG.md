@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.42
+
+- perf: batch repository refreshes with bounded concurrency and atomic snapshots
+- perf: stop rebuilding the commit pane and re-reading refs on every refresh
+- perf: show a switched branch's log before its first commit's details
+
 ## 0.1.41
 
 - fix: make a failed publish fail the release run, after the release exists
