@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import * as vscode from "vscode";
 import { GitConflictVersions } from "../git/types";
 import { RepositoryManager, RepositorySnapshot } from "../repositoryManager";
-import { webviewDocument } from "./html";
+import { registerToolPanel, toolEditorColumn, webviewDocument } from "./html";
 import { asSandboxGlobal, readInjectedModule } from "./injectedModule";
 import { isMergeEditorMessage } from "./mergeEditorProtocol";
 import { basesForConflicts } from "../mergeAnalysis";
@@ -190,9 +190,10 @@ export class MergeConflictEditor implements vscode.Disposable {
     const panel = vscode.window.createWebviewPanel(
       "jbGit.mergeConflictEditor",
       title,
-      vscode.ViewColumn.Active,
+      toolEditorColumn(),
       { enableScripts: true, retainContextWhenHidden: true },
     );
+    registerToolPanel(panel);
     this.panels.set(key, panel);
     let allowDispose = false;
     let dirty = Boolean(restoredDraft);

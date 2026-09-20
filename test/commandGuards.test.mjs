@@ -22,7 +22,7 @@ test("confirms restricting the working tree and validates the sparse paths", () 
   const sparse = extension.slice(extension.indexOf('"jbGit.sparseCheckoutSet"'), extension.indexOf('"jbGit.sparseCheckoutDisable"'));
   // Setting the cone deletes every file outside it; the destructive direction was the one
   // without a confirmation.
-  assert.match(sparse, /showWarningMessage\(\s*`Restrict the working tree/);
+  assert.match(sparse, /showWarningMessage\(\s*vscode\.l10n\.t\("Restrict the working tree to \{0\}\?"/);
   assert.match(sparse, /modal: true/);
   assert.match(sparse, /validateInput/);
 });
@@ -47,7 +47,7 @@ test("acts on stashes by commit id and reports conflicts as conflicts", () => {
   // the user confirm an index, not a stash.
   assert.match(extension, /applyStash\(node\.repositoryRoot, node\.entry\.ref, pop, node\.entry\.oid\)/);
   assert.match(extension, /dropStash\(node\.repositoryRoot, node\.entry\.ref, node\.entry\.oid\)/);
-  assert.match(extension, /Drop the stash '\$\{node\.entry\.message \|\| node\.entry\.ref\}'/);
+  assert.match(extension, /l10n\.t\("Drop the stash '\{0\}'\?", node\.entry\.message \|\| node\.entry\.ref\)/);
   assert.match(extension, /The stash was applied with conflicts\./);
   const repositorySource = readSource("../src/git/repository.ts", import.meta.url);
   assert.match(repositorySource, /private async resolveStashRef/);
@@ -150,7 +150,7 @@ test("Checkout and Rebase onto Current rebases while the parked changes are stil
   assert.match(action, /modal: true/);
   assert.match(action, /afterCheckout: \(lease\) => this\.manager\.rebase\(root, onto, lease\)/);
   const script = panelScript(import.meta.url);
-  assert.match(script, /label: 'Checkout ' \+ branch\.name \+ ' and Rebase onto ' \+ into, disabled: !current, run: act\('checkoutAndRebase'\)/);
+  assert.match(script, /label: format\('Checkout \{0\} and Rebase onto \{1\}', branch\.name, into\), disabled: !current, run: act\('checkoutAndRebase'\)/);
 });
 
 test("Accept Yours / Accept Theirs label the sides by the running operation and confirm first", () => {

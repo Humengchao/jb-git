@@ -19,5 +19,8 @@
   "configuration.blame.detectMovementsAcrossFiles": "Also follow a block copied in from another file the same commit touched. Slower on a large history (git blame -C).",
   "configuration.issueNavigation": "Issue Navigation, as in IDEA: patterns that turn issue ids in commit messages into tracker links. Example: pattern \"[A-Z]+-\\\\d+\", url \"https://youtrack.example.com/issue/$0\".",
   "configuration.issueNavigation.pattern": "Regular expression that matches an issue id, e.g. [A-Z]+-\\\\d+.",
-  "configuration.issueNavigation.url": "Link target; $0 is the whole match, $1-$9 are capture groups."
+  "configuration.issueNavigation.url": "Link target; $0 is the whole match, $1-$9 are capture groups.",
+  "configuration.toolEditorLocation": "Where JB Git's own editors open: the merge editor, the interactive rebase sequence editor and branch comparison.",
+  "configuration.toolEditorLocation.beside": "Beside the code, in a group of their own, so they do not interleave with source file tabs.",
+  "configuration.toolEditorLocation.active": "In the active editor group, among the source file tabs."
 }

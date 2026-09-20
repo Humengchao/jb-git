@@ -828,7 +828,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             // Rebasing rewrites the checked-out branch, so confirm like every other
             // history-rewriting action in this panel.
             const confirmed = await vscode.window.showWarningMessage(
-              `Rebase '${head}' onto ${branch.name}?`,
+              vscode.l10n.t("Rebase '{0}' onto {1}?", head, branch.name),
               { modal: true, detail: vscode.l10n.t("Commits on the current branch are rewritten.") },
               vscode.l10n.t("Rebase"),
             );
@@ -848,7 +848,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
             return;
           }
           await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: `Merging ${branch.name}` },
+            { location: vscode.ProgressLocation.Notification, title: vscode.l10n.t("Merging {0}", branch.name) },
             () => this.manager.merge(root, branch.fullName),
           );
           return;
@@ -999,7 +999,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
         if (message.action === "restoreFile") {
           if (!(await requireTrusted())) return;
           const confirmed = await vscode.window.showWarningMessage(
-            `Replace the working-tree version of '${file.path}' with ${commit.hash.slice(0, 8)}?`,
+            vscode.l10n.t("Replace the working-tree version of '{0}' with {1}?", file.path, commit.hash.slice(0, 8)),
             { modal: true }, vscode.l10n.t("Restore"),
           );
           if (confirmed === vscode.l10n.t("Restore")) await this.manager.restoreFileFromRevision(root, commit.hash, file.path);
@@ -1397,8 +1397,8 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       if (shouldConfirm) {
         const confirmed = await vscode.window.showWarningMessage(
           change.kind === "untracked"
-            ? `Move ${change.path} to the system Trash?`
-            : `Roll back ${change.path}? A recovery entry will be kept in Shelf.`,
+            ? vscode.l10n.t("Move {0} to the system Trash?", change.path)
+            : vscode.l10n.t("Roll back {0}? A recovery entry will be kept in Shelf.", change.path),
           { modal: true }, action,
         );
         if (confirmed !== action) return;
@@ -1618,7 +1618,7 @@ export class IntelliJGitToolWindowProvider implements vscode.WebviewViewProvider
       const list = this.changelists.lists(root).find((candidate) => candidate.id === message.id);
       if (!list || this.changelists.lists(root).length === 1) return;
       const answer = await vscode.window.showWarningMessage(
-        `Delete Changelist '${list.name}'? Its files will move to the first remaining Changelist.`,
+        vscode.l10n.t("Delete Changelist '{0}'? Its files will move to the first remaining Changelist.", list.name),
         { modal: true }, vscode.l10n.t("Delete"),
       );
       if (answer === vscode.l10n.t("Delete")) await this.changelists.remove(root, list.id);

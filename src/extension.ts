@@ -165,7 +165,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }, async (error) => {
     const action = await vscode.window.showErrorMessage(
-      `JB Git could not run '${configurationGitPath()}': ${formatGitError(error)}`,
+      vscode.l10n.t("JB Git could not run '{0}': {1}", configurationGitPath(), formatGitError(error)),
       vscode.l10n.t("Open Settings"),
     );
     if (action === vscode.l10n.t("Open Settings")) await vscode.commands.executeCommand("workbench.action.openSettings", "jbGit.gitPath");
@@ -196,7 +196,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const toolWindowStatus = vscode.window.createStatusBarItem("jbGit.toolWindowStatus", vscode.StatusBarAlignment.Left, 21);
   toolWindowStatus.name = "JB Git";
   toolWindowStatus.text = "$(source-control) JB Git";
-  toolWindowStatus.tooltip = "Open the JB Git tool window";
+  toolWindowStatus.tooltip = vscode.l10n.t("Open the JB Git tool window");
   toolWindowStatus.command = "jbGit.openGitToolWindow";
   const branchStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
   const outputChannel = vscode.window.createOutputChannel("JB Git");
@@ -208,7 +208,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel.show(true);
   };
   branchStatus.command = "jbGit.branchesPopup";
-  branchStatus.tooltip = "Git Branches and Operations";
+  branchStatus.tooltip = vscode.l10n.t("Git Branches and Operations");
 
   const updateStatusBar = (): void => {
     if ((vscode.workspace.workspaceFolders ?? []).length) toolWindowStatus.show();
@@ -456,7 +456,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const conflicted = snapshot?.status?.changes.some((change) => change.conflicted);
       if (!conflicted) throw error;
       await vscode.window.showWarningMessage(
-        `The stash was applied with conflicts.${pop ? " The stash entry was kept; do not pop it again." : ""} Resolve the conflicted files in Local Changes.`,
+        pop
+          ? vscode.l10n.t("The stash was applied with conflicts. The stash entry was kept; do not pop it again. Resolve the conflicted files in Local Changes.")
+          : vscode.l10n.t("The stash was applied with conflicts. Resolve the conflicted files in Local Changes."),
       );
     }
   };
@@ -488,7 +490,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const found = annotatedLine(argument);
     if (!found) {
       await vscode.window.showInformationMessage(
-        "Run 'JB Git: Annotate with Git Blame' on the file and put the caret on a committed line first.",
+        vscode.l10n.t("Run 'JB Git: Annotate with Git Blame' on the file and put the caret on a committed line first."),
       );
     }
     return found;
@@ -937,7 +939,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!input?.trim()) return;
       const paths = input.split(",").map((item) => item.trim()).filter(Boolean);
       const confirmed = await vscode.window.showWarningMessage(
-        `Restrict the working tree to ${paths.join(", ")}?`,
+        vscode.l10n.t("Restrict the working tree to {0}?", paths.join(", ")),
         { modal: true, detail: vscode.l10n.t("Every file outside these directories is removed from the working tree until sparse checkout is disabled.") },
         vscode.l10n.t("Restrict"),
       );
@@ -1139,12 +1141,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         },
       );
 
-      const detail = skipped.length ? ` ${skipped.length} file(s) could not be analysed.` : "";
+      const detail = skipped.length ? ` ${vscode.l10n.t("{0} file(s) could not be analysed.", skipped.length)}` : "";
       if (resolved === 0) {
         await vscode.window.showInformationMessage(vscode.l10n.t("No conflict could be resolved mechanically; {0} still need a decision.{1}", remaining, detail));
       } else {
         await vscode.window.showInformationMessage(
-          `Resolved ${resolved} conflict(s) that had only one possible outcome. ${remaining} still need a decision.${detail}`,
+          vscode.l10n.t("Resolved {0} conflict(s) that had only one possible outcome. {1} still need a decision.{2}", resolved, remaining, detail),
         );
       }
       if (skipped.length) outputChannel.appendLine(`Simple conflict resolution skipped:\n${skipped.join("\n")}`);
@@ -1654,7 +1656,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (!entry) return; node = new StashNode(first.repository.info.rootPath, entry);
       }
       const answer = await vscode.window.showWarningMessage(
-        `Drop the stash '${node.entry.message || node.entry.ref}'?`,
+        vscode.l10n.t("Drop the stash '{0}'?", node.entry.message || node.entry.ref),
         { modal: true },
         vscode.l10n.t("Drop"),
       );
@@ -1730,7 +1732,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const confirmDiscard = vscode.workspace.getConfiguration("jbGit").get<boolean>("confirmDiscard", true);
       if (confirmDiscard) {
         const answer = await vscode.window.showWarningMessage(
-          `Roll back ${node.change.path}? A recovery entry will be kept in Shelf.`,
+          vscode.l10n.t("Roll back {0}? A recovery entry will be kept in Shelf.", node.change.path),
           { modal: true },
           vscode.l10n.t("Discard"),
         );

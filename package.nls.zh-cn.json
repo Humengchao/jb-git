@@ -19,5 +19,8 @@
   "configuration.blame.detectMovementsAcrossFiles": "同时追踪同一提交里从其他文件复制过来的代码块。历史较大时会变慢（git blame -C）。",
   "configuration.issueNavigation": "与 IDEA 的 Issue Navigation 相同：把提交消息中的缺陷编号变成跟踪系统链接的规则。例如 pattern \"[A-Z]+-\\\\d+\"，url \"https://youtrack.example.com/issue/$0\"。",
   "configuration.issueNavigation.pattern": "匹配缺陷编号的正则表达式，例如 [A-Z]+-\\\\d+。",
-  "configuration.issueNavigation.url": "链接目标；$0 为整个匹配，$1-$9 为捕获组。"
+  "configuration.issueNavigation.url": "链接目标；$0 为整个匹配，$1-$9 为捕获组。",
+  "configuration.toolEditorLocation": "JB Git 自身的编辑器在哪里打开：合并编辑器、交互式变基序列编辑器和分支比较。",
+  "configuration.toolEditorLocation.beside": "在代码旁边单独成组打开，不与源文件标签混在一起。",
+  "configuration.toolEditorLocation.active": "在当前编辑器组中打开，与源文件标签并列。"
 }

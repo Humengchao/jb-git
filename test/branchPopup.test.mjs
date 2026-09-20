@@ -149,7 +149,7 @@ test("the Log's Branches pane has IDEA's Recent and Favorites groups, a star and
   // Only a branch with a live upstream can be updated; the current one is a pull.
   const menu = script.slice(script.indexOf("function branchContextItems"), script.indexOf("function branchPane()"));
   assert.match(menu, /if \(kind === 'local' && branch\.upstream && !branch\.upstreamGone\)/);
-  assert.match(menu, /label: isCurrent \? 'Update Project…' : "Update '" \+ branch\.name \+ "'", run: act\('updateRef'\)/);
+  assert.match(menu, /label: isCurrent \? t\('Update Project…'\) : format\("Update '\{0\}'", branch\.name\), run: act\('updateRef'\)/);
 
   const host = panelHost(import.meta.url);
   const update = host.slice(host.indexOf('message.action === "updateRef"'), host.indexOf('message.action === "checkoutAndRebase"'));

@@ -215,8 +215,8 @@ test("offers IntelliJ branch operations from the branch context menu", () => {
   for (const action of ["pushRef", "mergeRef", "rebaseOntoRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]) {
     assert.match(menu[1], new RegExp(`act\\('${action}'\\)`), `${action} should be reachable`);
   }
-  assert.match(menu[1], /Merge ' \+ branch\.name \+ ' into '/);
-  assert.match(menu[1], /Rebase ' \+ into \+ ' onto '/);
+  assert.match(menu[1], /format\('Merge \{0\} into \{1\}', branch\.name, into\)/);
+  assert.match(menu[1], /format\('Rebase \{0\} onto \{1\}', into, branch\.name\)/);
   // Every new action needs a handler on the extension side.
   for (const action of ["pushRef", "mergeRef", "rebaseOntoRef", "pullRefMerge", "pullRefRebase", "fetchRef", "tagFromRef", "deleteTag"]) {
     assert.match(source, new RegExp(`message\\.action === "${action}"`), `${action} should be handled`);
@@ -309,8 +309,9 @@ test("targets refs unambiguously and guards branch operations by kind", () => {
   assert.match(handler.slice(0, 900), /if \(branch\.kind === "tag"\) return;/);
   assert.match(handler.slice(0, 1200), /if \(pull && branch\.kind !== "remote"\) return;/);
   assert.match(source.slice(source.indexOf('message.action === "fetchRef"')).slice(0, 300), /branch\.kind !== "remote"/);
-  // Rebase rewrites the current branch, so it must confirm like the other rewriting actions.
-  assert.match(handler.slice(0, 1200), /showWarningMessage\(\s*`Rebase/);
+  // Rebase rewrites the current branch, so it must confirm like the other
+  // rewriting actions — and through the translator, like every other dialog.
+  assert.match(handler.slice(0, 1200), /showWarningMessage\(\s*vscode\.l10n\.t\("Rebase '\{0\}' onto \{1\}\?"/);
 
   const menu = scriptMatch[1].match(/function branchContextItems\(branch\) \{([\s\S]*?)\r?\n  }/);
   assert.ok(menu);
@@ -627,4 +628,35 @@ test("a worktree save refreshes the status without re-reading the branch list", 
   assert.match(extension, /refsStale: Boolean\(this\.roots\.get\(rootPath\)\?\.refsStale\) \|\| refsStale/);
   const manager = readSource("../src/repositoryManager.ts", import.meta.url);
   assert.match(manager, /reuseBranches \? Promise\.resolve\(previous\.branches\) : repository\.branches\(\)/);
+});
+
+test("every string the Webview hands its translator has a Chinese entry", () => {
+  // t() falls back to its argument, so a missing key is invisible until a
+  // Chinese user meets one English label among the translated ones — which is
+  // how '(no subject)' and the branch menu's Push entry stayed English.
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  const dictionary = script.slice(script.indexOf("const zh = isZh ? {"), script.indexOf("} : {};"));
+  const keys = new Set([...dictionary.matchAll(/(?:'((?:[^'\\]|\\.)+)'|"((?:[^"\\]|\\.)+)")\s*:/g)].map((entry) => entry[1] ?? entry[2]));
+  const missing = [];
+  for (const entry of script.matchAll(/\b(?:t|format)\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g)) {
+    const key = entry[1] ?? entry[2];
+    if (key && !keys.has(key)) missing.push(key);
+  }
+  assert.deepEqual(missing, [], "the Webview dictionary is missing keys it translates");
+});
+
+test("an empty workspace is not described as a detached HEAD", () => {
+  // With no repository the host sends no branch at all, and the toolbars used
+  // to fall back to 'detached HEAD' — telling someone who had opened an
+  // ordinary folder that their history was adrift, right beside the panel's
+  // own "Open a folder containing a Git repository."
+  assert.ok(scriptMatch);
+  const script = scriptMatch[1];
+  assert.doesNotMatch(script, /state\.branch \|\| 'detached HEAD'/);
+  // Both toolbars gate the button on actually knowing a branch.
+  assert.equal(script.match(/if \(state\.branch\) bar\.append\(button\(state\.branch, 'Branches'/g)?.length, 2);
+  // A real detached HEAD is a label the host sends, so it needs a translation.
+  const dictionary = script.slice(script.indexOf("const zh = isZh ? {"), script.indexOf("} : {};"));
+  assert.match(dictionary, /'detached HEAD':/);
 });

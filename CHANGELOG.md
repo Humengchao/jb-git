@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.41
+
+- fix: make a failed publish fail the release run, after the release exists
+
+## 0.1.40
+
+- fix: publish the GitHub release before the Marketplace can fail the run
+
+## 0.1.39
+
+- fix: stop calling an empty workspace a detached HEAD, and translate the status bar
+
+## 0.1.38
+
+- fix: keep JB Git's own editors out of the source file tab strip
+
+## 0.1.37
+
+- fix: translate the dialogs, menus and editor messages that still shipped in English
+
+## 0.1.36
+
+- feat: restrict the File History details pane to the walked file, by its name at each commit
+- fix: show 24-hour times in the Git tool window
+- feat: exec and break rows in the interactive rebase sequence editor
+
 ## 0.1.35
 
 - feat: let two edits in one hunk belong to different Changelists

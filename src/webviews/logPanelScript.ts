@@ -213,8 +213,24 @@ export const logScript = String.raw`
     'Select a commit to view details': '选择一个提交以查看详情',
     'No commit matches the current filters': '没有提交符合当前筛选条件',
     'Open a folder containing a Git repository.': '请打开包含 Git 仓库的文件夹。',
+    "Update '{0}'": "更新 '{0}'",
+    'Push…': '推送…', '(no subject)': '(无提交主题)',
+    'detached HEAD': '游离 HEAD',
+    "New Branch from '{0}'…": "从 '{0}' 新建分支…",
+    "Push '{0}'…": "推送 '{0}'…",
+    "New Tag at '{0}'…": "在 '{0}' 上新建标签…",
+    "New Worktree from '{0}'…": "从 '{0}' 新建工作树…",
+    'Pull into {0} using Merge': '以 Merge 方式拉取到 {0}',
+    'Pull into {0} using Rebase': '以 Rebase 方式拉取到 {0}',
+    'Merge {0} into {1}': '把 {0} 合并到 {1}',
+    'Rebase {0} onto {1}': '把 {0} 变基到 {1}',
+    'Checkout {0} and Rebase onto {1}': '检出 {0} 并变基到 {1}',
   } : {};
   const t = value => typeof value === 'string' ? (zh[value] || value) : value;
+  // The same contract as the host's vscode.l10n.t: translate the pattern, then
+  // fill its {0}/{1} slots. Concatenating translated fragments instead would
+  // freeze English word order, which is why these labels stayed English.
+  const format = (pattern, ...values) => t(pattern).replace(/\{(\d)\}/g, (whole, index) => values[index] !== undefined ? values[index] : whole);
   const post = (type, extra = {}) => vscode.postMessage({ type, root: state.selectedRoot, ...extra });
   const nextRequestId = () => { requestSequence += 1; return requestSequence; };
   const requestHunks = (path, key) => {
@@ -574,11 +590,11 @@ export const logScript = String.raw`
 
   function changesToolbar() {
     const bar = node('div', 'changes-toolbar');
-    bar.append(
-      repositorySelect(),
-      button(state.branch || 'detached HEAD', 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
-      button('Refresh', 'Refresh', () => post('refresh'), 'icon-button'),
-    );
+    bar.append(repositorySelect());
+    // No repository means no HEAD at all: claiming a detached one told a user
+    // who had merely opened an ordinary folder that their history was adrift.
+    if (state.branch) bar.append(button(state.branch, 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'));
+    bar.append(button('Refresh', 'Refresh', () => post('refresh'), 'icon-button'));
     if (activeToolTab === 'changes') {
       bar.append(
         button('+ Changelist', 'New Changelist', () => post('createChangelist'), 'action'),
@@ -1142,7 +1158,9 @@ export const logScript = String.raw`
     bar.append(
       selectShell(repositories),
       button('Refresh', 'Refresh repository', () => post('refresh'), 'icon-button'),
-      button(state.branch || 'detached HEAD', 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'),
+    );
+    if (state.branch) bar.append(button(state.branch, 'Branches', () => post('runCommand', { command: 'jbGit.branchesPopup' }), 'icon-button'));
+    bar.append(
       node('span', 'spacer'),
       button('More…', 'More Git actions', () => post('runCommand', { command: 'jbGit.operationsPopup' }), 'icon-button'),
     );
@@ -1298,35 +1316,35 @@ export const logScript = String.raw`
     const act = action => () => post('contextAction', { action, ref: branch.name, kind: branch.kind });
     const items = [
       { icon: '✓', label: 'Checkout', disabled: isCurrent, run: () => post('checkout', { name: branch.name, kind: branch.kind }) },
-      { icon: '+', label: "New Branch from '" + branch.name + "'…", run: act('newBranchFromRef') },
+      { icon: '+', label: format("New Branch from '{0}'…", branch.name), run: act('newBranchFromRef') },
       { separator: true },
     ];
-    if (kind === 'local') items.push({ icon: '↑', label: isCurrent ? 'Push…' : "Push '" + branch.name + "'…", run: act('pushRef') });
+    if (kind === 'local') items.push({ icon: '↑', label: isCurrent ? t('Push…') : format("Push '{0}'…", branch.name), run: act('pushRef') });
     // IDEA's per-branch Update: fast-forward it from its upstream without
     // checking it out; on the current branch that is a pull.
     if (kind === 'local' && branch.upstream && !branch.upstreamGone) {
-      items.push({ icon: '⟳', label: isCurrent ? 'Update Project…' : "Update '" + branch.name + "'", run: act('updateRef') });
+      items.push({ icon: '⟳', label: isCurrent ? t('Update Project…') : format("Update '{0}'", branch.name), run: act('updateRef') });
     }
     if (kind !== 'tag') {
       items.push({ icon: isFavoriteBranch(branch) ? '★' : '☆', label: isFavoriteBranch(branch) ? 'Remove from Favorites' : 'Add to Favorites', run: () => post('toggleFavoriteBranch', { name: branch.name, kind: branch.kind }) });
     }
     if (kind === 'remote') items.push(
       { icon: '↓', label: 'Fetch', run: act('fetchRef') },
-      { icon: '⇓', label: 'Pull into ' + into + ' using Merge', disabled: !current, run: act('pullRefMerge') },
-      { icon: '⇓', label: 'Pull into ' + into + ' using Rebase', disabled: !current, run: act('pullRefRebase') },
+      { icon: '⇓', label: format('Pull into {0} using Merge', into), disabled: !current, run: act('pullRefMerge') },
+      { icon: '⇓', label: format('Pull into {0} using Rebase', into), disabled: !current, run: act('pullRefRebase') },
     );
     // Merging or rebasing the checked-out branch onto itself is meaningless, so leave it out
     // entirely instead of showing a disabled self-referencing entry.
     if (!isCurrent && kind !== 'tag') items.push(
-      { icon: '⇤', label: 'Merge ' + branch.name + ' into ' + into, disabled: !current, run: act('mergeRef') },
-      { icon: '⇧', label: 'Rebase ' + into + ' onto ' + branch.name, disabled: !current, run: act('rebaseOntoRef') },
-      { icon: '⇪', label: 'Checkout ' + branch.name + ' and Rebase onto ' + into, disabled: !current, run: act('checkoutAndRebase') },
+      { icon: '⇤', label: format('Merge {0} into {1}', branch.name, into), disabled: !current, run: act('mergeRef') },
+      { icon: '⇧', label: format('Rebase {0} onto {1}', into, branch.name), disabled: !current, run: act('rebaseOntoRef') },
+      { icon: '⇪', label: format('Checkout {0} and Rebase onto {1}', branch.name, into), disabled: !current, run: act('checkoutAndRebase') },
     );
     items.push(
       { separator: true },
       { icon: '↔', label: 'Show Diff with Working Tree', run: act('showRefDiff') },
-      { icon: '◇', label: "New Tag at '" + branch.name + "'…", run: act('tagFromRef') },
-      { icon: '▣', label: "New Worktree from '" + branch.name + "'…", run: act('createWorktreeFromRef') },
+      { icon: '◇', label: format("New Tag at '{0}'…", branch.name), run: act('tagFromRef') },
+      { icon: '▣', label: format("New Worktree from '{0}'…", branch.name), run: act('createWorktreeFromRef') },
       { icon: '⧉', label: kind === 'tag' ? 'Copy Tag Name' : 'Copy Branch Name', run: act('copyBranch') },
       { separator: true },
     );

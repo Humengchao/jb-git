@@ -34,6 +34,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 ### IDEA 风格工作区
 
 - Git 以原生底部 Panel 工具窗口显示，不占用活动栏侧边栏，也不会打开编辑器标签页。
+- 合并编辑器、交互式变基序列编辑器和分支比较对应 IDEA 的对话框，因此默认在代码旁边单独成组打开，不会挤在源文件标签中间；它们彼此共用同一组，不会每开一个就多劈一列。想放回源文件标签里，把 `jbGit.toolEditorLocation` 设为 `active`。
 - 同一个底部 Git 工具窗口包含 `Log`、`Console`、`Local Changes` 和 `Shelf` 四个页签。
 - Local Changes 包含 Changelist、文件勾选、提交消息、Amend、Sign-off、跳过 Hooks、Commit 和 Commit and Push。
 - Log 使用横向三栏布局：左侧 Branches、中间提交图和提交表、右侧 Changed Files 与 Commit Details；三栏宽度都可以拖动调节并自动记忆。
@@ -60,7 +61,7 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 - 处理完一处更改后会自动滚动到下一处待解决的位置；语法高亮只渲染可视区域，因此几千行的大文件里编辑中间结果也不卡。
 - 每一次按钮决定或一段连续输入都是一个撤销步骤（Ctrl/Cmd+Z 撤销，加 Shift 重做）；对方纯新增的冲突（我方一侧为空）会画成一条删除标记线而不是不可见；鼠标悬停在分隔条上滚轮仍然有效。
 - 所有更改处理完成后点击 `Apply`，插件会写入无标记的中间结果并自动暂存；`Abort` 不会修改文件。
-- 全部命令的原生对话框、通知、QuickPick 与进度提示均已本地化（`l10n/bundle.l10n.zh-cn.json`，400+ 条）。尚余：输入校验提示与变基计划校验消息（纯模块，不依赖 VS Code API），以及日志面板分支右键菜单中拼接分支名的少数菜单项。
+- 全部命令的原生对话框、通知、QuickPick 与进度提示均已本地化（`l10n/bundle.l10n.zh-cn.json`，400+ 条）。分支右键菜单不再用字符串拼接组装标签，而是通过 `format('… {0} …', 值)` 填槽，因此译文可以自由调整语序。另有三条守卫测试堵住原有规则看不见的漏洞：通知不得把句子直接交给 `showMessage`（此前有 17 处，其中一些句子命令面板早已翻译）、Webview 字典必须覆盖它自己 `t()` 用到的每个字符串、分支菜单标签必须走 `format()`。尚余：输入校验提示与变基计划校验消息（纯模块，不依赖 VS Code API；其文本会插入对象 ID 与动作名，按整串匹配的翻译无法覆盖）。
 - 二进制冲突提供整文件 ours/theirs 安全回退；二进制文件的普通 diff 会直接交给编辑器渲染，图片显示为图片对比，其他格式显示编辑器自带的提示，而不是弹一个通知。
 
 ### 提交与 Changelist
@@ -130,13 +131,13 @@ JB Git 是一款面向 Visual Studio Code 的 Git 扩展，目标是提供接近
 1. 在 VS Code 中打开扩展视图。
 2. 点击扩展视图右上角的 `...` 菜单。
 3. 选择“从 VSIX 安装…”。
-4. 选择项目生成的 `jb-git-0.1.35.vsix`。
+4. 选择项目生成的 `jb-git-0.1.41.vsix`。
 5. 根据提示重新加载 VS Code。
 
 也可以通过命令行安装：
 
 ```bash
-code --install-extension jb-git-0.1.35.vsix
+code --install-extension jb-git-0.1.41.vsix
 ```
 
 ### 版本号规则
