@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.45
+
+- fix: replace crowded tool tabs with a view menu
+
 ## 0.1.44
 
 - perf: streamline blame annotation layout
