@@ -97,38 +97,36 @@ export function layoutBlameAnnotations(
   entries: readonly GitBlameEntry[],
   options: BlameAnnotationOptions,
 ): BlameAnnotationLine[] {
-  const committed = entries.filter((entry) => !entry.uncommitted && entry.authorTimestamp > 0);
-  // One folded pass instead of `Math.min(...committed.map(...))`: spreading an
-  // array into arguments passes the V8 argument-count limit (~125k) and a file
-  // that reaches it crashes the whole annotation with RangeError, so the two
-  // bounds are gathered here where the arrays are never built either.
   let oldest = Number.POSITIVE_INFINITY;
   let newest = Number.NEGATIVE_INFINITY;
-  for (const entry of committed) {
-    if (entry.authorTimestamp < oldest) oldest = entry.authorTimestamp;
-    if (entry.authorTimestamp > newest) newest = entry.authorTimestamp;
-  }
-  if (!committed.length) {
+  let authorWidth = 0;
+  let dateWidth = 0;
+  let hashWidth = 0;
+  const fields = entries.map((entry) => {
+    if (!entry.uncommitted && entry.authorTimestamp > 0) {
+      if (entry.authorTimestamp < oldest) oldest = entry.authorTimestamp;
+      if (entry.authorTimestamp > newest) newest = entry.authorTimestamp;
+    }
+    // IDEA leaves the annotation of a line that is in no commit blank rather
+    // than inventing an author for it; the hover still explains it.
+    const field = entry.uncommitted
+      ? { author: "", date: "", hash: "" }
+      : {
+      author: options.showAuthor ? truncate(entry.author, options.maxAuthorWidth) : "",
+      date: options.showDate ? (options.dateFormat === "relative" ? formatRelativeDate(entry, options.now) : formatShortDate(entry)) : "",
+      hash: options.showRevision ? abbreviateHash(entry.hash) : "",
+      };
+    if (field.author.length > authorWidth) authorWidth = field.author.length;
+    if (field.date.length > dateWidth) dateWidth = field.date.length;
+    if (field.hash.length > hashWidth) hashWidth = field.hash.length;
+    return field;
+  });
+  // A file with no committed lines has no meaningful age range.
+  if (oldest === Number.POSITIVE_INFINITY) {
     oldest = 0;
     newest = 0;
   }
   const span = newest - oldest;
-
-  const fields = entries.map((entry) => {
-    // IDEA leaves the annotation of a line that is in no commit blank rather
-    // than inventing an author for it; the hover still explains it.
-    if (entry.uncommitted) return { author: "", date: "", hash: "" };
-    return {
-      author: options.showAuthor ? truncate(entry.author, options.maxAuthorWidth) : "",
-      date: options.showDate ? (options.dateFormat === "relative" ? formatRelativeDate(entry, options.now) : formatShortDate(entry)) : "",
-      hash: options.showRevision ? abbreviateHash(entry.hash) : "",
-    };
-  });
-
-  const width = (key: "author" | "date" | "hash"): number => fields.reduce((widest, field) => Math.max(widest, field[key].length), 0);
-  const authorWidth = width("author");
-  const dateWidth = width("date");
-  const hashWidth = width("hash");
 
   return entries.map((entry, index) => {
     const field = fields[index];

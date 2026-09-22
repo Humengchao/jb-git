@@ -8,6 +8,7 @@ import { parsePorcelainBlame } from "../dist/git/blame.js";
 import {
   abbreviateHash,
   authorLocalTime,
+  DEFAULT_BLAME_ANNOTATION_OPTIONS,
   formatRelativeDate,
   formatShortDate,
   layoutBlameAnnotations,
@@ -226,6 +227,24 @@ test("gives every line the same heat when the file has one commit", () => {
   ], { showAuthor: true, showDate: false, showRevision: false, dateFormat: "short", now: 0, maxAuthorWidth: 20 });
   assert.deepEqual(lines.map((line) => line.heat), [1, 1]);
   assert.deepEqual(lines.map((line) => line.startsRun), [true, false]);
+});
+
+test("lays out very large blame results without argument-spread failures", () => {
+  const entries = Array.from({ length: 150_000 }, (_, index) => ({
+    hash: index % 2 ? HASH_A : HASH_B,
+    author: "Large File Author",
+    authorTimestamp: 1_700_000_000 + (index % 2),
+    authorTimezone: "+0000",
+    finalLine: index + 1,
+    uncommitted: false,
+  }));
+  const lines = layoutBlameAnnotations(entries, {
+    ...DEFAULT_BLAME_ANNOTATION_OPTIONS,
+    now: 1_800_000_000_000,
+  });
+  assert.equal(lines.length, entries.length);
+  assert.equal(lines[0].line, 0);
+  assert.equal(lines.at(-1).line, entries.length - 1);
 });
 
 test("abbreviates an object ID to the eight characters IDEA shows", () => {
