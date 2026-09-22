@@ -17,12 +17,14 @@ const CHECKOUT_SUBJECT = /^checkout: moving from (.+) to (.+)$/;
  */
 export function recentBranchesFromReflog(subjects: readonly string[], existing: ReadonlySet<string>, current?: string | null, limit = 5): string[] {
   const recent: string[] = [];
+  const seen = new Set<string>();
   for (const subject of subjects) {
     const match = CHECKOUT_SUBJECT.exec(subject.trim());
     if (!match) continue;
     for (const name of [match[2], match[1]]) {
-      if (name === current || !existing.has(name) || recent.includes(name)) continue;
+      if (name === current || !existing.has(name) || seen.has(name)) continue;
       recent.push(name);
+      seen.add(name);
       if (recent.length >= limit) return recent;
     }
   }
@@ -68,7 +70,7 @@ export class FavoriteBranches {
       const next = favorite ? [...current, branch] : current.filter((name) => name !== branch);
       if (next.length) all[root] = next;
       else delete all[root];
-      return favorite;
+      return { result: favorite, changed: true };
     });
     if (changed) this.onChange?.();
     return result;
@@ -79,10 +81,10 @@ export class FavoriteBranches {
     const { changed } = await this.enqueue((all) => {
       const current = all[root] ?? [];
       const kept = current.filter((name) => existing.has(name));
-      if (kept.length === current.length) return undefined;
+      if (kept.length === current.length) return { result: undefined, changed: false };
       if (kept.length) all[root] = kept;
       else delete all[root];
-      return undefined;
+      return { result: undefined, changed: true };
     });
     if (changed) this.onChange?.();
   }
@@ -99,12 +101,10 @@ export class FavoriteBranches {
     return result;
   }
 
-  private enqueue<T>(mutate: (all: FavoriteMap) => T): Promise<{ result: T; changed: boolean }> {
+  private enqueue<T>(mutate: (all: FavoriteMap) => { result: T; changed: boolean }): Promise<{ result: T; changed: boolean }> {
     const run = this.writeQueue.catch(() => undefined).then(async () => {
       const all = this.read();
-      const before = JSON.stringify(all);
-      const result = mutate(all);
-      const changed = JSON.stringify(all) !== before;
+      const { result, changed } = mutate(all);
       if (changed) {
         await this.state.update(FAVORITES_KEY, all);
       }

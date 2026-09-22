@@ -70,6 +70,19 @@ test("favorites are per repository, toggle, survive a malformed store and prune 
   assert.deepEqual(new FavoriteBranches(memento({ "jbGit.favoriteBranches": "garbage" })).list("/repo"), []);
 });
 
+test("favorite writes report only real mutations without serializing the whole store", async () => {
+  const updates = [];
+  const store = new FavoriteBranches({
+    get: () => ({ "/repo": ["local:main"] }),
+    update: async (...args) => { updates.push(args); },
+  });
+  await store.prune("/repo", new Set(["local:main"]));
+  assert.equal(updates.length, 0, "pruning an unchanged list must not write state");
+  await store.prune("/repo", new Set());
+  assert.equal(updates.length, 1, "pruning a deleted branch must write state once");
+  assert.deepEqual(updates[0][1], Object.create(null));
+});
+
 test("reads HEAD's reflog and fast-forwards a branch that is not checked out from its upstream", async () => {
   const root = repository();
   const remote = mkdtempSync(join(tmpdir(), "jb-git-branches-remote-"));
