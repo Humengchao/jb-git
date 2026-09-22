@@ -401,10 +401,10 @@ test("remembers scroll positions and focusable identities across renders", () =>
   assert.match(script, /focusKey: element\.dataset\?\.focusKey \|\| ''/);
   assert.match(script, /!descriptor\.branchKey && !descriptor\.focusKey\) return undefined/);
   assert.match(script, /data-focus-key="' \+ CSS\.escape\(descriptor\.focusKey\)/);
-  assert.match(script, /tab\.dataset\.focusKey = 'tab:' \+ id/);
   assert.match(script, /row\.dataset\.focusKey = 'change:' \+ change\.path/);
-  // Clicking a tab re-renders the header, so the old element is detached before focus() runs.
-  assert.match(script, /document\.querySelector\('\[data-tab-id="' \+ target \+ '"\]'\)\?\.focus\(\)/);
+  // View switching happens from a detached context menu, so focus restoration
+  // remains generic instead of depending on a row of tab buttons.
+  assert.match(script, /closeContextMenu\(true\); item\.run\(\)/);
 });
 
 test("toggles filter popups and never leaves an orphaned menu", () => {
@@ -628,6 +628,18 @@ test("a worktree save refreshes the status without re-reading the branch list", 
   assert.match(extension, /refsStale: Boolean\(this\.roots\.get\(rootPath\)\?\.refsStale\) \|\| refsStale/);
   const manager = readSource("../src/repositoryManager.ts", import.meta.url);
   assert.match(manager, /reuseBranches \? Promise\.resolve\(previous\.branches\) : repository\.branches\(\)/);
+});
+
+test("removes the crowded view tab strip and keeps views behind one compact menu", () => {
+  assert.ok(scriptMatch);
+  assert.doesNotMatch(scriptMatch[1], /tool-tabs|tool-tab/);
+  assert.match(scriptMatch[1], /const viewMenuItems = \(\) => \[/);
+  assert.ok(scriptMatch[1].includes("const viewMenuButton = () => button('View', 'Switch Git view'"));
+  assert.equal(scriptMatch[1].match(/viewMenuButton\(\)/g)?.length, 3, "log, console and changes toolbars each expose one view menu");
+  assert.match(scriptMatch[1], /activeToolTab = \['log', 'console', 'changes', 'shelf'\]\.includes\(uiState\.activeToolTab\) \? uiState\.activeToolTab : 'log'/);
+  assert.match(scriptMatch[1], /'View': '视图'.*'Switch Git view': '切换 Git 视图'/);
+  assert.ok(styles.includes('.root { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }'));
+  assert.doesNotMatch(styles, /\.tool-tabs|\.tool-tab/);
 });
 
 test("every string the Webview hands its translator has a Chinese entry", () => {

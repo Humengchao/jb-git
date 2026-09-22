@@ -59,7 +59,7 @@ export const logScript = String.raw`
     expandedChangeHunks = new Set(uiState.expandedChangeHunks || []);
     search = uiState.search || '';
     branchFilter = uiState.branchFilter || '';
-    activeToolTab = uiState.activeToolTab || 'log';
+    activeToolTab = ['log', 'console', 'changes', 'shelf'].includes(uiState.activeToolTab) ? uiState.activeToolTab : 'log';
     selectedBranchKeys = new Set(uiState.selectedBranchKeys || []);
     authorFilter = uiState.authorFilter || '';
     knownAuthors = new Set(uiState.knownAuthors || []);
@@ -134,7 +134,7 @@ export const logScript = String.raw`
   }
   const isZh = document.documentElement.lang.toLowerCase().startsWith('zh');
   const zh = isZh ? {
-    'Log': '日志', 'Git Log': 'Git 日志', 'Console': '控制台', 'Git Console': 'Git 控制台',
+    'Log': '日志', 'Git Log': 'Git 日志', 'Console': '控制台', 'Git Console': 'Git 控制台', 'View': '视图', 'Switch Git view': '切换 Git 视图',
     'Local Changes': '本地更改', 'Shelf': '搁置', 'Shelved Changes': '已搁置的更改',
     'User operations': '用户操作', 'Errors only': '仅错误', 'All commands': '全部命令',
     'Pause scroll': '暂停滚动', 'Resume scroll': '继续滚动', 'Clear': '清空',
@@ -251,6 +251,13 @@ export const logScript = String.raw`
     closeContextMenu(); activeToolTab = tab; saveUiState({ activeToolTab: tab });
     post('setActiveTab', { tab }); render();
   };
+  const viewMenuItems = () => [
+    { icon: '●', label: 'Git Log', run: () => selectToolTab('log') },
+    { icon: '◫', label: 'Git Console', run: () => selectToolTab('console') },
+    { icon: '✓', label: 'Local Changes', run: () => selectToolTab('changes') },
+    { icon: '▣', label: 'Shelf', run: () => selectToolTab('shelf') },
+  ];
+  const viewMenuButton = () => button('View', 'Switch Git view', event => showMenuForElement(event.currentTarget, viewMenuItems()), 'icon-button');
   const keyboardActivate = (element, handler) => element.addEventListener('keydown', event => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault(); handler();
@@ -525,30 +532,6 @@ export const logScript = String.raw`
   function renderView() {
     const saved = captureScroll();
     app.replaceChildren(); const root = node('div', 'root');
-    const tabs = node('div', 'tool-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Git tool window');
-    const logTab = button('Log', 'Git Log', () => selectToolTab('log'), 'tool-tab' + (activeToolTab === 'log' ? ' active' : ''));
-    const consoleTab = button('Console', 'Git Console', () => selectToolTab('console'), 'tool-tab' + (activeToolTab === 'console' ? ' active' : ''));
-    const changesTab = button('Local Changes', 'Local Changes', () => selectToolTab('changes'), 'tool-tab' + (activeToolTab === 'changes' ? ' active' : ''));
-    changesTab.append(node('span', 'count', String(state.totalChanges || 0)));
-    const shelfTab = button('Shelf', 'Shelved Changes', () => selectToolTab('shelf'), 'tool-tab' + (activeToolTab === 'shelf' ? ' active' : ''));
-    shelfTab.append(node('span', 'count', String((state.shelves || []).length)));
-    for (const [tab, active, id] of [[logTab, activeToolTab === 'log', 'log'], [consoleTab, activeToolTab === 'console', 'console'], [changesTab, activeToolTab === 'changes', 'changes'], [shelfTab, activeToolTab === 'shelf', 'shelf']]) {
-      tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
-      tab.dataset.tabId = id; tab.dataset.focusKey = 'tab:' + id;
-    }
-    tabs.append(logTab, consoleTab, changesTab, shelfTab);
-    tabs.addEventListener('keydown', event => {
-      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
-      const items = [logTab, consoleTab, changesTab, shelfTab]; let index = items.indexOf(document.activeElement);
-      if (event.key === 'Home') index = 0; else if (event.key === 'End') index = items.length - 1;
-      else index = (index + (event.key === 'ArrowRight' ? 1 : items.length - 1)) % items.length;
-      event.preventDefault();
-      const target = items[index].dataset.tabId;
-      items[index].click();
-      // The click re-renders the header, so the old element is already detached.
-      requestAnimationFrame(() => document.querySelector('[data-tab-id="' + target + '"]')?.focus());
-    });
-    root.append(tabs);
     if (activeToolTab === 'console') {
       const consoleBar = node('div', 'console-toolbar');
       const filter = node('select'); filter.setAttribute('aria-label', 'Console filter');
@@ -559,7 +542,7 @@ export const logScript = String.raw`
       const pause = button(consolePaused ? 'Resume scroll' : 'Pause scroll', consolePaused ? 'Resume automatic scrolling' : 'Pause automatic scrolling', () => {
         consolePaused = !consolePaused; saveUiState({ consolePaused }); render();
       }, 'action');
-      consoleBar.append(node('span', '', 'Git Console'), selectShell(filter), node('span', 'spacer'), pause, button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
+      consoleBar.append(viewMenuButton(), node('span', '', 'Git Console'), selectShell(filter), node('span', 'spacer'), pause, button('Clear', 'Clear Git Console', () => post('clearConsole'), 'action'));
       root.append(consoleBar, consolePanel()); finishRender(root, saved); return;
     }
     if (activeToolTab === 'changes') {
@@ -590,6 +573,7 @@ export const logScript = String.raw`
 
   function changesToolbar() {
     const bar = node('div', 'changes-toolbar');
+    bar.append(viewMenuButton());
     bar.append(repositorySelect());
     // No repository means no HEAD at all: claiming a detached one told a user
     // who had merely opened an ordinary folder that their history was adrift.
@@ -1156,6 +1140,7 @@ export const logScript = String.raw`
     for (const repo of state.repositories || []) { const option = node('option', '', repo.name); option.value = repo.root; option.selected = repo.root === state.selectedRoot; repositories.append(option); }
     repositories.addEventListener('change', () => { post('selectRepository', { root: repositories.value }); repositories.blur(); });
     bar.append(
+      viewMenuButton(),
       selectShell(repositories),
       button('Refresh', 'Refresh repository', () => post('refresh'), 'icon-button'),
     );

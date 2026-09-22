@@ -14,10 +14,7 @@ export const logStyles = String.raw`
   button, select, input, textarea { color: inherit; font: inherit; }
   button { border: 0; background: transparent; cursor: pointer; }
   button:focus-visible, select:focus-visible, input:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-  .root { height: 100%; display: grid; grid-template-rows: 34px 38px minmax(0, 1fr); }
-  .tool-tabs { display: flex; align-items: end; gap: 2px; padding: 0 8px; overflow-x: auto; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background); }
-  .tool-tab { height: 33px; padding: 0 12px; border-bottom: 2px solid transparent; color: var(--vscode-descriptionForeground); }
-  .tool-tab.active { color: var(--vscode-foreground); border-bottom-color: var(--vscode-focusBorder); }
+  .root { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); }
   .toolbar { display: flex; align-items: center; gap: 5px; padding: 5px 7px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-editorGroupHeader-tabsBackground); }
   .toolbar select, .toolbar input { height: 26px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
   .toolbar select { max-width: 220px; padding: 2px 5px; }
