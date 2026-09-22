@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.44
+
+- perf: streamline blame annotation layout
+
 ## 0.1.43
 
 - perf: streamline branch favorites updates
