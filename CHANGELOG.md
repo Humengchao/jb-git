@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.43
+
+- perf: streamline branch favorites updates
+
 ## 0.1.42
 
 - perf: batch repository refreshes with bounded concurrency and atomic snapshots
